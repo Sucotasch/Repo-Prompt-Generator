@@ -1,0 +1,5 @@
+{
+  "name": "Gemini Prompt Generator",
+  "description": "Generates a system prompt for Gemini CLI or Antigravity based on a GitHub repository.",
+  "requestFramePermissions": []
+}
