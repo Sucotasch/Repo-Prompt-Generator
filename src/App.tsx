@@ -6,6 +6,7 @@ import { generateSystemPrompt } from './services/geminiService';
 export default function App() {
   const [url, setUrl] = useState('');
   const [additionalContext, setAdditionalContext] = useState('');
+  const [analyzeIssues, setAnalyzeIssues] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<string | null>(null);
@@ -26,7 +27,7 @@ export default function App() {
       const repoData = await fetchRepoData(url);
       
       setStatus('Generating system prompt with Gemini...');
-      const generatedPrompt = await generateSystemPrompt(repoData, additionalContext);
+      const generatedPrompt = await generateSystemPrompt(repoData, additionalContext, analyzeIssues);
       
       setPrompt(generatedPrompt);
     } catch (err: any) {
@@ -126,6 +127,20 @@ export default function App() {
               <p className="mt-2 text-xs text-slate-500">
                 Provide any specific goals, future directions, or constraints you want the AI to know about.
               </p>
+            </div>
+
+            <div className="mt-2 flex items-center">
+              <input
+                id="analyzeIssues"
+                type="checkbox"
+                className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                checked={analyzeIssues}
+                onChange={(e) => setAnalyzeIssues(e.target.checked)}
+                disabled={loading}
+              />
+              <label htmlFor="analyzeIssues" className="ml-2 block text-sm text-slate-700 cursor-pointer">
+                Analyze repository for obvious errors, bugs, and outdated dependencies
+              </label>
             </div>
           </form>
           
