@@ -10,6 +10,7 @@ export interface RepoData {
   tree: string[];
   readme: string;
   dependencies: string;
+  sourceFiles?: { path: string; content: string }[];
 }
 
 export async function fetchRepoData(url: string): Promise<RepoData> {

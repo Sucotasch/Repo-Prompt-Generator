@@ -2,16 +2,55 @@ import React, { useState } from 'react';
 import { Github, FileText, Loader2, Copy, Check, Download } from 'lucide-react';
 import { fetchRepoData } from './services/githubService';
 import { generateSystemPrompt } from './services/geminiService';
+import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels } from './services/ollamaService';
 
 export default function App() {
   const [url, setUrl] = useState('');
   const [additionalContext, setAdditionalContext] = useState('');
   const [analyzeIssues, setAnalyzeIssues] = useState(false);
+  const [useOllama, setUseOllama] = useState(false);
+  const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
+  const [ollamaModel, setOllamaModel] = useState('llama3');
+  const [ollamaNumCtx, setOllamaNumCtx] = useState(8192);
+  const [ollamaNumPredict, setOllamaNumPredict] = useState(250);
+  const [ollamaTemperature, setOllamaTemperature] = useState(0.3);
+  const [ollamaConnected, setOllamaConnected] = useState<boolean | null>(null);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [testingOllama, setTestingOllama] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [status, setStatus] = useState('');
+
+  const handleTestOllama = async () => {
+    setTestingOllama(true);
+    const isConnected = await checkOllamaConnection(ollamaUrl);
+    setOllamaConnected(isConnected);
+    if (isConnected) {
+      const models = await fetchOllamaModels(ollamaUrl);
+      setAvailableModels(models);
+      if (models.length > 0 && !models.includes(ollamaModel)) {
+        setOllamaModel(models[0]);
+      }
+    } else {
+      setAvailableModels([]);
+    }
+    setTestingOllama(false);
+  };
+
+  const handleDownloadBat = () => {
+    const batContent = `@echo off\ncolor 0A\necho ==========================================\necho Starting Ollama with CORS enabled...\necho You can now use the Gemini Prompt Generator!\necho ==========================================\nset OLLAMA_ORIGINS="*"\nollama serve\npause`;
+    const blob = new Blob([batContent], { type: 'application/bat' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'start-ollama.bat';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -24,10 +63,36 @@ export default function App() {
 
     try {
       setStatus('Fetching repository data...');
-      const repoData = await fetchRepoData(url);
+      let repoData = await fetchRepoData(url);
+      
+      let usedOllama = false;
+      if (useOllama && ollamaConnected !== false) {
+        setStatus('Summarizing with local Ollama...');
+        usedOllama = true;
+        
+        const summarize = async (text: string) => {
+           return text ? await summarize_with_ollama(text, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaNumPredict, ollamaTemperature) : '';
+        };
+
+        const summarizedSourceFiles = [];
+        if (repoData.sourceFiles) {
+          for (const file of repoData.sourceFiles) {
+            setStatus(`Summarizing ${file.path} with Ollama...`);
+            const summary = await summarize(file.content);
+            summarizedSourceFiles.push({ path: file.path, content: summary });
+          }
+        }
+
+        repoData = {
+          ...repoData,
+          readme: await summarize(repoData.readme),
+          dependencies: await summarize(repoData.dependencies),
+          sourceFiles: summarizedSourceFiles
+        };
+      }
       
       setStatus('Generating system prompt with Gemini...');
-      const generatedPrompt = await generateSystemPrompt(repoData, additionalContext, analyzeIssues);
+      const generatedPrompt = await generateSystemPrompt(repoData, additionalContext, analyzeIssues, usedOllama);
       
       setPrompt(generatedPrompt);
     } catch (err: any) {
@@ -141,6 +206,131 @@ export default function App() {
               <label htmlFor="analyzeIssues" className="ml-2 block text-sm text-slate-700 cursor-pointer">
                 Analyze repository for obvious errors, bugs, and outdated dependencies
               </label>
+            </div>
+
+            {/* Ollama Settings */}
+            <div className="mt-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
+              <div className="flex items-center mb-4">
+                <input
+                  id="useOllama"
+                  type="checkbox"
+                  className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer disabled:opacity-50"
+                  checked={useOllama}
+                  onChange={(e) => setUseOllama(e.target.checked)}
+                  disabled={loading}
+                />
+                <label htmlFor="useOllama" className="ml-2 block text-sm font-medium text-slate-700 cursor-pointer">
+                  Use Local Pre-summarization (Ollama Summary)
+                </label>
+              </div>
+
+              {useOllama && (
+                <div className="space-y-4 pl-6 border-l-2 border-indigo-100 ml-2">
+                  <div className="flex flex-col sm:flex-row gap-4">
+                    <div className="flex-1">
+                      <label className="block text-xs font-medium text-slate-500 mb-1">Ollama URL</label>
+                      <input
+                        type="text"
+                        value={ollamaUrl}
+                        onChange={(e) => { setOllamaUrl(e.target.value); setOllamaConnected(null); }}
+                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                        disabled={loading}
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <label className="block text-xs font-medium text-slate-500 mb-1">Model Name</label>
+                      {availableModels.length > 0 ? (
+                        <select
+                          value={ollamaModel}
+                          onChange={(e) => setOllamaModel(e.target.value)}
+                          className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
+                          disabled={loading}
+                        >
+                          {availableModels.map(m => (
+                            <option key={m} value={m}>{m}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          value={ollamaModel}
+                          onChange={(e) => setOllamaModel(e.target.value)}
+                          placeholder="Test connection to load models"
+                          className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                          disabled={loading}
+                        />
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row gap-4">
+                    <div className="flex-1">
+                      <label className="block text-xs font-medium text-slate-500 mb-1">Context Window (num_ctx)</label>
+                      <input
+                        type="number"
+                        value={ollamaNumCtx}
+                        onChange={(e) => setOllamaNumCtx(Number(e.target.value))}
+                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                        disabled={loading}
+                        min={1024}
+                        step={1024}
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <label className="block text-xs font-medium text-slate-500 mb-1">Max Tokens (num_predict)</label>
+                      <input
+                        type="number"
+                        value={ollamaNumPredict}
+                        onChange={(e) => setOllamaNumPredict(Number(e.target.value))}
+                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                        disabled={loading}
+                        min={50}
+                        step={50}
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <label className="block text-xs font-medium text-slate-500 mb-1">Temperature ({ollamaTemperature})</label>
+                      <input
+                        type="range"
+                        value={ollamaTemperature}
+                        onChange={(e) => setOllamaTemperature(Number(e.target.value))}
+                        className="block w-full mt-2"
+                        disabled={loading}
+                        min={0}
+                        max={1}
+                        step={0.1}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={handleTestOllama}
+                      disabled={testingOllama || loading}
+                      className="text-xs px-3 py-1.5 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
+                    >
+                      {testingOllama ? 'Testing...' : 'Test Connection'}
+                    </button>
+                    {ollamaConnected === true && <span className="text-xs text-emerald-600 flex items-center"><Check className="w-3 h-3 mr-1"/> Connected</span>}
+                    {ollamaConnected === false && <span className="text-xs text-red-600">Connection failed (Check CORS)</span>}
+                  </div>
+                  <div className="text-xs text-slate-500 bg-slate-100 p-3 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <p className="font-medium text-slate-700 mb-1">How to enable CORS for Ollama:</p>
+                      <p>Ollama blocks cross-origin requests by default. To use it here, you must start it with <code className="bg-slate-200 px-1 py-0.5 rounded">OLLAMA_ORIGINS="*"</code></p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleDownloadBat}
+                      className="inline-flex items-center px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors whitespace-nowrap"
+                    >
+                      <Download className="w-3 h-3 mr-1.5" />
+                      Download Windows .bat
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </form>
           

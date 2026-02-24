@@ -46,6 +46,8 @@ async function startServer() {
       const defaultBranch = infoData.default_branch;
       const description = infoData.description || 'No description provided.';
 
+      const HARD_IGNORE = ['venv', '.venv', 'node_modules', '.git', '__pycache__', 'dist', 'build'];
+
       // Fetch tree
       const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`);
       let treePaths: string[] = [];
@@ -53,7 +55,8 @@ async function startServer() {
         const treeData = await treeRes.json();
         treePaths = treeData.tree
           .filter((item: any) => item.type === 'blob')
-          .map((item: any) => item.path);
+          .map((item: any) => item.path)
+          .filter((path: string) => !HARD_IGNORE.some(ignore => path.includes(`/${ignore}/`) || path.startsWith(`${ignore}/`)));
       }
 
       // Fetch README
@@ -86,11 +89,32 @@ async function startServer() {
         }
       }
 
+      // Fetch top source files
+      const sourceFiles: {path: string, content: string}[] = [];
+      const sourceExtensions = ['.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.java', '.cpp', '.c', '.h', '.cs', '.md'];
+      const filesToFetch = treePaths
+        .filter(p => sourceExtensions.some(ext => p.endsWith(ext)))
+        .filter(p => !depFiles.includes(p) && p.toLowerCase() !== 'readme.md')
+        .slice(0, 5); // Limit to 5 files to avoid GitHub API rate limits
+
+      for (const file of filesToFetch) {
+        const fileRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${file}`);
+        if (fileRes.ok) {
+          const fileData = await fileRes.json();
+          try {
+            sourceFiles.push({ path: file, content: decodeURIComponent(escape(atob(fileData.content))) });
+          } catch (e) {
+            sourceFiles.push({ path: file, content: atob(fileData.content) });
+          }
+        }
+      }
+
       res.json({
         info: { owner, repo, defaultBranch, description },
         tree: treePaths,
         readme,
-        dependencies
+        dependencies,
+        sourceFiles
       });
     } catch (error: any) {
       console.error("Error fetching repo data:", error);
