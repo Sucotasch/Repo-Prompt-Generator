@@ -13,6 +13,8 @@ Issue & Debt Detection: Опциональный поиск багов, архи
 Custom Directions: Возможность задать вектор анализа (например, «подготовка к миграции» или «поиск утечек памяти»).
 Smart Formatting: Генерация готового gemini.md с четкой структурой: Stack, Patterns, Guidelines и Technical Debt.
 
+![screen-1](https://github.com/user-attachments/assets/8cf45db8-a0de-44b9-b16f-6b306f7944b0)
+
 🛠 Технологический стек
 Frontend: React + TypeScript + Vite
 Styling: Tailwind CSS + Lucide Icons
