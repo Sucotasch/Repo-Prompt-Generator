@@ -16,12 +16,23 @@ export interface RepoData {
 
 export async function fetchRepoData(url: string): Promise<RepoData> {
   try {
+    // Parse URL on the client to send only owner and repo
+    const githubRegex = /^https:\/\/github\.com\/([a-zA-Z0-9-._]+)\/([a-zA-Z0-9-._]+)/;
+    const match = url.match(githubRegex);
+    
+    if (!match) {
+      throw new Error("Invalid GitHub URL format. Please provide a full URL like https://github.com/owner/repo");
+    }
+    
+    const owner = match[1];
+    const repo = match[2].replace(/\.git$/, '');
+
     const response = await fetch('/api/repo', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ owner, repo }),
     });
 
     const data = await response.json();

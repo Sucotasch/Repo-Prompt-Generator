@@ -12,23 +12,17 @@ async function startServer() {
   // API route to fetch GitHub data
   app.post("/api/repo", async (req, res) => {
     try {
-      const { url } = req.body;
+      const { owner, repo } = req.body;
       
-      const githubRegex = /^https:\/\/github\.com\/[a-zA-Z0-9-._]+\/[a-zA-Z0-9-._]+$/;
-      if (!githubRegex.test(url)) {
-        return res.status(400).json({ error: "Invalid GitHub URL format. Please provide a full URL like https://github.com/owner/repo" });
+      if (!owner || !repo || typeof owner !== 'string' || typeof repo !== 'string') {
+        return res.status(400).json({ error: "Invalid request. Owner and repo are required." });
       }
 
-      let urlObj;
-      try {
-        urlObj = new URL(url);
-      } catch (e) {
-        return res.status(400).json({ error: 'Invalid URL format.' });
+      // Strict validation to prevent SSRF and injection
+      const nameRegex = /^[a-zA-Z0-9-._]+$/;
+      if (!nameRegex.test(owner) || !nameRegex.test(repo)) {
+        return res.status(400).json({ error: "Invalid owner or repo format." });
       }
-
-      const parts = urlObj.pathname.split('/').filter(Boolean);
-      const owner = parts[0];
-      const repo = parts[1].replace(/\.git$/, '');
 
       // Fetch basic info
       const infoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`);
@@ -46,6 +40,7 @@ async function startServer() {
       const description = infoData.description || 'No description provided.';
 
       const HARD_IGNORE = ['venv', '.venv', 'node_modules', '.git', '__pycache__', 'dist', 'build'];
+      const SECRET_IGNORE = ['.env', '.pem', '.key', '.cert', '.p12', 'secrets.json', 'credentials.json', 'id_rsa'];
 
       // Fetch tree
       const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`);
@@ -57,7 +52,11 @@ async function startServer() {
         treePaths = treeData.tree
           .filter((item: any) => item.type === 'blob')
           .map((item: any) => item.path)
-          .filter((path: string) => !HARD_IGNORE.some(ignore => path.includes(`/${ignore}/`) || path.startsWith(`${ignore}/`)));
+          .filter((path: string) => {
+            const isHardIgnored = HARD_IGNORE.some(ignore => path.includes(`/${ignore}/`) || path.startsWith(`${ignore}/`));
+            const isSecret = SECRET_IGNORE.some(secret => path.endsWith(secret) || path.includes(`/${secret}`));
+            return !isHardIgnored && !isSecret;
+          });
           
         if (treePaths.length > 150) {
           treePaths = treePaths.slice(0, 150);
