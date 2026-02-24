@@ -1,8 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { RepoData } from "./githubService";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
 export async function generateSystemPrompt(
   repoData: RepoData, 
   taskInstruction: string,
@@ -28,6 +26,7 @@ ${repoData.dependencies.substring(0, 2000)}
 ${repoData.sourceFiles && repoData.sourceFiles.length > 0 ? `\nKey Source Files:\n${repoData.sourceFiles.map(f => `--- ${f.path} ---\n${f.content.substring(0, 2000)}\n`).join('\n')}` : ''}
 ${additionalContext ? `\nAdditional Context / Future Development Directions:\n${additionalContext}\n` : ''}${analyzeIssues ? `\nCRITICAL INSTRUCTION: Perform a preliminary analysis of the provided repository data. Identify any obvious errors, bugs, architectural inconsistencies, or critically outdated dependencies. Include these findings directly in the generated output.\n` : ''}`;
 
+  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
     contents: prompt,
@@ -37,6 +36,6 @@ ${additionalContext ? `\nAdditional Context / Future Development Directions:\n${
   if (usedOllama) {
     finalPrompt = `> **Note:** This context was pre-processed by local LLM.\n\n` + finalPrompt;
   }
-  
+
   return finalPrompt;
 }

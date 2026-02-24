@@ -1,5 +1,7 @@
+import "dotenv/config";
 import express from "express";
 import { createServer as createViteServer } from "vite";
+import { GoogleGenAI } from "@google/genai";
 
 async function startServer() {
   const app = express();
@@ -12,22 +14,19 @@ async function startServer() {
     try {
       const { url } = req.body;
       
+      const githubRegex = /^https:\/\/github\.com\/[a-zA-Z0-9-._]+\/[a-zA-Z0-9-._]+$/;
+      if (!githubRegex.test(url)) {
+        return res.status(400).json({ error: "Invalid GitHub URL format. Please provide a full URL like https://github.com/owner/repo" });
+      }
+
       let urlObj;
       try {
         urlObj = new URL(url);
       } catch (e) {
-        return res.status(400).json({ error: 'Invalid URL format. Please provide a full URL like https://github.com/owner/repo' });
-      }
-      
-      if (!urlObj.hostname.includes('github.com')) {
-        return res.status(400).json({ error: 'Please provide a valid GitHub repository URL.' });
+        return res.status(400).json({ error: 'Invalid URL format.' });
       }
 
       const parts = urlObj.pathname.split('/').filter(Boolean);
-      if (parts.length < 2) {
-        return res.status(400).json({ error: 'URL must include repository owner and name.' });
-      }
-
       const owner = parts[0];
       const repo = parts[1].replace(/\.git$/, '');
 
@@ -51,12 +50,19 @@ async function startServer() {
       // Fetch tree
       const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`);
       let treePaths: string[] = [];
+      let isTruncated = false;
+      
       if (treeRes.ok) {
         const treeData = await treeRes.json();
         treePaths = treeData.tree
           .filter((item: any) => item.type === 'blob')
           .map((item: any) => item.path)
           .filter((path: string) => !HARD_IGNORE.some(ignore => path.includes(`/${ignore}/`) || path.startsWith(`${ignore}/`)));
+          
+        if (treePaths.length > 150) {
+          treePaths = treePaths.slice(0, 150);
+          isTruncated = true;
+        }
       }
 
       // Fetch README
@@ -114,7 +120,8 @@ async function startServer() {
         tree: treePaths,
         readme,
         dependencies,
-        sourceFiles
+        sourceFiles,
+        isTruncated
       });
     } catch (error: any) {
       console.error("Error fetching repo data:", error);

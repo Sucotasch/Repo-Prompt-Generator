@@ -11,6 +11,7 @@ export interface RepoData {
   readme: string;
   dependencies: string;
   sourceFiles?: { path: string; content: string }[];
+  isTruncated?: boolean;
 }
 
 export async function fetchRepoData(url: string): Promise<RepoData> {

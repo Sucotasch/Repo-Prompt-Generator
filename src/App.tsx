@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Github, FileText, Loader2, Copy, Check, Download, Settings2 } from 'lucide-react';
+import { Github, FileText, Loader2, Copy, Check, Download, Settings2, AlertTriangle } from 'lucide-react';
+import DOMPurify from 'dompurify';
 import { fetchRepoData } from './services/githubService';
 import { generateSystemPrompt } from './services/geminiService';
 import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels } from './services/ollamaService';
@@ -50,6 +51,7 @@ export default function App() {
   const [prompt, setPrompt] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [status, setStatus] = useState('');
+  const [isTruncated, setIsTruncated] = useState(false);
 
   const handleTemplateChange = (mode: keyof typeof TEMPLATES) => {
     setTemplateMode(mode);
@@ -77,7 +79,8 @@ export default function App() {
   };
 
   const handleDownloadBat = () => {
-    const batContent = `@echo off\ncolor 0A\necho ==========================================\necho Starting Ollama with CORS enabled...\necho You can now use the Gemini Prompt Generator!\necho ==========================================\nset OLLAMA_ORIGINS="*"\nollama serve\npause`;
+    const origin = window.location.origin;
+    const batContent = `@echo off\ncolor 0A\necho ==========================================\necho Starting Ollama with CORS enabled...\necho You can now use the Gemini Prompt Generator!\necho ==========================================\nset OLLAMA_ORIGINS="${origin}"\nollama serve\npause`;
     const blob = new Blob([batContent], { type: 'application/bat' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -97,10 +100,15 @@ export default function App() {
     setError(null);
     setPrompt(null);
     setCopied(false);
+    setIsTruncated(false);
 
     try {
       setStatus('Fetching repository data...');
       let repoData = await fetchRepoData(url);
+      
+      if (repoData.isTruncated) {
+        setIsTruncated(true);
+      }
       
       let usedOllama = false;
       if (useOllama && ollamaConnected !== false) {
@@ -131,7 +139,8 @@ export default function App() {
       setStatus('Generating system prompt with Gemini...');
       const generatedPrompt = await generateSystemPrompt(repoData, customInstruction, additionalContext, analyzeIssues, usedOllama);
       
-      setPrompt(generatedPrompt);
+      const cleanPrompt = DOMPurify.sanitize(generatedPrompt);
+      setPrompt(cleanPrompt);
     } catch (err: any) {
       setError(err.message || 'An unexpected error occurred.');
     } finally {
@@ -387,7 +396,7 @@ export default function App() {
                   <div className="text-xs text-slate-500 bg-slate-100 p-3 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <div>
                       <p className="font-medium text-slate-700 mb-1">How to enable CORS for Ollama:</p>
-                      <p>Ollama blocks cross-origin requests by default. To use it here, you must start it with <code className="bg-slate-200 px-1 py-0.5 rounded">OLLAMA_ORIGINS="*"</code></p>
+                      <p>Ollama blocks cross-origin requests by default. To use it here, you must start it with <code className="bg-slate-200 px-1 py-0.5 rounded">OLLAMA_ORIGINS="{window.location.origin}"</code></p>
                     </div>
                     <button
                       type="button"
@@ -402,6 +411,18 @@ export default function App() {
               )}
             </div>
           </form>
+
+          {isTruncated && (
+            <div className="mt-4 p-4 bg-amber-50 rounded-xl border border-amber-200 flex items-start">
+              <AlertTriangle className="w-5 h-5 text-amber-500 mr-3 mt-0.5 flex-shrink-0" />
+              <div>
+                <h4 className="text-sm font-medium text-amber-800">Large Repository Detected</h4>
+                <p className="text-sm text-amber-700 mt-1">
+                  The repository contains too many files. The file tree has been truncated to 150 items to prevent performance issues and API limits.
+                </p>
+              </div>
+            </div>
+          )}
           
           {status && loading && (
             <p className="mt-4 text-sm text-indigo-600 animate-pulse text-center sm:text-left">
