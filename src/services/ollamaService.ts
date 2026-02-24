@@ -53,3 +53,36 @@ export async function summarize_with_ollama(
     return `[Ollama Summarization Failed] ${text.substring(0, 500)}...`;
   }
 }
+
+export async function generate_final_prompt_with_ollama(
+  prompt: string,
+  url: string,
+  model: string,
+  numCtx: number = 8192,
+  numPredict: number = 2048,
+  temperature: number = 0.5
+): Promise<string> {
+  try {
+    const res = await fetch(`${url}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: model,
+        prompt: prompt,
+        stream: false,
+        options: {
+          num_ctx: numCtx,
+          num_predict: numPredict,
+          temperature: temperature
+        }
+      })
+    });
+    
+    if (!res.ok) throw new Error('Ollama request failed');
+    const data = await res.json();
+    return data.response;
+  } catch (e: any) {
+    console.error("Ollama generation error:", e);
+    throw new Error(`Ollama generation failed: ${e.message || 'Unknown error'}`);
+  }
+}
