@@ -1,11 +1,39 @@
 import React, { useState } from 'react';
-import { Github, FileText, Loader2, Copy, Check, Download } from 'lucide-react';
+import { Github, FileText, Loader2, Copy, Check, Download, Settings2 } from 'lucide-react';
 import { fetchRepoData } from './services/githubService';
 import { generateSystemPrompt } from './services/geminiService';
 import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels } from './services/ollamaService';
 
+const TEMPLATES = {
+  default: `You are an expert software engineer and AI assistant. Based on the following GitHub repository information, generate a comprehensive system prompt suitable for further development of the project using Gemini CLI or Antigravity. The prompt should be formatted as markdown, ready to be saved as \`gemini.md\`.
+
+Generate a system prompt that includes:
+1. The project's purpose and tech stack.
+2. The architectural patterns and conventions used.
+3. Instructions for the AI on how to assist with this specific codebase.
+4. Any specific rules or guidelines for contributing to this project.`,
+  
+  security: `You are an expert cybersecurity auditor. Analyze the provided GitHub repository data to identify hidden threats, dangerous system calls, and data exfiltration mechanisms. Look for "holes", intentionally malicious code, and vulnerabilities (SQL injections, insecure system calls, hardcoded keys, hidden requests to external IPs, socket usage, unauthorized URL access). 
+
+Highlight the use of functions that execute system commands (e.g., eval, exec, subprocess, os.system, P/Invoke) that could lead to RCE. Find attempts to read confidential files (.env, .ssh/id_rsa, /etc/passwd, browser configs) or access Keychain/Credential Manager. Check for obfuscation, strange Base64 strings, or on-the-fly decrypted data blocks. Check the dependencies for "typosquatting".
+
+Provide a detailed report in Markdown, ending with a Risk Assessment (Low/Medium/High) and a list of all suspicious fragments.`,
+
+  docs: `You are an expert technical writer and software architect. Analyze the provided GitHub repository data to create comprehensive technical documentation in Markdown format (suitable for a Wiki or a detailed README.md). Make the code understandable.
+
+Include:
+1. Real capabilities of the program.
+2. Algorithm of operation and architecture.
+3. Installation and configuration process.
+4. Examples of using the main functions.`,
+
+  custom: ''
+};
+
 export default function App() {
   const [url, setUrl] = useState('');
+  const [templateMode, setTemplateMode] = useState<keyof typeof TEMPLATES>('default');
+  const [customInstruction, setCustomInstruction] = useState(TEMPLATES.default);
   const [additionalContext, setAdditionalContext] = useState('');
   const [analyzeIssues, setAnalyzeIssues] = useState(false);
   const [useOllama, setUseOllama] = useState(false);
@@ -22,6 +50,15 @@ export default function App() {
   const [prompt, setPrompt] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [status, setStatus] = useState('');
+
+  const handleTemplateChange = (mode: keyof typeof TEMPLATES) => {
+    setTemplateMode(mode);
+    if (mode !== 'custom') {
+      setCustomInstruction(TEMPLATES[mode]);
+    } else {
+      setCustomInstruction('');
+    }
+  };
 
   const handleTestOllama = async () => {
     setTestingOllama(true);
@@ -92,7 +129,7 @@ export default function App() {
       }
       
       setStatus('Generating system prompt with Gemini...');
-      const generatedPrompt = await generateSystemPrompt(repoData, additionalContext, analyzeIssues, usedOllama);
+      const generatedPrompt = await generateSystemPrompt(repoData, customInstruction, additionalContext, analyzeIssues, usedOllama);
       
       setPrompt(generatedPrompt);
     } catch (err: any) {
@@ -176,6 +213,38 @@ export default function App() {
               </button>
             </div>
             
+            <div className="mt-4 p-4 bg-indigo-50/50 rounded-xl border border-indigo-100">
+              <div className="flex items-center mb-3">
+                <Settings2 className="w-4 h-4 text-indigo-600 mr-2" />
+                <label htmlFor="templateMode" className="block text-sm font-medium text-slate-700">
+                  Task Template
+                </label>
+              </div>
+              <select
+                id="templateMode"
+                value={templateMode}
+                onChange={(e) => handleTemplateChange(e.target.value as keyof typeof TEMPLATES)}
+                className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white mb-3"
+                disabled={loading}
+              >
+                <option value="default">Default (gemini.md System Prompt)</option>
+                <option value="security">Security Auditor (Vulnerability Scan)</option>
+                <option value="docs">Documentation Writer (Wiki/README)</option>
+                <option value="custom">Custom (Write your own instruction)</option>
+              </select>
+
+              {templateMode === 'custom' && (
+                <textarea
+                  rows={6}
+                  placeholder="Enter your custom system instruction here. The repository context (Tree, README, Dependencies) will be automatically appended to your prompt."
+                  className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow resize-y"
+                  value={customInstruction}
+                  onChange={(e) => setCustomInstruction(e.target.value)}
+                  disabled={loading}
+                />
+              )}
+            </div>
+
             <div className="mt-2">
               <label htmlFor="additionalContext" className="block text-sm font-medium text-slate-700 mb-2">
                 Additional Context (Optional)
