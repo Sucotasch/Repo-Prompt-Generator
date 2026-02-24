@@ -10,7 +10,7 @@
 *   **Comprehensive Context Extraction**: Automatically fetches file trees, README files, dependency lists (`package.json`, etc.), and key source code files via the GitHub API.
 *   **Intelligent Filtering**: Implements a "Hard Ignore" list (e.g., `node_modules`, `.git`, `dist`) and a "Secret Ignore" list (e.g., `.env`, `.pem`, `id_rsa`) to prevent context bloat and security leaks.
 *   **Multi-Model Support**:
-    *   **Google Gemini**: Primary cloud-based generation using the `gemini-1.5-flash` or similar models.
+    *   **Google Gemini**: Primary cloud-based generation using the `gemini` or similar models.
     *   **Ollama**: Local LLM integration for pre-processing or generating prompts without sending data to the cloud.
 *   **Template-Driven Generation**:
     *   *Default/Development*: Focuses on project purpose, tech stack, and architectural patterns.
