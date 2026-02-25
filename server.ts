@@ -50,7 +50,6 @@ async function startServer() {
       // Fetch tree
       const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`, { headers });
       let treePaths: string[] = [];
-      let isTruncated = false;
       
       if (treeRes.ok) {
         const treeData = await treeRes.json();
@@ -62,11 +61,6 @@ async function startServer() {
             const isSecret = SECRET_IGNORE.some(secret => path.endsWith(secret) || path.includes(`/${secret}`));
             return !isHardIgnored && !isSecret;
           });
-          
-        if (treePaths.length > 150) {
-          treePaths = treePaths.slice(0, 150);
-          isTruncated = true;
-        }
       }
 
       // Fetch README
@@ -150,8 +144,9 @@ async function startServer() {
       // Sort by score descending (highest score first)
       filesToFetch.sort((a, b) => getFileScore(b) - getFileScore(a));
       
-      // Limit to requested maxFiles (default 5, max 50)
-      const limit = Math.min(Math.max(1, Number(maxFiles) || 5), 50);
+      // Limit to requested maxFiles (dynamic based on token)
+      const absoluteMax = token ? 200 : 10;
+      const limit = Math.min(Math.max(1, Number(maxFiles) || 5), absoluteMax);
       filesToFetch = filesToFetch.slice(0, limit);
 
       for (const file of filesToFetch) {
@@ -164,6 +159,13 @@ async function startServer() {
             sourceFiles.push({ path: file, content: atob(fileData.content) });
           }
         }
+      }
+
+      // Truncate the tree representation for the LLM context if it's extremely large
+      let isTruncated = false;
+      if (treePaths.length > 1000) {
+        treePaths = treePaths.slice(0, 1000);
+        isTruncated = true;
       }
 
       res.json({

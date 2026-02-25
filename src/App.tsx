@@ -368,8 +368,11 @@ export default function App() {
                   onChange={(e) => setMaxFiles(Number(e.target.value))}
                   disabled={loading}
                   min={1}
-                  max={50}
+                  max={githubToken ? 200 : 10}
                 />
+                <p className="mt-1 text-xs text-slate-500">
+                  {githubToken ? 'Limit: 200 files (Token provided).' : 'Limit: 10 files (Add token to increase up to 200).'}
+                </p>
               </div>
             </div>
             
