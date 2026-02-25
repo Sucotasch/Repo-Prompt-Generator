@@ -51,6 +51,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<string | null>(null);
+  const [usedModel, setUsedModel] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [status, setStatus] = useState('');
   const [isTruncated, setIsTruncated] = useState(false);
@@ -101,6 +102,7 @@ export default function App() {
     setLoading(true);
     setError(null);
     setPrompt(null);
+    setUsedModel(null);
     setCopied(false);
     setIsTruncated(false);
 
@@ -139,11 +141,14 @@ export default function App() {
       }
       
       let generatedPrompt = '';
+      let finalModel = '';
       if (useOllamaForFinal && ollamaConnected !== false) {
         setStatus('Generating final prompt with local Ollama...');
         const promptText = buildPromptText(repoData, customInstruction, additionalContext, analyzeIssues);
         generatedPrompt = await generate_final_prompt_with_ollama(promptText, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaFinalPredict, ollamaTemperature);
         
+        finalModel = `Ollama (${ollamaModel})`;
+
         if (usedOllama) {
           generatedPrompt = `> **Note:** This prompt was fully generated and pre-processed by a local LLM.\n\n` + generatedPrompt;
         } else {
@@ -151,11 +156,14 @@ export default function App() {
         }
       } else {
         setStatus('Generating system prompt with Gemini...');
-        generatedPrompt = await generateSystemPrompt(repoData, customInstruction, additionalContext, analyzeIssues, usedOllama);
+        const result = await generateSystemPrompt(repoData, customInstruction, additionalContext, analyzeIssues, usedOllama);
+        generatedPrompt = result.text;
+        finalModel = result.modelVersion;
       }
       
       const cleanPrompt = DOMPurify.sanitize(generatedPrompt);
       setPrompt(cleanPrompt);
+      setUsedModel(finalModel);
     } catch (err: any) {
       setError(err.message || 'An unexpected error occurred.');
     } finally {
@@ -486,6 +494,11 @@ export default function App() {
               <div className="flex items-center space-x-2">
                 <FileText className="w-5 h-5 text-slate-500" />
                 <h3 className="text-sm font-medium text-slate-900">gemini.md</h3>
+                {usedModel && (
+                  <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 text-indigo-800">
+                    Model: {usedModel}
+                  </span>
+                )}
               </div>
               <div className="flex items-center space-x-2">
                 <button

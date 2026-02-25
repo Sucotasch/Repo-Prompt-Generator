@@ -32,7 +32,7 @@ export async function generateSystemPrompt(
   additionalContext?: string, 
   analyzeIssues?: boolean, 
   usedOllama?: boolean
-): Promise<string> {
+): Promise<{ text: string, modelVersion: string }> {
   const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues);
 
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -46,5 +46,8 @@ export async function generateSystemPrompt(
     finalPrompt = `> **Note:** This context was pre-processed by local LLM.\n\n` + finalPrompt;
   }
 
-  return finalPrompt;
+  // Extract model version from response if available, otherwise fallback to the requested model
+  const modelVersion = (response as any).modelVersion || (response as any).model || "gemini-3-flash-preview";
+
+  return { text: finalPrompt, modelVersion };
 }
