@@ -14,7 +14,7 @@ export interface RepoData {
   isTruncated?: boolean;
 }
 
-export async function fetchRepoData(url: string): Promise<RepoData> {
+export async function fetchRepoData(url: string, token?: string, maxFiles: number = 5): Promise<RepoData> {
   try {
     // Parse URL on the client to send only owner and repo
     const githubRegex = /^https:\/\/github\.com\/([a-zA-Z0-9-._]+)\/([a-zA-Z0-9-._]+)/;
@@ -32,7 +32,7 @@ export async function fetchRepoData(url: string): Promise<RepoData> {
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ owner, repo }),
+      body: JSON.stringify({ owner, repo, token, maxFiles }),
     });
 
     const data = await response.json();

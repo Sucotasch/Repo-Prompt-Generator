@@ -1,6 +1,5 @@
-import React, { useState } from 'react';
-import { Github, FileText, Loader2, Copy, Check, Download, Settings2, AlertTriangle } from 'lucide-react';
-import DOMPurify from 'dompurify';
+import React, { useState, useEffect } from 'react';
+import { Github, FileText, Loader2, Copy, Check, Download, Settings2, AlertTriangle, Save, Trash2 } from 'lucide-react';
 import { fetchRepoData } from './services/githubService';
 import { generateSystemPrompt, buildPromptText } from './services/geminiService';
 import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama } from './services/ollamaService';
@@ -31,20 +30,48 @@ Include:
   custom: ''
 };
 
+interface SavedTemplate {
+  id: string;
+  name: string;
+  content: string;
+}
+
 export default function App() {
   const [url, setUrl] = useState('');
-  const [templateMode, setTemplateMode] = useState<keyof typeof TEMPLATES>('default');
+  
+  // Load settings from localStorage
+  const initialSettings = (() => {
+    try {
+      const saved = localStorage.getItem('gemini_app_settings');
+      return saved ? JSON.parse(saved) : {};
+    } catch (e) {
+      return {};
+    }
+  })();
+
+  const [githubToken, setGithubToken] = useState(initialSettings.githubToken || '');
+  const [maxFiles, setMaxFiles] = useState(initialSettings.maxFiles || 5);
+  const [templateMode, setTemplateMode] = useState<string>('default');
+  const [savedTemplates, setSavedTemplates] = useState<SavedTemplate[]>(() => {
+    try {
+      const saved = localStorage.getItem('gemini_custom_templates');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
   const [customInstruction, setCustomInstruction] = useState(TEMPLATES.default);
   const [additionalContext, setAdditionalContext] = useState('');
   const [analyzeIssues, setAnalyzeIssues] = useState(false);
-  const [useOllama, setUseOllama] = useState(false);
-  const [useOllamaForFinal, setUseOllamaForFinal] = useState(false);
-  const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434');
-  const [ollamaModel, setOllamaModel] = useState('llama3');
-  const [ollamaNumCtx, setOllamaNumCtx] = useState(8192);
-  const [ollamaSummaryPredict, setOllamaSummaryPredict] = useState(500);
-  const [ollamaFinalPredict, setOllamaFinalPredict] = useState(2000);
-  const [ollamaTemperature, setOllamaTemperature] = useState(0.3);
+  const [useOllama, setUseOllama] = useState(initialSettings.useOllama || false);
+  const [useOllamaForFinal, setUseOllamaForFinal] = useState(initialSettings.useOllamaForFinal || false);
+  const [ollamaUrl, setOllamaUrl] = useState(initialSettings.ollamaUrl || 'http://localhost:11434');
+  const [ollamaModel, setOllamaModel] = useState(initialSettings.ollamaModel || 'llama3');
+  const [ollamaNumCtx, setOllamaNumCtx] = useState(initialSettings.ollamaNumCtx || 8192);
+  const [ollamaSummaryPredict, setOllamaSummaryPredict] = useState(initialSettings.ollamaSummaryPredict || 500);
+  const [ollamaFinalPredict, setOllamaFinalPredict] = useState(initialSettings.ollamaFinalPredict || 2000);
+  const [ollamaTemperature, setOllamaTemperature] = useState(initialSettings.ollamaTemperature !== undefined ? initialSettings.ollamaTemperature : 0.3);
+  
   const [ollamaConnected, setOllamaConnected] = useState<boolean | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [testingOllama, setTestingOllama] = useState(false);
@@ -55,14 +82,74 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [status, setStatus] = useState('');
   const [isTruncated, setIsTruncated] = useState(false);
+  const [newTemplateName, setNewTemplateName] = useState('');
+  const [isSavingNew, setIsSavingNew] = useState(false);
+  
+  // Cache state
+  const [cachedRepoData, setCachedRepoData] = useState<any>(null);
+  const [cacheKey, setCacheKey] = useState<string>('');
 
-  const handleTemplateChange = (mode: keyof typeof TEMPLATES) => {
+  useEffect(() => {
+    const settings = {
+      githubToken,
+      maxFiles,
+      useOllama,
+      useOllamaForFinal,
+      ollamaUrl,
+      ollamaModel,
+      ollamaNumCtx,
+      ollamaSummaryPredict,
+      ollamaFinalPredict,
+      ollamaTemperature
+    };
+    localStorage.setItem('gemini_app_settings', JSON.stringify(settings));
+  }, [githubToken, maxFiles, useOllama, useOllamaForFinal, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature]);
+
+  const handleTemplateChange = (mode: string) => {
     setTemplateMode(mode);
-    if (mode !== 'custom') {
-      setCustomInstruction(TEMPLATES[mode]);
-    } else {
+    if (mode in TEMPLATES) {
+      setCustomInstruction(TEMPLATES[mode as keyof typeof TEMPLATES]);
+    } else if (mode === 'custom') {
       setCustomInstruction('');
+    } else {
+      const tpl = savedTemplates.find(t => t.id === mode);
+      if (tpl) setCustomInstruction(tpl.content);
     }
+  };
+
+  const handleSaveTemplate = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (templateMode.startsWith('user_')) {
+      const updated = savedTemplates.map(t => 
+        t.id === templateMode ? { ...t, content: customInstruction } : t
+      );
+      setSavedTemplates(updated);
+      localStorage.setItem('gemini_custom_templates', JSON.stringify(updated));
+    } else {
+      setIsSavingNew(true);
+    }
+  };
+
+  const confirmSaveTemplate = (e?: React.MouseEvent | React.KeyboardEvent) => {
+    if (e) e.preventDefault();
+    if (!newTemplateName.trim()) return;
+    const newId = 'user_' + Date.now();
+    const newTemplates = [...savedTemplates, { id: newId, name: newTemplateName.trim(), content: customInstruction }];
+    setSavedTemplates(newTemplates);
+    localStorage.setItem('gemini_custom_templates', JSON.stringify(newTemplates));
+    setTemplateMode(newId);
+    setIsSavingNew(false);
+    setNewTemplateName('');
+  };
+
+  const handleDeleteTemplate = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (!templateMode.startsWith('user_')) return;
+    if (!window.confirm('Are you sure you want to delete this template?')) return;
+    const updated = savedTemplates.filter(t => t.id !== templateMode);
+    setSavedTemplates(updated);
+    localStorage.setItem('gemini_custom_templates', JSON.stringify(updated));
+    handleTemplateChange('default');
   };
 
   const handleTestOllama = async () => {
@@ -107,8 +194,18 @@ export default function App() {
     setIsTruncated(false);
 
     try {
-      setStatus('Fetching repository data...');
-      let repoData = await fetchRepoData(url);
+      const currentCacheKey = `${url}-${githubToken}-${maxFiles}`;
+      let repoData;
+
+      if (cachedRepoData && cacheKey === currentCacheKey) {
+        setStatus('Using cached repository data...');
+        repoData = cachedRepoData;
+      } else {
+        setStatus('Fetching repository data...');
+        repoData = await fetchRepoData(url, githubToken, maxFiles);
+        setCachedRepoData(repoData);
+        setCacheKey(currentCacheKey);
+      }
       
       if (repoData.isTruncated) {
         setIsTruncated(true);
@@ -161,8 +258,7 @@ export default function App() {
         finalModel = result.modelVersion;
       }
       
-      const cleanPrompt = DOMPurify.sanitize(generatedPrompt);
-      setPrompt(cleanPrompt);
+      setPrompt(generatedPrompt);
       setUsedModel(finalModel);
     } catch (err: any) {
       setError(err.message || 'An unexpected error occurred.');
@@ -240,9 +336,41 @@ export default function App() {
                     Generating...
                   </>
                 ) : (
-                  'Generate Prompt'
+                  cachedRepoData && cacheKey === `${url}-${githubToken}-${maxFiles}` ? 'Regenerate Prompt (Cached)' : 'Generate Prompt'
                 )}
               </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label htmlFor="githubToken" className="block text-xs font-medium text-slate-500 mb-1">
+                  GitHub Token (Optional)
+                </label>
+                <input
+                  type="password"
+                  id="githubToken"
+                  className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                  placeholder="ghp_..."
+                  value={githubToken}
+                  onChange={(e) => setGithubToken(e.target.value)}
+                  disabled={loading}
+                />
+              </div>
+              <div>
+                <label htmlFor="maxFiles" className="block text-xs font-medium text-slate-500 mb-1">
+                  Max Source Files to Fetch
+                </label>
+                <input
+                  type="number"
+                  id="maxFiles"
+                  className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                  value={maxFiles}
+                  onChange={(e) => setMaxFiles(Number(e.target.value))}
+                  disabled={loading}
+                  min={1}
+                  max={50}
+                />
+              </div>
             </div>
             
             <div className="mt-4 p-4 bg-indigo-50/50 rounded-xl border border-indigo-100">
@@ -255,26 +383,113 @@ export default function App() {
               <select
                 id="templateMode"
                 value={templateMode}
-                onChange={(e) => handleTemplateChange(e.target.value as keyof typeof TEMPLATES)}
+                onChange={(e) => handleTemplateChange(e.target.value)}
                 className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white mb-3"
                 disabled={loading}
               >
-                <option value="default">Default (gemini.md System Prompt)</option>
-                <option value="security">Security Auditor (Vulnerability Scan)</option>
-                <option value="docs">Documentation Writer (Wiki/README)</option>
-                <option value="custom">Custom (Write your own instruction)</option>
+                <optgroup label="Built-in Templates">
+                  <option value="default">Default (gemini.md System Prompt)</option>
+                  <option value="security">Security Auditor (Vulnerability Scan)</option>
+                  <option value="docs">Documentation Writer (Wiki/README)</option>
+                </optgroup>
+                {savedTemplates.length > 0 && (
+                  <optgroup label="Your Saved Templates">
+                    {savedTemplates.map(t => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </optgroup>
+                )}
+                <optgroup label="Custom">
+                  <option value="custom">Write new custom instruction...</option>
+                </optgroup>
               </select>
 
-              {templateMode === 'custom' && (
+              <div className="relative">
                 <textarea
                   rows={6}
                   placeholder="Enter your custom system instruction here. The repository context (Tree, README, Dependencies) will be automatically appended to your prompt."
                   className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow resize-y"
                   value={customInstruction}
-                  onChange={(e) => setCustomInstruction(e.target.value)}
+                  onChange={(e) => {
+                    setCustomInstruction(e.target.value);
+                    if (!templateMode.startsWith('user_') && templateMode !== 'custom') {
+                      setTemplateMode('custom');
+                    }
+                  }}
                   disabled={loading}
                 />
-              )}
+                <div className="flex justify-end gap-2 mt-3">
+                  {templateMode.startsWith('user_') && (
+                    <button
+                      type="button"
+                      onClick={handleDeleteTemplate}
+                      disabled={loading}
+                      className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-50"
+                    >
+                      <Trash2 className="w-4 h-4 mr-1.5" />
+                      Delete
+                    </button>
+                  )}
+                  {templateMode.startsWith('user_') && customInstruction.trim() !== '' && (
+                    <button
+                      type="button"
+                      onClick={handleSaveTemplate}
+                      disabled={loading}
+                      className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors disabled:opacity-50"
+                    >
+                      <Save className="w-4 h-4 mr-1.5" />
+                      Save Changes
+                    </button>
+                  )}
+                  {!templateMode.startsWith('user_') && customInstruction.trim() !== '' && (
+                    isSavingNew ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={newTemplateName}
+                          onChange={(e) => setNewTemplateName(e.target.value)}
+                          placeholder="Template name..."
+                          className="px-3 py-1.5 text-sm border border-slate-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                          autoFocus
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              confirmSaveTemplate(e);
+                            } else if (e.key === 'Escape') {
+                              setIsSavingNew(false);
+                            }
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={confirmSaveTemplate}
+                          disabled={!newTemplateName.trim() || loading}
+                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors disabled:opacity-50"
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setIsSavingNew(false)}
+                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setIsSavingNew(true)}
+                        disabled={loading}
+                        className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        <Save className="w-4 h-4 mr-1.5" />
+                        Save as Template
+                      </button>
+                    )
+                  )}
+                </div>
+              </div>
             </div>
 
             <div className="mt-2">
