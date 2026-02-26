@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Github, FileText, Loader2, Copy, Check, Download, Settings2, AlertTriangle, Save, Trash2 } from 'lucide-react';
+import { Github, FileText, Loader2, Copy, Check, Download, Settings2, AlertTriangle, Save, Trash2, Folder } from 'lucide-react';
 import { fetchRepoData } from './services/githubService';
+import { processLocalFolder } from './services/localFileService';
 import { generateSystemPrompt, buildPromptText } from './services/geminiService';
 import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama } from './services/ollamaService';
 
@@ -51,6 +52,8 @@ export default function App() {
 
   const [githubToken, setGithubToken] = useState(initialSettings.githubToken || '');
   const [maxFiles, setMaxFiles] = useState(initialSettings.maxFiles || 5);
+  const [inputMode, setInputMode] = useState<'github' | 'local'>(initialSettings.inputMode || 'github');
+  const [localFiles, setLocalFiles] = useState<FileList | null>(null);
   const [templateMode, setTemplateMode] = useState<string>('default');
   const [savedTemplates, setSavedTemplates] = useState<SavedTemplate[]>(() => {
     try {
@@ -84,6 +87,7 @@ export default function App() {
   const [isTruncated, setIsTruncated] = useState(false);
   const [newTemplateName, setNewTemplateName] = useState('');
   const [isSavingNew, setIsSavingNew] = useState(false);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
   
   // Cache state
   const [cachedRepoData, setCachedRepoData] = useState<any>(null);
@@ -91,6 +95,7 @@ export default function App() {
 
   useEffect(() => {
     const settings = {
+      inputMode,
       githubToken,
       maxFiles,
       useOllama,
@@ -103,7 +108,7 @@ export default function App() {
       ollamaTemperature
     };
     localStorage.setItem('gemini_app_settings', JSON.stringify(settings));
-  }, [githubToken, maxFiles, useOllama, useOllamaForFinal, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature]);
+  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature]);
 
   const handleTemplateChange = (mode: string) => {
     setTemplateMode(mode);
@@ -184,7 +189,8 @@ export default function App() {
 
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!url) return;
+    if (inputMode === 'github' && !url) return;
+    if (inputMode === 'local' && (!localFiles || localFiles.length === 0)) return;
 
     setLoading(true);
     setError(null);
@@ -194,17 +200,34 @@ export default function App() {
     setIsTruncated(false);
 
     try {
-      const currentCacheKey = `${url}-${githubToken}-${maxFiles}`;
       let repoData;
 
-      if (cachedRepoData && cacheKey === currentCacheKey) {
-        setStatus('Using cached repository data...');
-        repoData = cachedRepoData;
+      if (inputMode === 'github') {
+        const currentCacheKey = `${url}-${githubToken}-${maxFiles}`;
+        
+        if (cachedRepoData && cacheKey === currentCacheKey) {
+          setStatus('Using cached repository data...');
+          repoData = cachedRepoData;
+        } else {
+          setStatus('Fetching repository data...');
+          repoData = await fetchRepoData(url, githubToken, maxFiles);
+          setCachedRepoData(repoData);
+          setCacheKey(currentCacheKey);
+        }
       } else {
-        setStatus('Fetching repository data...');
-        repoData = await fetchRepoData(url, githubToken, maxFiles);
-        setCachedRepoData(repoData);
-        setCacheKey(currentCacheKey);
+        setStatus('Processing local files...');
+        repoData = await processLocalFolder(localFiles!, maxFiles);
+        // Do not cache local files in state to save memory, they are fast to read anyway
+        setCachedRepoData(null);
+        setCacheKey('');
+        
+        // Free up memory by clearing the file selection if it's very large
+        if (localFiles && localFiles.length > 1000) {
+          setLocalFiles(null);
+          if (fileInputRef.current) {
+            fileInputRef.current.value = '';
+          }
+        }
       }
       
       if (repoData.isTruncated) {
@@ -309,25 +332,68 @@ export default function App() {
 
         {/* Input Form */}
         <div className="bg-white shadow-sm ring-1 ring-slate-200 rounded-2xl p-6 sm:p-8 mb-8">
+          <div className="flex border-b border-slate-200 mb-6">
+            <button
+              type="button"
+              className={`py-2 px-4 text-sm font-medium border-b-2 transition-colors ${inputMode === 'github' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}
+              onClick={() => setInputMode('github')}
+            >
+              <Github className="w-4 h-4 inline-block mr-2" />
+              GitHub Repository
+            </button>
+            <button
+              type="button"
+              className={`py-2 px-4 text-sm font-medium border-b-2 transition-colors ${inputMode === 'local' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}
+              onClick={() => setInputMode('local')}
+            >
+              <Folder className="w-4 h-4 inline-block mr-2" />
+              Local Folder
+            </button>
+          </div>
+
           <form onSubmit={handleGenerate} className="flex flex-col gap-4">
             <div className="flex flex-col sm:flex-row gap-4">
-              <div className="relative flex-grow">
-                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                  <Github className="h-5 w-5 text-slate-400" />
+              {inputMode === 'github' ? (
+                <div className="relative flex-grow">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                    <Github className="h-5 w-5 text-slate-400" />
+                  </div>
+                  <input
+                    type="url"
+                    required
+                    placeholder="https://github.com/owner/repo"
+                    className="block w-full pl-10 pr-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow"
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                    disabled={loading}
+                  />
                 </div>
-                <input
-                  type="url"
-                  required
-                  placeholder="https://github.com/owner/repo"
-                  className="block w-full pl-10 pr-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow"
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  disabled={loading}
-                />
-              </div>
+              ) : (
+                <div className="flex-grow">
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    // @ts-ignore - webkitdirectory is non-standard but widely supported
+                    webkitdirectory=""
+                    directory=""
+                    multiple
+                    onChange={(e) => {
+                      e.preventDefault(); // Prevent any default behavior
+                      setLocalFiles(e.target.files);
+                    }}
+                    className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
+                    disabled={loading}
+                  />
+                  {localFiles && localFiles.length > 0 && (
+                    <p className="mt-2 text-sm text-slate-600">
+                      Selected {localFiles.length} files from {localFiles[0].webkitRelativePath.split('/')[0]}
+                    </p>
+                  )}
+                </div>
+              )}
               <button
                 type="submit"
-                disabled={loading || !url}
+                disabled={loading || (inputMode === 'github' ? !url : (!localFiles || localFiles.length === 0))}
                 className="inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 {loading ? (
@@ -336,27 +402,29 @@ export default function App() {
                     Generating...
                   </>
                 ) : (
-                  cachedRepoData && cacheKey === `${url}-${githubToken}-${maxFiles}` ? 'Regenerate Prompt (Cached)' : 'Generate Prompt'
+                  inputMode === 'github' && cachedRepoData && cacheKey === `${url}-${githubToken}-${maxFiles}` ? 'Regenerate Prompt (Cached)' : 'Generate Prompt'
                 )}
               </button>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label htmlFor="githubToken" className="block text-xs font-medium text-slate-500 mb-1">
-                  GitHub Token (Optional)
-                </label>
-                <input
-                  type="password"
-                  id="githubToken"
-                  className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                  placeholder="ghp_..."
-                  value={githubToken}
-                  onChange={(e) => setGithubToken(e.target.value)}
-                  disabled={loading}
-                />
-              </div>
-              <div>
+              {inputMode === 'github' && (
+                <div>
+                  <label htmlFor="githubToken" className="block text-xs font-medium text-slate-500 mb-1">
+                    GitHub Token (Optional)
+                  </label>
+                  <input
+                    type="password"
+                    id="githubToken"
+                    className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                    placeholder="ghp_..."
+                    value={githubToken}
+                    onChange={(e) => setGithubToken(e.target.value)}
+                    disabled={loading}
+                  />
+                </div>
+              )}
+              <div className={inputMode === 'local' ? 'col-span-1 sm:col-span-2' : ''}>
                 <label htmlFor="maxFiles" className="block text-xs font-medium text-slate-500 mb-1">
                   Max Source Files to Fetch
                 </label>
@@ -368,10 +436,12 @@ export default function App() {
                   onChange={(e) => setMaxFiles(Number(e.target.value))}
                   disabled={loading}
                   min={1}
-                  max={githubToken ? 200 : 10}
+                  max={inputMode === 'local' ? 200 : (githubToken ? 200 : 10)}
                 />
                 <p className="mt-1 text-xs text-slate-500">
-                  {githubToken ? 'Limit: 200 files (Token provided).' : 'Limit: 10 files (Add token to increase up to 200).'}
+                  {inputMode === 'local' 
+                    ? 'Limit: 200 files (Local processing is fast).' 
+                    : (githubToken ? 'Limit: 200 files (Token provided).' : 'Limit: 10 files (Add token to increase up to 200).')}
                 </p>
               </div>
             </div>
@@ -599,7 +669,9 @@ export default function App() {
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                     <div>
-                      <label className="block text-xs font-medium text-slate-500 mb-1">Context Window</label>
+                      <label className="block text-xs font-medium text-slate-500 mb-1" title="1 token ≈ 4 characters. Increase this if the model complains about missing code.">
+                        Context Window (Tokens)
+                      </label>
                       <input
                         type="number"
                         value={ollamaNumCtx}
@@ -609,6 +681,9 @@ export default function App() {
                         min={1024}
                         step={1024}
                       />
+                      <p className="mt-1 text-[10px] text-slate-400 leading-tight">
+                        Increase if model complains about missing code. Requires more RAM/VRAM.
+                      </p>
                     </div>
                     <div>
                       <label className="block text-xs font-medium text-slate-500 mb-1">Max Tokens (Summary)</label>
@@ -686,7 +761,7 @@ export default function App() {
               <div>
                 <h4 className="text-sm font-medium text-amber-800">Large Repository Detected</h4>
                 <p className="text-sm text-amber-700 mt-1">
-                  The repository contains too many files. The file tree has been truncated to 150 items to prevent performance issues and API limits.
+                  The repository contains too many files. The <strong>directory tree listing</strong> has been truncated to 1000 items to prevent AI context overflow. This does not affect your {maxFiles} selected source files, which are still included in full.
                 </p>
               </div>
             </div>
@@ -746,7 +821,9 @@ export default function App() {
             </div>
             <div className="p-6 overflow-x-auto">
               <pre className="text-sm font-mono text-slate-800 whitespace-pre-wrap break-words">
-                {prompt}
+                {prompt.length > 50000 
+                  ? prompt.substring(0, 50000) + '\n\n... [⚠️ PREVIEW TRUNCATED FOR PERFORMANCE ⚠️]\n... [The full prompt is too large to display in the browser without lagging.]\n... [Please use the "Copy" or "Download" buttons above to get the full text.]' 
+                  : prompt}
               </pre>
             </div>
           </div>
