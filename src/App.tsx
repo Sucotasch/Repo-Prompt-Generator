@@ -4,6 +4,7 @@ import { fetchRepoData } from './services/githubService';
 import { processLocalFolder } from './services/localFileService';
 import { generateSystemPrompt, buildPromptText } from './services/geminiService';
 import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama } from './services/ollamaService';
+import { performRAG } from './services/ragService';
 
 const TEMPLATES = {
   default: `You are an expert software engineer and AI assistant. Based on the following GitHub repository information, generate a comprehensive system prompt suitable for further development of the project using Gemini CLI or Antigravity. The prompt should be formatted as markdown, ready to be saved as \`gemini.md\`.
@@ -68,6 +69,9 @@ export default function App() {
   const [analyzeIssues, setAnalyzeIssues] = useState(false);
   const [useOllama, setUseOllama] = useState(initialSettings.useOllama || false);
   const [useOllamaForFinal, setUseOllamaForFinal] = useState(initialSettings.useOllamaForFinal || false);
+  const [useRag, setUseRag] = useState(initialSettings.useRag || false);
+  const [ragModel, setRagModel] = useState(initialSettings.ragModel || 'nomic-embed-text');
+  const [ragTopK, setRagTopK] = useState(initialSettings.ragTopK || 10);
   const [ollamaUrl, setOllamaUrl] = useState(initialSettings.ollamaUrl || 'http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState(initialSettings.ollamaModel || 'llama3');
   const [ollamaNumCtx, setOllamaNumCtx] = useState(initialSettings.ollamaNumCtx || 8192);
@@ -100,6 +104,9 @@ export default function App() {
       maxFiles,
       useOllama,
       useOllamaForFinal,
+      useRag,
+      ragModel,
+      ragTopK,
       ollamaUrl,
       ollamaModel,
       ollamaNumCtx,
@@ -108,7 +115,7 @@ export default function App() {
       ollamaTemperature
     };
     localStorage.setItem('gemini_app_settings', JSON.stringify(settings));
-  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature]);
+  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature]);
 
   const handleTemplateChange = (mode: string) => {
     setTemplateMode(mode);
@@ -191,6 +198,11 @@ export default function App() {
     e.preventDefault();
     if (inputMode === 'github' && !url) return;
     if (inputMode === 'local' && (!localFiles || localFiles.length === 0)) return;
+    
+    if (useRag && !additionalContext.trim()) {
+      setError("Additional Context is required when RAG is enabled. Please enter your search query (e.g., 'Payment processing logic').");
+      return;
+    }
 
     setLoading(true);
     setError(null);
@@ -232,6 +244,25 @@ export default function App() {
       
       if (repoData.isTruncated) {
         setIsTruncated(true);
+      }
+      
+      if (useRag && repoData.sourceFiles && repoData.sourceFiles.length > 0) {
+        try {
+          setStatus('Running RAG: Filtering codebase...');
+          const ragFiles = await performRAG(
+            repoData.sourceFiles,
+            additionalContext,
+            ollamaUrl,
+            ragModel,
+            ragTopK,
+            (msg) => setStatus(msg)
+          );
+          repoData = { ...repoData, sourceFiles: ragFiles };
+        } catch (e: any) {
+          setError(`RAG failed: ${e.message}`);
+          setLoading(false);
+          return;
+        }
       }
       
       let usedOllama = false;
@@ -626,9 +657,22 @@ export default function App() {
                     Use Local Model for Final Generation (Bypass Gemini)
                   </label>
                 </div>
+                <div className="flex items-center">
+                  <input
+                    id="useRag"
+                    type="checkbox"
+                    className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer disabled:opacity-50"
+                    checked={useRag}
+                    onChange={(e) => setUseRag(e.target.checked)}
+                    disabled={loading}
+                  />
+                  <label htmlFor="useRag" className="ml-2 block text-sm font-medium text-slate-700 cursor-pointer">
+                    Use RAG (Smart Context Filter)
+                  </label>
+                </div>
               </div>
 
-              {(useOllama || useOllamaForFinal) && (
+              {(useOllama || useOllamaForFinal || useRag) && (
                 <div className="space-y-4 pl-6 border-l-2 border-indigo-100 ml-2">
                   <div className="flex flex-col sm:flex-row gap-4">
                     <div className="flex-1">
@@ -641,37 +685,82 @@ export default function App() {
                         disabled={loading}
                       />
                     </div>
-                    <div className="flex-1">
-                      <label className="block text-xs font-medium text-slate-500 mb-1">Model Name</label>
-                      {availableModels.length > 0 ? (
-                        <select
-                          value={ollamaModel}
-                          onChange={(e) => setOllamaModel(e.target.value)}
-                          className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
-                          disabled={loading}
-                        >
-                          {availableModels.map(m => (
-                            <option key={m} value={m}>{m}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <input
-                          type="text"
-                          value={ollamaModel}
-                          onChange={(e) => setOllamaModel(e.target.value)}
-                          placeholder="Test connection to load models"
-                          className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                          disabled={loading}
-                        />
-                      )}
-                    </div>
+                    {(useOllama || useOllamaForFinal) && (
+                      <div className="flex-1">
+                        <label className="block text-xs font-medium text-slate-500 mb-1">LLM Model Name</label>
+                        {availableModels.length > 0 ? (
+                          <select
+                            value={ollamaModel}
+                            onChange={(e) => setOllamaModel(e.target.value)}
+                            className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
+                            disabled={loading}
+                          >
+                            {availableModels.map(m => (
+                              <option key={m} value={m}>{m}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            type="text"
+                            value={ollamaModel}
+                            onChange={(e) => setOllamaModel(e.target.value)}
+                            placeholder="Test connection to load models"
+                            className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                            disabled={loading}
+                          />
+                        )}
+                      </div>
+                    )}
                   </div>
+                  
+                  {useRag && (
+                    <div className="flex flex-col sm:flex-row gap-4 p-3 bg-indigo-50/50 rounded-lg border border-indigo-100">
+                      <div className="flex-1">
+                        <label className="block text-xs font-medium text-indigo-700 mb-1">Embedding Model (RAG)</label>
+                        {availableModels.length > 0 ? (
+                          <select
+                            value={ragModel}
+                            onChange={(e) => setRagModel(e.target.value)}
+                            className="block w-full px-3 py-2 border border-indigo-200 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
+                            disabled={loading}
+                          >
+                            {availableModels.map(m => (
+                              <option key={m} value={m}>{m}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            type="text"
+                            value={ragModel}
+                            onChange={(e) => setRagModel(e.target.value)}
+                            placeholder="e.g., nomic-embed-text"
+                            className="block w-full px-3 py-2 border border-indigo-200 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                            disabled={loading}
+                          />
+                        )}
+                        <p className="mt-1 text-[10px] text-indigo-500">Must be an embedding model (e.g., nomic-embed-text)</p>
+                      </div>
+                      <div className="w-full sm:w-32">
+                        <label className="block text-xs font-medium text-indigo-700 mb-1">Top K Chunks</label>
+                        <input
+                          type="number"
+                          value={ragTopK}
+                          onChange={(e) => setRagTopK(Number(e.target.value))}
+                          className="block w-full px-3 py-2 border border-indigo-200 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                          disabled={loading}
+                          min={1}
+                          max={50}
+                        />
+                      </div>
+                    </div>
+                  )}
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-500 mb-1" title="1 token ≈ 4 characters. Increase this if the model complains about missing code.">
-                        Context Window (Tokens)
-                      </label>
+                  {(useOllama || useOllamaForFinal) && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-500 mb-1" title="1 token ≈ 4 characters. Increase this if the model complains about missing code.">
+                          Context Window (Tokens)
+                        </label>
                       <input
                         type="number"
                         value={ollamaNumCtx}
@@ -723,6 +812,7 @@ export default function App() {
                       />
                     </div>
                   </div>
+                  )}
 
                   <div className="flex items-center gap-3">
                     <button
