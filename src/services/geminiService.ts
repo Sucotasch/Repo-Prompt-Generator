@@ -29,6 +29,8 @@ ${additionalContext ? `\nAdditional Context / Future Development Directions:\n${
 export async function generateSystemPrompt(
   repoData: RepoData,
   taskInstruction: string,
+  geminiApiKey: string,
+  proxyAddress: string,
   additionalContext?: string,
   analyzeIssues?: boolean,
   usedOllama?: boolean
@@ -36,7 +38,11 @@ export async function generateSystemPrompt(
   const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues);
 
   const { invoke } = await import('@tauri-apps/api/core');
-  const response: string = await invoke('call_gemini_secure', { prompt });
+  const response: string = await invoke('call_gemini_secure', {
+    prompt,
+    api_key: geminiApiKey ? geminiApiKey.trim() : null,
+    proxy: proxyAddress ? proxyAddress.trim() : null
+  });
   const data = JSON.parse(response);
 
   let finalPrompt = (data.candidates?.[0]?.content?.parts?.[0]?.text) || "Failed to generate prompt.";

@@ -1,10 +1,12 @@
-use reqwest::Client;
+use isahc::prelude::*;
+use isahc::HttpClient;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fs;
 use std::process::Command;
+use std::time::Duration;
 use sysinfo::System;
-use tauri::State;
+use tauri::{State, RunEvent};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -17,23 +19,69 @@ pub struct FileEntry {
 
 pub struct AppState {
     pub gemini_api_key: String,
-    pub http_client: Client,
+    pub http_client: HttpClient,
 }
 
-#[tauri::command]
-async fn call_gemini_secure(state: State<'_, AppState>, prompt: String) -> Result<String, String> {
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={}",
-        state.gemini_api_key
-    );
+#[tauri::command(rename_all = "snake_case")]
+async fn call_gemini_secure(state: State<'_, AppState>, prompt: String, api_key: Option<String>, proxy: Option<String>) -> Result<String, String> {
+    let key = api_key
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| state.gemini_api_key.clone());
 
-    let response = state
-        .http_client
-        .post(url)
-        .json(&serde_json::json!({ "contents": [{ "parts": [{ "text": prompt }] }] }))
-        .send()
-        .await
+    if key.is_empty() {
+        return Err("Gemini API key is missing. Please enter it in the settings or set the GEMINI_API_KEY environment variable.".to_string());
+    }
+
+    println!("[Gemini] Using key: {}... (len: {})", &key[..std::cmp::min(4, key.len())], key.len());
+
+    let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent";
+
+    let body = serde_json::json!({
+        "contents": [{ "parts": [{ "text": prompt }] }]
+    });
+
+    let request = isahc::Request::builder()
+        .method("POST")
+        .uri(url)
+        .header("Content-Type", "application/json")
+        .header("x-goog-api-key", &key)
+        .body(serde_json::to_string(&body).unwrap())
         .map_err(|e| e.to_string())?;
+
+    // If proxy is specified, create a dedicated client with proxy
+    let proxy_addr = proxy.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let mut response = if let Some(proxy_url) = proxy_addr {
+        println!("[Gemini] Using proxy: {}", proxy_url);
+        let proxy_uri = if !proxy_url.starts_with("http") {
+            format!("http://{}", proxy_url)
+        } else {
+            proxy_url.to_string()
+        };
+        // Set proxy env vars for libcurl (isahc backend)
+        std::env::set_var("HTTPS_PROXY", &proxy_uri);
+        std::env::set_var("HTTP_PROXY", &proxy_uri);
+        let proxy_client = HttpClient::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+            .map_err(|e| format!("Failed to create proxy client: {}", e))?;
+        let result = proxy_client.send_async(request).await
+            .map_err(|e| format!("Gemini API connection error (via proxy): {}", e));
+        // Clean up proxy env vars
+        std::env::remove_var("HTTPS_PROXY");
+        std::env::remove_var("HTTP_PROXY");
+        result?
+    } else {
+        state.http_client
+            .send_async(request)
+            .await
+            .map_err(|e| format!("Gemini API connection error: {}", e))?
+    };
+
+    if !response.status().is_success() {
+        let err_body = response.text().await.unwrap_or_else(|_| "Could not read error body".to_string());
+        return Err(format!("Gemini API error ({}): {}", response.status(), err_body));
+    }
 
     Ok(response.text().await.map_err(|e| e.to_string())?)
 }
@@ -83,25 +131,44 @@ async fn fetch_github_repo(
     token: Option<String>,
     max_files: Option<u32>,
 ) -> Result<GithubRepoData, String> {
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert("User-Agent", "tauri-app".parse().unwrap());
-    if let Some(t) = token {
-        headers.insert("Authorization", format!("token {}", t).parse().unwrap());
-    }
-
     // Fetch basic info
     let info_url = format!("https://api.github.com/repos/{}/{}", owner, repo);
-    let info_res = state
-        .http_client
-        .get(info_url)
-        .headers(headers.clone())
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !info_res.status().is_success() {
-        return Err(format!("Failed to fetch repo info: {}", info_res.status()));
+    let mut builder = isahc::Request::builder()
+        .method("GET")
+        .uri(&info_url)
+        .header("Accept", "application/vnd.github.v3+json")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+    if let Some(ref t) = token {
+        if !t.is_empty() {
+            builder = builder.header("Authorization", format!("token {}", t));
+        }
     }
-    let info_json: serde_json::Value = info_res.json().await.map_err(|e| e.to_string())?;
+
+    let mut info_res = state
+        .http_client
+        .send_async(builder.body(()).unwrap())
+        .await
+        .map_err(|e| {
+            let mut msg = format!("error sending request for url ({}): {}", info_url, e);
+            let mut curr = &e as &dyn std::error::Error;
+            while let Some(source) = curr.source() {
+                msg.push_str(&format!(" | Caused by: {}", source));
+                curr = source;
+            }
+            msg
+        })?;
+
+    if !info_res.status().is_success() {
+        return Err(format!(
+            "Failed to fetch repo info ({}): {}",
+            info_res.status(),
+            info_res.text().await.unwrap_or_default()
+        ));
+    }
+    
+    let info_text = info_res.text().await.map_err(|e| e.to_string())?;
+    let info_json: serde_json::Value = serde_json::from_str(&info_text).map_err(|e| e.to_string())?;
 
     let default_branch = info_json["default_branch"]
         .as_str()
@@ -117,14 +184,26 @@ async fn fetch_github_repo(
         "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
         owner, repo, default_branch
     );
-    let tree_res = state
+    let mut tree_builder = isahc::Request::builder()
+        .method("GET")
+        .uri(&tree_url)
+        .header("Accept", "application/vnd.github.v3+json")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+    if let Some(ref t) = token {
+        if !t.is_empty() {
+            tree_builder = tree_builder.header("Authorization", format!("token {}", t));
+        }
+    }
+
+    let mut tree_res = state
         .http_client
-        .get(tree_url)
-        .headers(headers.clone())
-        .send()
+        .send_async(tree_builder.body(()).unwrap())
         .await
         .map_err(|e| e.to_string())?;
-    let tree_json: serde_json::Value = tree_res.json().await.map_err(|e| e.to_string())?;
+    
+    let tree_text = tree_res.text().await.map_err(|e| e.to_string())?;
+    let tree_json: serde_json::Value = serde_json::from_str(&tree_text).map_err(|e| e.to_string())?;
 
     let mut tree_paths: Vec<String> = tree_json["tree"]
         .as_array()
@@ -170,29 +249,36 @@ async fn fetch_github_repo(
     // Fetch README
     let mut readme = String::new();
     let readme_url = format!("https://api.github.com/repos/{}/{}/readme", owner, repo);
-    if let Ok(readme_res) = state
-        .http_client
-        .get(readme_url)
-        .headers(headers.clone())
-        .send()
-        .await
-    {
+    let mut readme_builder = isahc::Request::builder()
+        .method("GET")
+        .uri(&readme_url)
+        .header("Accept", "application/vnd.github.v3+json")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+    if let Some(ref t) = token {
+        if !t.is_empty() {
+            readme_builder = readme_builder.header("Authorization", format!("token {}", t));
+        }
+    }
+
+    if let Ok(mut readme_res) = state.http_client.send_async(readme_builder.body(()).unwrap()).await {
         if readme_res.status().is_success() {
-            if let Ok(readme_json) = readme_res.json::<serde_json::Value>().await {
-                if let Some(content) = readme_json["content"].as_str() {
-                    let cleaned = content.replace('\n', "").replace('\r', "");
-                    if let Ok(decoded) =
-                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, cleaned)
-                    {
-                        readme = String::from_utf8_lossy(&decoded).to_string();
+            if let Ok(readme_text) = readme_res.text().await {
+                if let Ok(readme_json) = serde_json::from_str::<serde_json::Value>(&readme_text) {
+                    if let Some(content) = readme_json["content"].as_str() {
+                        let cleaned = content.replace('\n', "").replace('\r', "");
+                        if let Ok(decoded) =
+                            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, cleaned)
+                        {
+                            readme = String::from_utf8_lossy(&decoded).to_string();
+                        }
                     }
                 }
             }
         }
     }
 
-    // Fetch dependencies
-    let mut dependencies = String::new();
+    // Sequential fetch for dependencies
     let dep_files = [
         "package.json",
         "requirements.txt",
@@ -201,32 +287,42 @@ async fn fetch_github_repo(
         "pom.xml",
         "build.gradle",
     ];
+    
+    let mut dependencies = String::new();
     for file in dep_files {
         if tree_paths.contains(&file.to_string()) {
             let file_url = format!(
                 "https://api.github.com/repos/{}/{}/contents/{}",
                 owner, repo, file
             );
-            if let Ok(file_res) = state
-                .http_client
-                .get(file_url)
-                .headers(headers.clone())
-                .send()
-                .await
-            {
+            let mut file_builder = isahc::Request::builder()
+                .method("GET")
+                .uri(&file_url)
+                .header("Accept", "application/vnd.github.v3+json")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+            if let Some(ref t) = token {
+                if !t.is_empty() {
+                    file_builder = file_builder.header("Authorization", format!("token {}", t));
+                }
+            }
+
+            if let Ok(mut file_res) = state.http_client.send_async(file_builder.body(()).unwrap()).await {
                 if file_res.status().is_success() {
-                    if let Ok(file_json) = file_res.json::<serde_json::Value>().await {
-                        if let Some(content) = file_json["content"].as_str() {
-                            let cleaned = content.replace('\n', "").replace('\r', "");
-                            if let Ok(decoded) = base64::Engine::decode(
-                                &base64::engine::general_purpose::STANDARD,
-                                cleaned,
-                            ) {
-                                dependencies.push_str(&format!(
-                                    "\n--- {} ---\n{}\n",
-                                    file,
-                                    String::from_utf8_lossy(&decoded)
-                                ));
+                    if let Ok(file_text) = file_res.text().await {
+                        if let Ok(file_json) = serde_json::from_str::<serde_json::Value>(&file_text) {
+                            if let Some(content) = file_json["content"].as_str() {
+                                let cleaned = content.replace('\n', "").replace('\r', "");
+                                if let Ok(decoded) = base64::Engine::decode(
+                                    &base64::engine::general_purpose::STANDARD,
+                                    cleaned,
+                                ) {
+                                    dependencies.push_str(&format!(
+                                        "\n--- {} ---\n{}\n",
+                                        file,
+                                        String::from_utf8_lossy(&decoded)
+                                    ));
+                                }
                             }
                         }
                     }
@@ -321,44 +417,52 @@ async fn fetch_github_repo(
     files_to_fetch.sort_by(|a, b| get_file_score(b).cmp(&get_file_score(a)));
 
     let limit = max_files.unwrap_or(5).clamp(1, 200) as usize;
-    let files_to_fetch = if files_to_fetch.len() > limit {
-        &files_to_fetch[0..limit]
+    let files_to_fetch_names: Vec<String> = if files_to_fetch.len() > limit {
+        files_to_fetch[0..limit].to_vec()
     } else {
-        &files_to_fetch
+        files_to_fetch
     };
 
     let mut source_files = Vec::new();
-    for file in files_to_fetch {
+    for file in files_to_fetch_names {
         let file_url = format!(
             "https://api.github.com/repos/{}/{}/contents/{}",
             owner, repo, file
         );
-        if let Ok(file_res) = state
-            .http_client
-            .get(file_url)
-            .headers(headers.clone())
-            .send()
-            .await
-        {
+        let mut file_builder = isahc::Request::builder()
+            .method("GET")
+            .uri(&file_url)
+            .header("Accept", "application/vnd.github.v3+json")
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+        if let Some(ref t) = token {
+            if !t.is_empty() {
+                file_builder = file_builder.header("Authorization", format!("token {}", t));
+            }
+        }
+
+        if let Ok(mut file_res) = state.http_client.send_async(file_builder.body(()).unwrap()).await {
             if file_res.status().is_success() {
-                if let Ok(file_json) = file_res.json::<serde_json::Value>().await {
-                    if let Some(content) = file_json["content"].as_str() {
-                        let cleaned = content.replace('\n', "").replace('\r', "");
-                        if let Ok(decoded) = base64::Engine::decode(
-                            &base64::engine::general_purpose::STANDARD,
-                            cleaned,
-                        ) {
-                            source_files.push(FileEntry {
-                                path: file.clone(),
-                                content: String::from_utf8_lossy(&decoded).to_string(),
-                            });
+                if let Ok(file_text) = file_res.text().await {
+                    if let Ok(file_json) = serde_json::from_str::<serde_json::Value>(&file_text) {
+                        if let Some(content) = file_json["content"].as_str() {
+                            let cleaned = content.replace('\n', "").replace('\r', "");
+                            if let Ok(decoded) = base64::Engine::decode(
+                                &base64::engine::general_purpose::STANDARD,
+                                cleaned,
+                            ) {
+                                source_files.push(FileEntry {
+                                    path: file.clone(),
+                                    content: String::from_utf8_lossy(&decoded).to_string(),
+                                });
+                            }
                         }
                     }
                 }
             }
         }
     }
-
+    
     let mut is_truncated = false;
     if tree_paths.len() > 1000 {
         tree_paths.truncate(1000);
@@ -401,9 +505,6 @@ async fn start_ollama() -> Result<String, String> {
         return Ok("Ollama is already running".to_string());
     }
 
-    // Since we'll proxy everything through Rust, we don't need OLLAMA_ORIGINS anymore!
-    // This makes it much more robust.
-    
     #[cfg(target_os = "windows")]
     let child = Command::new("ollama")
         .arg("serve")
@@ -435,7 +536,6 @@ async fn stop_ollama() -> Result<String, String> {
     s.refresh_all();
     let mut killed = 0;
     
-    // Look for ollama processes
     for process in s.processes_by_exact_name(OsStr::new("ollama.exe")) {
         process.kill();
         killed += 1;
@@ -455,7 +555,7 @@ async fn stop_ollama() -> Result<String, String> {
 #[tauri::command]
 async fn ollama_check_connection(state: State<'_, AppState>, url: String) -> Result<bool, String> {
     let endpoint = format!("{}/api/tags", url);
-    let res = state.http_client.get(endpoint).send().await;
+    let res = state.http_client.get_async(endpoint).await;
     match res {
         Ok(r) => Ok(r.status().is_success()),
         Err(_) => Ok(false),
@@ -465,16 +565,17 @@ async fn ollama_check_connection(state: State<'_, AppState>, url: String) -> Res
 #[tauri::command]
 async fn ollama_fetch_models(state: State<'_, AppState>, url: String) -> Result<Vec<String>, String> {
     let endpoint = format!("{}/api/tags", url);
-    let res = state.http_client.get(endpoint).send().await.map_err(|e| e.to_string())?;
+    let mut res = state.http_client.get_async(endpoint).await.map_err(|e| e.to_string())?;
     
     if !res.status().is_success() {
         return Ok(Vec::new());
     }
 
-    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let data_text = res.text().await.map_err(|e| e.to_string())?;
+    let data: serde_json::Value = serde_json::from_str(&data_text).map_err(|e| e.to_string())?;
     let models = data["models"]
         .as_array()
-        .map(|a| {
+        .map(|a: &Vec<serde_json::Value>| {
             a.iter()
                 .filter_map(|m| m["name"].as_str().map(|s| s.to_string()))
                 .collect()
@@ -508,10 +609,8 @@ async fn ollama_generate(
         "options": options
     });
 
-    let res = state.http_client
-        .post(endpoint)
-        .json(&body)
-        .send()
+    let mut res = state.http_client
+        .post_async(endpoint, serde_json::to_string(&body).unwrap())
         .await
         .map_err(|e| e.to_string())?;
 
@@ -520,7 +619,8 @@ async fn ollama_generate(
         return Err(format!("Ollama error: {}", err_text));
     }
 
-    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let data_text = res.text().await.map_err(|e| e.to_string())?;
+    let data: serde_json::Value = serde_json::from_str(&data_text).map_err(|e| e.to_string())?;
     let response = data["response"].as_str().unwrap_or_default().to_string();
     
     Ok(response)
@@ -540,10 +640,8 @@ async fn ollama_embed(
         "prompt": prompt
     });
 
-    let res = state.http_client
-        .post(endpoint)
-        .json(&body)
-        .send()
+    let mut res = state.http_client
+        .post_async(endpoint, serde_json::to_string(&body).unwrap())
         .await
         .map_err(|e| e.to_string())?;
 
@@ -552,7 +650,8 @@ async fn ollama_embed(
         return Err(format!("Ollama error: {}", err_text));
     }
 
-    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let res_text = res.text().await.map_err(|e| e.to_string())?;
+    let data: serde_json::Value = serde_json::from_str(&res_text).map_err(|e| e.to_string())?;
     let embedding = data["embedding"]
         .as_array()
         .map(|a| {
@@ -565,10 +664,37 @@ async fn ollama_embed(
     Ok(embedding)
 }
 
+#[tauri::command]
+fn get_gemini_key_source() -> Result<String, String> {
+    let env_key = std::env::var("GEMINI_API_KEY")
+        .or_else(|_| std::env::var("VITE_GEMINI_API_KEY"))
+        .unwrap_or_default();
+    
+    if env_key.is_empty() || env_key == "YOUR_GEMINI_API_KEY_HERE" {
+        Ok("none".to_string())
+    } else {
+        Ok(format!("env:{}...{}", &env_key[..std::cmp::min(4, env_key.len())], &env_key[env_key.len().saturating_sub(4)..]))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let gemini_api_key = std::env::var("VITE_GEMINI_API_KEY")
-        .unwrap_or_else(|_| "YOUR_GEMINI_API_KEY_HERE".to_string());
+    // Priority: GEMINI_API_KEY (system) > VITE_GEMINI_API_KEY (.env) > empty
+    let gemini_api_key = std::env::var("GEMINI_API_KEY")
+        .or_else(|_| std::env::var("VITE_GEMINI_API_KEY"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    println!("[Init] Gemini API key from env: {} (len: {})",
+        if gemini_api_key.is_empty() { "NOT FOUND" } else { &gemini_api_key[..std::cmp::min(4, gemini_api_key.len())] },
+        gemini_api_key.len()
+    );
+
+    let client = HttpClient::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .expect("Failed to create HTTP client");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
@@ -576,7 +702,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             gemini_api_key,
-            http_client: Client::new(),
+            http_client: client,
         })
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -599,8 +725,21 @@ pub fn run() {
             ollama_check_connection,
             ollama_fetch_models,
             ollama_generate,
-            ollama_embed
+            ollama_embed,
+            get_gemini_key_source
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            if let RunEvent::Exit = event {
+                let mut s = System::new_all();
+                s.refresh_all();
+                for process in s.processes_by_exact_name(OsStr::new("ollama.exe")) {
+                    let _ = process.kill();
+                }
+                for process in s.processes_by_exact_name(OsStr::new("ollama")) {
+                    let _ = process.kill();
+                }
+            }
+        });
 }

@@ -52,6 +52,7 @@ export default function App() {
   })();
 
   const [githubToken, setGithubToken] = useState(initialSettings.githubToken || '');
+  const [geminiApiKey, setGeminiApiKey] = useState(initialSettings.geminiApiKey || '');
   const [maxFiles, setMaxFiles] = useState(initialSettings.maxFiles || 5);
   const [inputMode, setInputMode] = useState<'github' | 'local'>(initialSettings.inputMode || 'github');
   const [localFiles, setLocalFiles] = useState<FileList | null>(null);
@@ -95,6 +96,8 @@ export default function App() {
   const [ollamaStatus, setOllamaStatus] = useState<'running' | 'stopped' | 'checking'>('checking');
   const [newTemplateName, setNewTemplateName] = useState('');
   const [isSavingNew, setIsSavingNew] = useState(false);
+  const [envKeyInfo, setEnvKeyInfo] = useState<string>('');
+  const [proxyAddress, setProxyAddress] = useState(initialSettings.proxyAddress || '');
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   // Cache state
@@ -105,6 +108,8 @@ export default function App() {
     const settings = {
       inputMode,
       githubToken,
+      geminiApiKey,
+      proxyAddress,
       maxFiles,
       useOllama,
       useOllamaForFinal,
@@ -120,7 +125,23 @@ export default function App() {
       selectedLocalPath
     };
     localStorage.setItem('gemini_app_settings', JSON.stringify(settings));
-  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature, selectedLocalPath]);
+  }, [inputMode, githubToken, geminiApiKey, proxyAddress, maxFiles, useOllama, useOllamaForFinal, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature, selectedLocalPath]);
+
+  // Check if env var key exists on mount
+  useEffect(() => {
+    const checkEnvKey = async () => {
+      if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core');
+          const source: string = await invoke('get_gemini_key_source');
+          setEnvKeyInfo(source);
+        } catch (e) {
+          console.error('Failed to check env key', e);
+        }
+      }
+    };
+    checkEnvKey();
+  }, []);
 
   useEffect(() => {
     const checkOllamaStatus = async () => {
@@ -373,7 +394,7 @@ export default function App() {
         }
       } else {
         setStatus('Generating system prompt with Gemini...');
-        const result = await generateSystemPrompt(repoData, customInstruction, additionalContext, analyzeIssues, usedOllama);
+        const result = await generateSystemPrompt(repoData, customInstruction, geminiApiKey, proxyAddress, additionalContext, analyzeIssues, usedOllama);
         generatedPrompt = result.text;
         finalModel = result.modelVersion;
       }
@@ -381,7 +402,8 @@ export default function App() {
       setPrompt(generatedPrompt);
       setUsedModel(finalModel);
     } catch (err: any) {
-      setError(err.message || 'An unexpected error occurred.');
+      const errorMessage = typeof err === 'string' ? err : (err.message || JSON.stringify(err) || 'An unexpected error occurred.');
+      setError(errorMessage);
     } finally {
       setLoading(false);
       setStatus('');
@@ -545,6 +567,42 @@ export default function App() {
                   />
                 </div>
               )}
+              <div>
+                <label htmlFor="geminiApiKey" className="block text-xs font-medium text-slate-500 mb-1">
+                  Gemini API Key {geminiApiKey ? '(Manual)' : envKeyInfo && envKeyInfo !== 'none' ? `(Env: ${envKeyInfo.replace('env:', '')})` : '(Not set)'}
+                </label>
+                <input
+                  type="password"
+                  id="geminiApiKey"
+                  className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                  placeholder={envKeyInfo && envKeyInfo !== 'none' ? `Using env: ${envKeyInfo.replace('env:', '')}` : 'AIza...'}
+                  value={geminiApiKey}
+                  onChange={(e) => setGeminiApiKey(e.target.value)}
+                  disabled={loading}
+                />
+                <p className="mt-1 text-xs text-slate-400">
+                  {geminiApiKey
+                    ? 'Using manually entered key (priority over env).'
+                    : envKeyInfo && envKeyInfo !== 'none'
+                      ? 'Using GEMINI_API_KEY from system environment. Enter a key above to override.'
+                      : 'No key found. Enter your API key or set GEMINI_API_KEY env var.'}
+                </p>
+              </div>
+              <div>
+                <label htmlFor="proxyAddress" className="block text-xs font-medium text-slate-500 mb-1">
+                  HTTP Proxy (Optional)
+                </label>
+                <input
+                  type="text"
+                  id="proxyAddress"
+                  className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                  placeholder="http://127.0.0.1:40000"
+                  value={proxyAddress}
+                  onChange={(e) => setProxyAddress(e.target.value)}
+                  disabled={loading}
+                />
+                <p className="mt-1 text-xs text-slate-400">For VPN/WARP: enter address:port. Leave empty for direct connection.</p>
+              </div>
               <div className={inputMode === 'local' ? 'col-span-1 sm:col-span-2' : ''}>
                 <label htmlFor="maxFiles" className="block text-xs font-medium text-slate-500 mb-1">
                   Max Source Files to Fetch
