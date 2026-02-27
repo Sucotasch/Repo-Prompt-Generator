@@ -1,7 +1,13 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::fs;
-use tauri::{Manager, Runtime, State};
+use std::process::Command;
+use sysinfo::System;
+use tauri::State;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 #[derive(Serialize, Deserialize)]
 pub struct FileEntry {
@@ -374,6 +380,191 @@ async fn fetch_github_repo(
     })
 }
 
+#[tauri::command]
+async fn is_ollama_running() -> bool {
+    let mut s = System::new_all();
+    s.refresh_all();
+    let name_win = OsStr::new("ollama.exe");
+    let name_unix = OsStr::new("ollama");
+    for _ in s.processes_by_exact_name(name_win) {
+        return true;
+    }
+    for _ in s.processes_by_exact_name(name_unix) {
+        return true;
+    }
+    false
+}
+
+#[tauri::command]
+async fn start_ollama() -> Result<String, String> {
+    if is_ollama_running().await {
+        return Ok("Ollama is already running".to_string());
+    }
+
+    // Since we'll proxy everything through Rust, we don't need OLLAMA_ORIGINS anymore!
+    // This makes it much more robust.
+    
+    #[cfg(target_os = "windows")]
+    let child = Command::new("ollama")
+        .arg("serve")
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .spawn();
+
+    #[cfg(not(target_os = "windows"))]
+    let child = Command::new("ollama")
+        .arg("serve")
+        .spawn();
+
+    match child {
+        Ok(_) => Ok("Ollama started successfully".to_string()),
+        Err(e) => Err(format!("Failed to start Ollama: {}", e)),
+    }
+}
+
+#[tauri::command]
+async fn save_text_file(path: String, content: String) -> Result<String, String> {
+    match fs::write(&path, content) {
+        Ok(_) => Ok(format!("Successfully saved to {}", path)),
+        Err(e) => Err(format!("Failed to save file: {}", e)),
+    }
+}
+
+#[tauri::command]
+async fn stop_ollama() -> Result<String, String> {
+    let mut s = System::new_all();
+    s.refresh_all();
+    let mut killed = 0;
+    
+    // Look for ollama processes
+    for process in s.processes_by_exact_name(OsStr::new("ollama.exe")) {
+        process.kill();
+        killed += 1;
+    }
+    for process in s.processes_by_exact_name(OsStr::new("ollama")) {
+        process.kill();
+        killed += 1;
+    }
+
+    if killed > 0 {
+        Ok(format!("Stopped {} Ollama processes", killed))
+    } else {
+        Ok("No Ollama processes found".to_string())
+    }
+}
+
+#[tauri::command]
+async fn ollama_check_connection(state: State<'_, AppState>, url: String) -> Result<bool, String> {
+    let endpoint = format!("{}/api/tags", url);
+    let res = state.http_client.get(endpoint).send().await;
+    match res {
+        Ok(r) => Ok(r.status().is_success()),
+        Err(_) => Ok(false),
+    }
+}
+
+#[tauri::command]
+async fn ollama_fetch_models(state: State<'_, AppState>, url: String) -> Result<Vec<String>, String> {
+    let endpoint = format!("{}/api/tags", url);
+    let res = state.http_client.get(endpoint).send().await.map_err(|e| e.to_string())?;
+    
+    if !res.status().is_success() {
+        return Ok(Vec::new());
+    }
+
+    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let models = data["models"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m["name"].as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    
+    Ok(models)
+}
+
+#[tauri::command]
+async fn ollama_generate(
+    state: State<'_, AppState>,
+    url: String,
+    model: String,
+    prompt: String,
+    num_ctx: Option<u32>,
+    num_predict: Option<u32>,
+    temperature: Option<f32>,
+) -> Result<String, String> {
+    let endpoint = format!("{}/api/generate", url);
+    
+    let mut options = serde_json::Map::new();
+    if let Some(ctx) = num_ctx { options.insert("num_ctx".to_string(), serde_json::Value::from(ctx)); }
+    if let Some(predict) = num_predict { options.insert("num_predict".to_string(), serde_json::Value::from(predict)); }
+    if let Some(temp) = temperature { options.insert("temperature".to_string(), serde_json::Value::from(temp)); }
+
+    let body = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "stream": false,
+        "options": options
+    });
+
+    let res = state.http_client
+        .post(endpoint)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !res.status().is_success() {
+        let err_text = res.text().await.unwrap_or_default();
+        return Err(format!("Ollama error: {}", err_text));
+    }
+
+    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let response = data["response"].as_str().unwrap_or_default().to_string();
+    
+    Ok(response)
+}
+
+#[tauri::command]
+async fn ollama_embed(
+    state: State<'_, AppState>,
+    url: String,
+    model: String,
+    prompt: String,
+) -> Result<Vec<f32>, String> {
+    let endpoint = format!("{}/api/embeddings", url);
+    
+    let body = serde_json::json!({
+        "model": model,
+        "prompt": prompt
+    });
+
+    let res = state.http_client
+        .post(endpoint)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !res.status().is_success() {
+        let err_text = res.text().await.unwrap_or_default();
+        return Err(format!("Ollama error: {}", err_text));
+    }
+
+    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let embedding = data["embedding"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect()
+        })
+        .ok_or_else(|| "No embedding field in response".to_string())?;
+    
+    Ok(embedding)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let gemini_api_key = std::env::var("VITE_GEMINI_API_KEY")
@@ -400,7 +591,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             call_gemini_secure,
             scan_local_repository,
-            fetch_github_repo
+            fetch_github_repo,
+            is_ollama_running,
+            start_ollama,
+            stop_ollama,
+            save_text_file,
+            ollama_check_connection,
+            ollama_fetch_models,
+            ollama_generate,
+            ollama_embed
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

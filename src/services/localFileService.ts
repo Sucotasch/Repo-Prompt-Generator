@@ -1,16 +1,20 @@
 import { RepoData } from './githubService';
 
-export async function selectLocalFolderWithTauri(maxFiles: number): Promise<RepoData> {
+export async function selectLocalFolderWithTauri(maxFiles: number, existingPath?: string): Promise<RepoData> {
   const { open } = await import('@tauri-apps/plugin-dialog');
   const { invoke } = await import('@tauri-apps/api/core');
 
-  const selected = await open({
-    directory: true,
-    multiple: false,
-    title: "Select Repository Folder"
-  });
+  let selected: string | null = existingPath || null;
 
-  if (!selected || typeof selected !== 'string') {
+  if (!selected) {
+    selected = await open({
+      directory: true,
+      multiple: false,
+      title: "Select Repository Folder"
+    }) as string | null;
+  }
+
+  if (!selected) {
     throw new Error("No folder selected");
   }
 

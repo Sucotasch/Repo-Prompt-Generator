@@ -3,7 +3,7 @@ import { Github, FileText, Loader2, Copy, Check, Download, Settings2, AlertTrian
 import { fetchRepoData } from './services/githubService';
 import { selectLocalFolderWithTauri } from './services/localFileService';
 import { generateSystemPrompt, buildPromptText } from './services/geminiService';
-import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama } from './services/ollamaService';
+import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama, startOllamaNative, stopOllamaNative, isOllamaRunningNative } from './services/ollamaService';
 import { performRAG } from './services/ragService';
 
 const TEMPLATES = {
@@ -90,6 +90,9 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [status, setStatus] = useState('');
   const [isTruncated, setIsTruncated] = useState(false);
+  const [ollamaRunning, setOllamaRunning] = useState(false);
+  const [isOllamaLoading, setIsOllamaLoading] = useState(false);
+  const [ollamaStatus, setOllamaStatus] = useState<'running' | 'stopped' | 'checking'>('checking');
   const [newTemplateName, setNewTemplateName] = useState('');
   const [isSavingNew, setIsSavingNew] = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -118,6 +121,26 @@ export default function App() {
     };
     localStorage.setItem('gemini_app_settings', JSON.stringify(settings));
   }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature, selectedLocalPath]);
+
+  useEffect(() => {
+    const checkOllamaStatus = async () => {
+      if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+        try {
+          const running = await isOllamaRunningNative();
+          setOllamaRunning(running);
+          setOllamaStatus(running ? 'running' : 'stopped');
+        } catch (e) {
+          console.error("Failed to check Ollama status", e);
+        }
+      } else {
+        setOllamaStatus('stopped');
+      }
+    };
+
+    checkOllamaStatus();
+    const interval = setInterval(checkOllamaStatus, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleTemplateChange = (mode: string) => {
     setTemplateMode(mode);
@@ -182,18 +205,32 @@ export default function App() {
     setTestingOllama(false);
   };
 
-  const handleDownloadBat = () => {
-    const origin = window.location.origin;
-    const batContent = `@echo off\ncolor 0A\necho ==========================================\necho Starting Ollama with CORS enabled...\necho You can now use the Gemini Prompt Generator!\necho ==========================================\nset OLLAMA_ORIGINS="${origin}"\nollama serve\npause`;
-    const blob = new Blob([batContent], { type: 'application/bat' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'start-ollama.bat';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+
+  const handleOllamaControl = async (action: 'start' | 'stop') => {
+    setIsOllamaLoading(true);
+    setError(null);
+    try {
+      if (action === 'start') {
+        setStatus('Starting Ollama...');
+        const msg = await startOllamaNative();
+        setStatus(msg);
+      } else {
+        setStatus('Stopping Ollama...');
+        const msg = await stopOllamaNative();
+        setStatus(msg);
+      }
+      // Re-verify after a small delay
+      setTimeout(async () => {
+        const running = await isOllamaRunningNative();
+        setOllamaRunning(running);
+        setOllamaStatus(running ? 'running' : 'stopped');
+        setStatus('');
+      }, 2000);
+    } catch (e: any) {
+      setError(`Ollama ${action} failed: ${e.message}`);
+    } finally {
+      setIsOllamaLoading(false);
+    }
   };
 
   const handleSelectLocalFolder = async () => {
@@ -216,9 +253,8 @@ export default function App() {
     e.preventDefault();
     if (inputMode === 'github' && !url) return;
     if (inputMode === 'local' && !selectedLocalPath && (!localFiles || localFiles.length === 0)) {
-      // In Tauri mode, we might want to trigger the dialog if not selected
       if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
-        handleSelectLocalFolder();
+        await handleSelectLocalFolder();
       }
       return;
     }
@@ -253,10 +289,13 @@ export default function App() {
       } else {
         setStatus('Processing local files...');
         if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
-          repoData = await selectLocalFolderWithTauri(maxFiles);
+          repoData = await selectLocalFolderWithTauri(maxFiles, selectedLocalPath || undefined);
           // Updating the path if it was selected through the generate button
           if (repoData.info.description.startsWith('Local folder: ')) {
-            setSelectedLocalPath(repoData.info.description.replace('Local folder: ', ''));
+            const newPath = repoData.info.description.replace('Local folder: ', '');
+            if (newPath !== selectedLocalPath) {
+              setSelectedLocalPath(newPath);
+            }
           }
         } else {
           // @ts-ignore
@@ -357,8 +396,30 @@ export default function App() {
     }
   };
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (prompt) {
+      if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+        try {
+          const { save } = await import('@tauri-apps/plugin-dialog');
+          const { invoke } = await import('@tauri-apps/api/core');
+
+          const path = await save({
+            filters: [{ name: 'Markdown', extensions: ['md'] }],
+            defaultPath: 'gemini.md'
+          });
+
+          if (path) {
+            setStatus('Saving file...');
+            const result = await invoke('save_text_file', { path, content: prompt });
+            setStatus(result as string);
+            setTimeout(() => setStatus(''), 3000);
+          }
+        } catch (e: any) {
+          setError(`Failed to save file: ${e.message}`);
+        }
+        return;
+      }
+
       const blob = new Blob([prompt], { type: 'text/markdown' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -453,7 +514,7 @@ export default function App() {
               )}
               <button
                 type="submit"
-                disabled={loading || (inputMode === 'github' ? !url : (!localFiles || localFiles.length === 0))}
+                disabled={loading || (inputMode === 'github' ? !url : !selectedLocalPath)}
                 className="inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 {loading ? (
@@ -659,6 +720,30 @@ export default function App() {
 
             {/* Ollama Settings */}
             <div className="mt-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-sm font-semibold text-slate-800">Ollama Local LLM</h3>
+                <div className="flex items-center gap-2">
+                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${ollamaStatus === 'running' ? 'bg-green-100 text-green-700' :
+                    ollamaStatus === 'stopped' ? 'bg-slate-200 text-slate-600' : 'bg-amber-100 text-amber-700'
+                    }`}>
+                    {ollamaStatus.toUpperCase()}
+                  </span>
+                  {window.hasOwnProperty('__TAURI_INTERNALS__') && (
+                    <button
+                      type="button"
+                      onClick={() => handleOllamaControl(ollamaStatus === 'running' ? 'stop' : 'start')}
+                      disabled={isOllamaLoading || loading}
+                      className={`inline-flex items-center px-3 py-1 text-xs font-medium rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 transition-all ${ollamaStatus === 'running'
+                        ? 'text-white bg-red-500 hover:bg-red-600 focus:ring-red-400'
+                        : 'text-white bg-green-600 hover:bg-green-700 focus:ring-green-500'
+                        }`}
+                    >
+                      {isOllamaLoading ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
+                      {ollamaStatus === 'running' ? 'Stop Ollama' : 'Start Ollama'}
+                    </button>
+                  )}
+                </div>
+              </div>
               <div className="flex flex-col gap-3 mb-4">
                 <div className="flex items-center">
                   <input
@@ -855,20 +940,12 @@ export default function App() {
                     {ollamaConnected === true && <span className="text-xs text-emerald-600 flex items-center"><Check className="w-3 h-3 mr-1" /> Connected</span>}
                     {ollamaConnected === false && <span className="text-xs text-red-600">Connection failed (Check CORS)</span>}
                   </div>
-                  <div className="text-xs text-slate-500 bg-slate-100 p-3 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <div>
+                  {ollamaConnected === false && (
+                    <div className="text-xs text-slate-500 bg-slate-100 p-3 rounded-lg">
                       <p className="font-medium text-slate-700 mb-1">How to enable CORS for Ollama:</p>
-                      <p>Ollama blocks cross-origin requests by default. To use it here, you must start it with <code className="bg-slate-200 px-1 py-0.5 rounded">OLLAMA_ORIGINS="{window.location.origin}"</code></p>
+                      <p>Ollama blocks cross-origin requests by default. If the "Start Ollama" button doesn't resolve this, ensure Ollama is not already running in the background and try again.</p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleDownloadBat}
-                      className="inline-flex items-center px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors whitespace-nowrap"
-                    >
-                      <Download className="w-3 h-3 mr-1.5" />
-                      Download Windows .bat
-                    </button>
-                  </div>
+                  )}
                 </div>
               )}
             </div>

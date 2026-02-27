@@ -5,20 +5,33 @@ export interface RagChunk {
 }
 
 export async function getEmbedding(text: string, ollamaUrl: string, model: string): Promise<number[]> {
+  if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    try {
+      return await invoke('ollama_embed', {
+        url: ollamaUrl,
+        model,
+        prompt: text
+      });
+    } catch (e: any) {
+      throw new Error(`Embedding failed: ${e.message || e}`);
+    }
+  }
+
   const res = await fetch(`${ollamaUrl.replace(/\/$/, '')}/api/embeddings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ 
-      model, 
+    body: JSON.stringify({
+      model,
       prompt: text
     })
   });
-  
+
   if (!res.ok) {
     const errText = await res.text();
     throw new Error(`Embedding failed (${res.status}): ${errText}`);
   }
-  
+
   const data = await res.json();
   return data.embedding;
 }
@@ -42,10 +55,10 @@ function chunkText(text: string, linesPerChunk: number = 30): string[] {
   // Overlapping chunks by 5 lines to preserve context across boundaries
   const overlap = 5;
   const step = linesPerChunk - overlap;
-  
+
   for (let i = 0; i < lines.length; i += step) {
     let chunk = lines.slice(i, i + linesPerChunk).join('\n');
-    
+
     // Fallback: If a chunk is insanely large (e.g., minified code or base64 on a single line),
     // force-split it by character length to prevent Ollama 500 errors.
     // We use a very safe limit of 8000 characters (approx 2000 tokens) to accommodate 
@@ -58,21 +71,21 @@ function chunkText(text: string, linesPerChunk: number = 30): string[] {
     } else {
       chunks.push(chunk);
     }
-    
+
     if (i + linesPerChunk >= lines.length) break;
   }
   return chunks;
 }
 
 export async function performRAG(
-  sourceFiles: {path: string, content: string}[],
+  sourceFiles: { path: string, content: string }[],
   query: string,
   ollamaUrl: string,
   model: string,
   topK: number = 10,
   onProgress?: (msg: string) => void
-): Promise<{path: string, content: string}[]> {
-  
+): Promise<{ path: string, content: string }[]> {
+
   onProgress?.('Generating embedding for your query...');
   let queryEmbedding: number[];
   try {
@@ -82,10 +95,10 @@ export async function performRAG(
   }
 
   const allChunks: { path: string, content: string, embedding?: number[] }[] = [];
-  
+
   for (const file of sourceFiles) {
     // 30 lines per chunk is safer for embedding models
-    const chunks = chunkText(file.content, 30); 
+    const chunks = chunkText(file.content, 30);
     for (let i = 0; i < chunks.length; i++) {
       allChunks.push({
         path: `${file.path} (Part ${i + 1})`,

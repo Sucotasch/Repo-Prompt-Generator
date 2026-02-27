@@ -26,6 +26,7 @@ tauri-plugin-log = "2"
 reqwest = { version = "0.12", features = ["json"] }
 base64 = "0.22"
 walkdir = "2.5"
+sysinfo = "0.33"
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"
