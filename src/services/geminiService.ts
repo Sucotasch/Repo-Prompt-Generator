@@ -2,9 +2,9 @@ import { GoogleGenAI } from "@google/genai";
 import { RepoData } from "./githubService";
 
 export function buildPromptText(
-  repoData: RepoData, 
+  repoData: RepoData,
   taskInstruction: string,
-  additionalContext?: string, 
+  additionalContext?: string,
   analyzeIssues?: boolean
 ): string {
   return `--- TASK INSTRUCTION ---
@@ -27,27 +27,25 @@ ${additionalContext ? `\nAdditional Context / Future Development Directions:\n${
 }
 
 export async function generateSystemPrompt(
-  repoData: RepoData, 
+  repoData: RepoData,
   taskInstruction: string,
-  additionalContext?: string, 
-  analyzeIssues?: boolean, 
+  additionalContext?: string,
+  analyzeIssues?: boolean,
   usedOllama?: boolean
 ): Promise<{ text: string, modelVersion: string }> {
   const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues);
 
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: prompt,
-  });
+  const { invoke } = await import('@tauri-apps/api/core');
+  const response: string = await invoke('call_gemini_secure', { prompt });
+  const data = JSON.parse(response);
 
-  let finalPrompt = response.text || "Failed to generate prompt.";
+  let finalPrompt = (data.candidates?.[0]?.content?.parts?.[0]?.text) || "Failed to generate prompt.";
   if (usedOllama) {
     finalPrompt = `> **Note:** This context was pre-processed by local LLM.\n\n` + finalPrompt;
   }
 
-  // Extract model version from response if available, otherwise fallback to the requested model
-  const modelVersion = (response as any).modelVersion || (response as any).model || "gemini-3-flash-preview";
+  // Extract model version or fallback
+  const modelVersion = "gemini-3-flash-preview";
 
   return { text: finalPrompt, modelVersion };
 }

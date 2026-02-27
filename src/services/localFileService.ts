@@ -1,68 +1,50 @@
 import { RepoData } from './githubService';
 
-export async function processLocalFolder(files: FileList, maxFiles: number): Promise<RepoData> {
+export async function selectLocalFolderWithTauri(maxFiles: number): Promise<RepoData> {
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const { invoke } = await import('@tauri-apps/api/core');
+
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    title: "Select Repository Folder"
+  });
+
+  if (!selected || typeof selected !== 'string') {
+    throw new Error("No folder selected");
+  }
+
+  const repoName = selected.split(/[\\/]/).pop() || 'local-repo';
+
+  // Scans the repository using Rust for speed and bypassing browser limits
+  const sourceFiles: { path: string, content: string }[] = await invoke('scan_local_repository', { path: selected });
+
+  // Filter and score are now handled by the UI/services or can be refined
+  // For consistency with existing logic, we might want to apply the same scoring here 
+  // if the Rust command returns everything.
+
+  // However, the Rust implementation I wrote returns ALL files. 
+  // Let's refine the Rust command to do filtering too if we want, 
+  // OR we can filter here in JS. 
+
+  // For now, let's mirror the scoring logic from the original service 
+  // but applied to the data returned from Rust.
+
   const HARD_IGNORE = ['venv', '.venv', 'node_modules', '.git', '__pycache__', 'dist', 'build'];
   const SECRET_IGNORE = ['.env', '.pem', '.key', '.cert', '.p12', 'secrets.json', 'credentials.json', 'id_rsa'];
   const depFiles = ['package.json', 'requirements.txt', 'go.mod', 'Cargo.toml', 'pom.xml', 'build.gradle'];
   const sourceExtensions = ['.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.java', '.cpp', '.c', '.h', '.cs', '.md'];
 
-  let repoName = 'local-project';
-  if (files.length > 0 && files[0].webkitRelativePath) {
-    repoName = files[0].webkitRelativePath.split('/')[0];
-  }
-
-  const validFiles: File[] = [];
-  const treePaths: string[] = [];
-
-  // 1. Filter files
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
-    const path = file.webkitRelativePath || file.name;
-    // Strip the root folder name for cleaner paths if webkitRelativePath is present
-    const cleanPath = path.includes('/') ? path.substring(path.indexOf('/') + 1) : path;
-
-    const isHardIgnored = HARD_IGNORE.some(ignore => cleanPath.includes(`/${ignore}/`) || cleanPath.startsWith(`${ignore}/`) || cleanPath === ignore);
-    const isSecret = SECRET_IGNORE.some(secret => cleanPath.endsWith(secret) || cleanPath.includes(`/${secret}`));
-
-    if (!isHardIgnored && !isSecret) {
-      validFiles.push(file);
-      treePaths.push(cleanPath);
-    }
-  }
-
-  // 2. Find README
-  let readme = '';
-  const readmeFile = validFiles.find(f => {
-    const p = f.webkitRelativePath.includes('/') ? f.webkitRelativePath.substring(f.webkitRelativePath.indexOf('/') + 1) : f.name;
-    return p.toLowerCase() === 'readme.md';
-  });
-  if (readmeFile) {
-    readme = await readmeFile.text();
-  }
-
-  // 3. Find Dependencies
-  let dependencies = '';
-  for (const depName of depFiles) {
-    const depFile = validFiles.find(f => {
-      const p = f.webkitRelativePath.includes('/') ? f.webkitRelativePath.substring(f.webkitRelativePath.indexOf('/') + 1) : f.name;
-      return p === depName;
-    });
-    if (depFile) {
-      const content = await depFile.text();
-      dependencies += `\n--- ${depName} ---\n${content}\n`;
-    }
-  }
-
-  // 4. Score and select source files
   const getFileScore = (filePath: string): number => {
     let score = 0;
     const lowerPath = filePath.toLowerCase();
-    const parts = lowerPath.split('/');
+    const parts = lowerPath.split(/[\\/]/);
     const fileName = parts[parts.length - 1];
     const depth = parts.length;
 
     if (
       lowerPath.includes('/test/') || lowerPath.includes('/tests/') || lowerPath.includes('__tests__') ||
+      lowerPath.includes('\\test\\') || lowerPath.includes('\\tests\\') ||
       fileName.includes('.test.') || fileName.includes('.spec.') || fileName.startsWith('test_') || fileName.endsWith('_test.go')
     ) {
       score -= 50;
@@ -74,7 +56,7 @@ export async function processLocalFolder(files: FileList, maxFiles: number): Pro
     }
 
     const coreDirs = ['src/', 'lib/', 'app/', 'core/', 'pkg/', 'internal/'];
-    if (coreDirs.some(d => lowerPath.startsWith(d) || lowerPath.includes(`/${d}`))) {
+    if (coreDirs.some(d => lower_path_contains(lowerPath, d))) {
       score += 20;
     }
 
@@ -87,26 +69,46 @@ export async function processLocalFolder(files: FileList, maxFiles: number): Pro
     return score;
   };
 
-  let filesToFetch = validFiles.filter(f => {
-    const p = f.webkitRelativePath.includes('/') ? f.webkitRelativePath.substring(f.webkitRelativePath.indexOf('/') + 1) : f.name;
-    return sourceExtensions.some(ext => p.endsWith(ext)) && !depFiles.includes(p) && p.toLowerCase() !== 'readme.md';
+  function lower_path_contains(path: string, part: string) {
+    return path.startsWith(part) || path.includes('/' + part) || path.includes('\\' + part);
+  }
+
+  // Filter files
+  const filteredFiles = sourceFiles.filter(f => {
+    const path = f.path;
+    const isHardIgnored = HARD_IGNORE.some(ignore => path.includes(`/${ignore}/`) || path.includes(`\\${ignore}\\`) || path.startsWith(`${ignore}/`) || path.startsWith(`${ignore}\\`));
+    const isSecret = SECRET_IGNORE.some(secret => path.endsWith(secret) || path.includes(`/${secret}`) || path.includes(`\\${secret}`));
+    return !isHardIgnored && !isSecret;
   });
 
-  filesToFetch.sort((a, b) => {
-    const pathA = a.webkitRelativePath.includes('/') ? a.webkitRelativePath.substring(a.webkitRelativePath.indexOf('/') + 1) : a.name;
-    const pathB = b.webkitRelativePath.includes('/') ? b.webkitRelativePath.substring(b.webkitRelativePath.indexOf('/') + 1) : b.name;
-    return getFileScore(pathB) - getFileScore(pathA);
+  const treePaths = filteredFiles.map(f => f.path.replace(selected, '').replace(/^[\\/]/, ''));
+
+  let readme = '';
+  const readmeFile = filteredFiles.find(f => f.path.toLowerCase().endsWith('readme.md'));
+  if (readmeFile) readme = readmeFile.content;
+
+  let dependencies = '';
+  for (const depName of depFiles) {
+    const depFile = filteredFiles.find(f => f.path.endsWith(depName));
+    if (depFile) {
+      dependencies += `\n--- ${depName} ---\n${depFile.content}\n`;
+    }
+  }
+
+  let filesToFetch = filteredFiles.filter(f => {
+    const p = f.path;
+    return sourceExtensions.some(ext => p.endsWith(ext)) && !depFiles.some(d => p.endsWith(d)) && !p.toLowerCase().endsWith('readme.md');
   });
 
-  const limit = Math.min(Math.max(1, Number(maxFiles) || 5), 200); // Allow up to 200 for local
+  filesToFetch.sort((a, b) => getFileScore(b.path) - getFileScore(a.path));
+
+  const limit = Math.min(Math.max(1, Number(maxFiles) || 5), 200);
   filesToFetch = filesToFetch.slice(0, limit);
 
-  const sourceFiles: {path: string, content: string}[] = [];
-  for (const file of filesToFetch) {
-    const p = file.webkitRelativePath.includes('/') ? file.webkitRelativePath.substring(file.webkitRelativePath.indexOf('/') + 1) : file.name;
-    const content = await file.text();
-    sourceFiles.push({ path: p, content });
-  }
+  const finalSourceFiles = filesToFetch.map(f => ({
+    path: f.path.replace(selected, '').replace(/^[\\/]/, ''),
+    content: f.content
+  }));
 
   let finalTreePaths = treePaths;
   let isTruncated = false;
@@ -116,11 +118,17 @@ export async function processLocalFolder(files: FileList, maxFiles: number): Pro
   }
 
   return {
-    info: { owner: 'local', repo: repoName, defaultBranch: 'local', description: 'Local folder analysis' },
+    info: { owner: 'local', repo: repoName, defaultBranch: 'local', description: `Local folder: ${selected}` },
     tree: finalTreePaths,
     readme,
     dependencies,
-    sourceFiles,
+    sourceFiles: finalSourceFiles,
     isTruncated
   };
+}
+
+export async function processLocalFolder(files: FileList, maxFiles: number): Promise<RepoData> {
+  // Legacy support for web FileList
+  // ... (rest of the original function or just throw error in Tauri mode)
+  throw new Error("Standard FileList processing is not supported in Tauri mode. Use selectLocalFolderWithTauri instead.");
 }

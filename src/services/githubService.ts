@@ -19,27 +19,21 @@ export async function fetchRepoData(url: string, token?: string, maxFiles: numbe
     // Parse URL on the client to send only owner and repo
     const githubRegex = /^https:\/\/github\.com\/([a-zA-Z0-9-._]+)\/([a-zA-Z0-9-._]+)/;
     const match = url.match(githubRegex);
-    
+
     if (!match) {
       throw new Error("Invalid GitHub URL format. Please provide a full URL like https://github.com/owner/repo");
     }
-    
+
     const owner = match[1];
     const repo = match[2].replace(/\.git$/, '');
 
-    const response = await fetch('/api/repo', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ owner, repo, token, maxFiles }),
+    const { invoke } = await import('@tauri-apps/api/core');
+    const data = await invoke<RepoData>('fetch_github_repo', {
+      owner,
+      repo,
+      token,
+      maxFiles
     });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || 'Failed to fetch repository data');
-    }
 
     return data;
   } catch (err: any) {
