@@ -5,8 +5,9 @@ use std::ffi::OsStr;
 use std::fs;
 use std::process::Command;
 use std::time::Duration;
-use sysinfo::System;
-use tauri::{State, RunEvent};
+use std::sync::atomic::{AtomicBool, Ordering};
+use sysinfo::{System, ProcessRefreshKind};
+use tauri::{State, RunEvent, Manager};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -20,6 +21,8 @@ pub struct FileEntry {
 pub struct AppState {
     pub gemini_api_key: String,
     pub http_client: HttpClient,
+    pub ollama_client: HttpClient,
+    pub we_started_ollama: AtomicBool,
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -78,22 +81,35 @@ async fn call_gemini_secure(state: State<'_, AppState>, prompt: String, api_key:
             .map_err(|e| format!("Gemini API connection error: {}", e))?
     };
 
-    if !response.status().is_success() {
-        let err_body = response.text().await.unwrap_or_else(|_| "Could not read error body".to_string());
-        return Err(format!("Gemini API error ({}): {}", response.status(), err_body));
+    let status = response.status();
+    let res_text = response.text().await.unwrap_or_else(|_| "Could not read response body".to_string());
+
+    if !status.is_success() {
+        return Err(format!("Gemini API error ({}): {}", status, res_text));
     }
 
-    Ok(response.text().await.map_err(|e| e.to_string())?)
+    Ok(res_text)
 }
 
 #[tauri::command]
 async fn scan_local_repository(path: String) -> Result<Vec<FileEntry>, String> {
     let mut files = Vec::new();
-    for entry in walkdir::WalkDir::new(path)
+    let walker = walkdir::WalkDir::new(path)
         .into_iter()
-        .filter_map(|e| e.ok())
-    {
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            let is_hidden = name.starts_with(".git") || name == ".venv" || name == ".idea" || name == ".vscode";
+            let is_heavy = name == "node_modules" || name == "target" || name == "venv" || name == "build" || name == "__pycache__";
+            !is_hidden && !is_heavy
+        });
+
+    for entry in walker.filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
+            if let Ok(metadata) = entry.metadata() {
+                if metadata.len() > 1_000_000 {
+                    continue; // Skip files > 1MB
+                }
+            }
             if let Ok(content) = fs::read_to_string(entry.path()) {
                 files.push(FileEntry {
                     path: entry.path().display().to_string(),
@@ -486,21 +502,16 @@ async fn fetch_github_repo(
 
 #[tauri::command]
 async fn is_ollama_running() -> bool {
-    let mut s = System::new_all();
-    s.refresh_all();
+    let mut s = System::new();
+    s.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::everything());
     let name_win = OsStr::new("ollama.exe");
     let name_unix = OsStr::new("ollama");
-    for _ in s.processes_by_exact_name(name_win) {
-        return true;
-    }
-    for _ in s.processes_by_exact_name(name_unix) {
-        return true;
-    }
-    false
+    
+    s.processes().values().any(|p| p.name() == name_win || p.name() == name_unix)
 }
 
 #[tauri::command]
-async fn start_ollama() -> Result<String, String> {
+async fn start_ollama(state: State<'_, AppState>) -> Result<String, String> {
     if is_ollama_running().await {
         return Ok("Ollama is already running".to_string());
     }
@@ -517,7 +528,10 @@ async fn start_ollama() -> Result<String, String> {
         .spawn();
 
     match child {
-        Ok(_) => Ok("Ollama started successfully".to_string()),
+        Ok(_) => {
+            state.we_started_ollama.store(true, Ordering::SeqCst);
+            Ok("Ollama started successfully".to_string())
+        }
         Err(e) => Err(format!("Failed to start Ollama: {}", e)),
     }
 }
@@ -531,31 +545,36 @@ async fn save_text_file(path: String, content: String) -> Result<String, String>
 }
 
 #[tauri::command]
-async fn stop_ollama() -> Result<String, String> {
-    let mut s = System::new_all();
-    s.refresh_all();
-    let mut killed = 0;
-    
-    for process in s.processes_by_exact_name(OsStr::new("ollama.exe")) {
-        process.kill();
-        killed += 1;
-    }
-    for process in s.processes_by_exact_name(OsStr::new("ollama")) {
-        process.kill();
-        killed += 1;
-    }
+async fn stop_ollama(state: State<'_, AppState>) -> Result<String, String> {
+    let we_started_it = state.we_started_ollama.swap(false, Ordering::SeqCst);
 
-    if killed > 0 {
-        Ok(format!("Stopped {} Ollama processes", killed))
+    if we_started_it {
+        let mut s = System::new();
+        s.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, ProcessRefreshKind::everything());
+        let mut killed = 0;
+        
+        for process in s.processes_by_exact_name(OsStr::new("ollama.exe")) {
+            process.kill();
+            killed += 1;
+        }
+        for process in s.processes_by_exact_name(OsStr::new("ollama")) {
+            process.kill();
+            killed += 1;
+        }
+        
+        if killed > 0 {
+            return Ok(format!("Stopped {} Ollama processes", killed));
+        }
+        Ok("Process not found. It may have exited.".to_string())
     } else {
-        Ok("No Ollama processes found".to_string())
+        Ok("No Ollama process was started by this application.".to_string())
     }
 }
 
 #[tauri::command]
 async fn ollama_check_connection(state: State<'_, AppState>, url: String) -> Result<bool, String> {
     let endpoint = format!("{}/api/tags", url);
-    let res = state.http_client.get_async(endpoint).await;
+    let res = state.ollama_client.get_async(endpoint).await;
     match res {
         Ok(r) => Ok(r.status().is_success()),
         Err(_) => Ok(false),
@@ -565,7 +584,7 @@ async fn ollama_check_connection(state: State<'_, AppState>, url: String) -> Res
 #[tauri::command]
 async fn ollama_fetch_models(state: State<'_, AppState>, url: String) -> Result<Vec<String>, String> {
     let endpoint = format!("{}/api/tags", url);
-    let mut res = state.http_client.get_async(endpoint).await.map_err(|e| e.to_string())?;
+    let mut res = state.ollama_client.get_async(endpoint).await.map_err(|e| e.to_string())?;
     
     if !res.status().is_success() {
         return Ok(Vec::new());
@@ -609,17 +628,18 @@ async fn ollama_generate(
         "options": options
     });
 
-    let mut res = state.http_client
+    let mut res = state.ollama_client
         .post_async(endpoint, serde_json::to_string(&body).unwrap())
         .await
         .map_err(|e| e.to_string())?;
 
-    if !res.status().is_success() {
-        let err_text = res.text().await.unwrap_or_default();
-        return Err(format!("Ollama error: {}", err_text));
+    let status = res.status();
+    let data_text = res.text().await.map_err(|e| e.to_string())?;
+
+    if !status.is_success() {
+        return Err(format!("Ollama error: {}", data_text));
     }
 
-    let data_text = res.text().await.map_err(|e| e.to_string())?;
     let data: serde_json::Value = serde_json::from_str(&data_text).map_err(|e| e.to_string())?;
     let response = data["response"].as_str().unwrap_or_default().to_string();
     
@@ -640,17 +660,18 @@ async fn ollama_embed(
         "prompt": prompt
     });
 
-    let mut res = state.http_client
+    let mut res = state.ollama_client
         .post_async(endpoint, serde_json::to_string(&body).unwrap())
         .await
         .map_err(|e| e.to_string())?;
 
-    if !res.status().is_success() {
-        let err_text = res.text().await.unwrap_or_default();
-        return Err(format!("Ollama error: {}", err_text));
+    let status = res.status();
+    let res_text = res.text().await.map_err(|e| e.to_string())?;
+
+    if !status.is_success() {
+        return Err(format!("Ollama error: {}", res_text));
     }
 
-    let res_text = res.text().await.map_err(|e| e.to_string())?;
     let data: serde_json::Value = serde_json::from_str(&res_text).map_err(|e| e.to_string())?;
     let embedding = data["embedding"]
         .as_array()
@@ -696,6 +717,11 @@ pub fn run() {
         .build()
         .expect("Failed to create HTTP client");
 
+    let ollama_client = HttpClient::builder()
+        .timeout(Duration::from_secs(3600))
+        .build()
+        .expect("Failed to create Ollama client");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
@@ -703,6 +729,8 @@ pub fn run() {
         .manage(AppState {
             gemini_api_key,
             http_client: client,
+            ollama_client,
+            we_started_ollama: AtomicBool::new(false),
         })
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -730,15 +758,21 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app_handle, event| {
+        .run(move |app_handle, event| {
             if let RunEvent::Exit = event {
-                let mut s = System::new_all();
-                s.refresh_all();
-                for process in s.processes_by_exact_name(OsStr::new("ollama.exe")) {
-                    let _ = process.kill();
-                }
-                for process in s.processes_by_exact_name(OsStr::new("ollama")) {
-                    let _ = process.kill();
+                let we_started_it = {
+                    let state = app_handle.state::<AppState>();
+                    state.we_started_ollama.swap(false, Ordering::SeqCst)
+                };
+                if we_started_it {
+                    let mut s = System::new();
+                    s.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, ProcessRefreshKind::everything());
+                    for process in s.processes_by_exact_name(OsStr::new("ollama.exe")) {
+                        let _ = process.kill();
+                    }
+                    for process in s.processes_by_exact_name(OsStr::new("ollama")) {
+                        let _ = process.kill();
+                    }
                 }
             }
         });

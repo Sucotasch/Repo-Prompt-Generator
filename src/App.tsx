@@ -5,6 +5,7 @@ import { selectLocalFolderWithTauri } from './services/localFileService';
 import { generateSystemPrompt, buildPromptText } from './services/geminiService';
 import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama, startOllamaNative, stopOllamaNative, isOllamaRunningNative } from './services/ollamaService';
 import { performRAG } from './services/ragService';
+import { ask } from '@tauri-apps/plugin-dialog';
 
 const TEMPLATES = {
   default: `You are an expert software engineer and AI assistant. Based on the following GitHub repository information, generate a comprehensive system prompt suitable for further development of the project using Gemini CLI or Antigravity. The prompt should be formatted as markdown, ready to be saved as \`gemini.md\`.
@@ -200,10 +201,17 @@ export default function App() {
     setNewTemplateName('');
   };
 
-  const handleDeleteTemplate = (e: React.MouseEvent) => {
+  const handleDeleteTemplate = async (e: React.MouseEvent) => {
     e.preventDefault();
     if (!templateMode.startsWith('user_')) return;
-    if (!window.confirm('Are you sure you want to delete this template?')) return;
+
+    const yes = await ask('Are you sure you want to delete this template?', {
+      title: 'Delete Template',
+      kind: 'warning',
+    });
+
+    if (!yes) return;
+
     const updated = savedTemplates.filter(t => t.id !== templateMode);
     setSavedTemplates(updated);
     localStorage.setItem('gemini_custom_templates', JSON.stringify(updated));
