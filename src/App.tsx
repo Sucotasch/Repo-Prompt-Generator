@@ -221,15 +221,11 @@ pause`;
     if (inputMode === 'github' && !url) return;
     if (inputMode === 'local' && (!localFiles || localFiles.length === 0)) return;
     
-    if (useRag && !additionalContext.trim()) {
-      setError("Additional Context is required when RAG is enabled. Please enter your search query (e.g., 'Payment processing logic').");
-      return;
-    }
-
     setLoading(true);
     setError(null);
     setPrompt(null);
     setUsedModel(null);
+    setLastOptimizedQuery(null);
     setCopied(false);
     setIsTruncated(false);
 
