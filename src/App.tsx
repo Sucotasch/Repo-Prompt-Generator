@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Github, FileText, Loader2, Copy, Check, Download, Settings2, AlertTriangle, Save, Trash2, Folder } from 'lucide-react';
 import { fetchRepoData } from './services/githubService';
 import { processLocalFolder } from './services/localFileService';
-import { generateSystemPrompt, buildPromptText } from './services/geminiService';
-import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama } from './services/ollamaService';
+import { generateSystemPrompt, buildPromptText, rewriteQueryWithGemini } from './services/geminiService';
+import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama, rewriteQueryWithOllama } from './services/ollamaService';
 import { performRAG } from './services/ragService';
 
 const TEMPLATES = {
@@ -28,6 +28,16 @@ Include:
 2. Algorithm of operation and architecture.
 3. Installation and configuration process.
 4. Examples of using the main functions.`,
+
+  eli5: `Explain what this repository does as if I am a 5-year-old child, but focus heavily on safety. 
+
+Tell me in very simple, funny, and exaggerated (but accurate) terms:
+1. What does this code actually do? (e.g., "It draws pictures of cats" or "It's a boring calculator").
+2. Is it safe to run? 
+3. If it's dangerous, warn me dramatically! (e.g., "Don't even think about running this! It's a malicious joke that will encrypt your C: drive!").
+4. If it's just old or broken, tell me (e.g., "Nothing scary will happen, but it probably won't even run because the code is older than your grandma. You can look at it to learn, but don't try to make it work for you.").
+
+Keep the tone light, entertaining, and extremely easy to understand, but ensure the safety assessment is completely accurate based on the code provided.`,
 
   custom: ''
 };
@@ -86,6 +96,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
+  const [lastOptimizedQuery, setLastOptimizedQuery] = useState<{query: string, intent: string} | null>(null);
   const [copied, setCopied] = useState(false);
   const [status, setStatus] = useState('');
   const [isTruncated, setIsTruncated] = useState(false);
@@ -182,7 +193,18 @@ export default function App() {
 
   const handleDownloadBat = () => {
     const origin = window.location.origin;
-    const batContent = `@echo off\ncolor 0A\necho ==========================================\necho Starting Ollama with CORS enabled...\necho You can now use the Gemini Prompt Generator!\necho ==========================================\nset OLLAMA_ORIGINS="${origin}"\nollama serve\npause`;
+    const batContent = `@echo off
+color 0A
+echo ==========================================
+echo Starting Ollama with CORS enabled...
+echo You can now use the Gemini Prompt Generator!
+echo ==========================================
+set OLLAMA_ORIGINS="${origin}"
+echo Closing existing Ollama instances...
+taskkill /f /im ollama.exe >nul 2>&1
+echo Starting Ollama with CORS enabled for ${origin}...
+start "" ollama serve
+pause`;
     const blob = new Blob([batContent], { type: 'application/bat' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -248,10 +270,36 @@ export default function App() {
       
       if (useRag && repoData.sourceFiles && repoData.sourceFiles.length > 0) {
         try {
+          let optimizedQuery = additionalContext;
+          let queryIntent = 'GENERAL';
+          if (additionalContext.trim() !== '') {
+            setStatus('Optimizing RAG query with LLM...');
+            try {
+              let result;
+              if (useOllamaForFinal) {
+                result = await rewriteQueryWithOllama(additionalContext, ollamaUrl, ollamaModel);
+              } else {
+                result = await rewriteQueryWithGemini(additionalContext);
+              }
+              optimizedQuery = result.optimizedQuery;
+              queryIntent = result.intent;
+              setLastOptimizedQuery({ query: optimizedQuery, intent: queryIntent });
+              console.log("Original RAG query:", additionalContext);
+              console.log("Optimized RAG query:", optimizedQuery);
+              console.log("Detected Intent:", queryIntent);
+            } catch (e) {
+              console.warn("Query optimization failed, using original query", e);
+              setLastOptimizedQuery(null);
+            }
+          } else {
+             setLastOptimizedQuery(null);
+          }
+
           setStatus('Running RAG: Filtering codebase...');
           const ragFiles = await performRAG(
             repoData.sourceFiles,
-            additionalContext,
+            optimizedQuery || customInstruction, // fallback to customInstruction if no additional context
+            queryIntent,
             ollamaUrl,
             ragModel,
             ragTopK,
@@ -495,6 +543,7 @@ export default function App() {
                   <option value="default">Default (gemini.md System Prompt)</option>
                   <option value="security">Security Auditor (Vulnerability Scan)</option>
                   <option value="docs">Documentation Writer (Wiki/README)</option>
+                  <option value="eli5">Explain Like I'm 5 (Safety Check)</option>
                 </optgroup>
                 {savedTemplates.length > 0 && (
                   <optgroup label="Your Saved Templates">
@@ -874,13 +923,23 @@ export default function App() {
         {prompt && (
           <div className="bg-white shadow-sm ring-1 ring-slate-200 rounded-2xl overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50/50">
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-2 flex-wrap gap-y-2">
                 <FileText className="w-5 h-5 text-slate-500" />
                 <h3 className="text-sm font-medium text-slate-900">gemini.md</h3>
                 {usedModel && (
                   <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 text-indigo-800">
                     Model: {usedModel}
                   </span>
+                )}
+                {lastOptimizedQuery && (
+                  <div className="ml-2 flex items-center space-x-1">
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-100 text-emerald-800" title="Detected Intent">
+                      {lastOptimizedQuery.intent}
+                    </span>
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600 truncate max-w-[200px]" title={`Optimized Query: ${lastOptimizedQuery.query}`}>
+                      RAG: {lastOptimizedQuery.query}
+                    </span>
+                  </div>
                 )}
               </div>
               <div className="flex items-center space-x-2">

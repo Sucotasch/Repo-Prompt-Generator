@@ -67,6 +67,7 @@ function chunkText(text: string, linesPerChunk: number = 30): string[] {
 export async function performRAG(
   sourceFiles: {path: string, content: string}[],
   query: string,
+  intent: string,
   ollamaUrl: string,
   model: string,
   topK: number = 10,
@@ -108,17 +109,37 @@ export async function performRAG(
     }
   }
 
-  onProgress?.('Calculating semantic similarity...');
+  onProgress?.('Calculating semantic similarity with intent-aware reranking...');
   const scoredChunks = allChunks
     .filter(c => c.embedding)
-    .map(c => ({
-      ...c,
-      score: cosineSimilarity(queryEmbedding, c.embedding!)
-    }))
+    .map(c => {
+      let score = cosineSimilarity(queryEmbedding, c.embedding!);
+      
+      // Intent-Aware Reranking Multipliers
+      const pathLower = c.path.toLowerCase();
+      const contentLower = c.content.toLowerCase();
+      
+      if (intent === 'BUG_HUNT') {
+        if (pathLower.includes('.test.') || pathLower.includes('.spec.')) score *= 1.1;
+        if (contentLower.includes('error') || contentLower.includes('catch') || contentLower.includes('throw')) score *= 1.1;
+      } else if (intent === 'ARCHITECTURE') {
+        if (pathLower.endsWith('.md') || pathLower.includes('docs/')) score *= 1.2;
+        if (pathLower.includes('types') || pathLower.includes('interfaces')) score *= 1.1;
+        if (pathLower.includes('index.') || pathLower.includes('main.') || pathLower.includes('app.')) score *= 1.1;
+      } else if (intent === 'UI_UX') {
+        if (pathLower.endsWith('.tsx') || pathLower.endsWith('.jsx') || pathLower.endsWith('.css') || pathLower.endsWith('.scss')) score *= 1.2;
+        if (pathLower.includes('components/') || pathLower.includes('views/') || pathLower.includes('pages/')) score *= 1.1;
+      } else if (intent === 'DATA') {
+        if (pathLower.endsWith('.sql') || pathLower.includes('db/') || pathLower.includes('models/')) score *= 1.2;
+        if (pathLower.includes('services/') || pathLower.includes('store/') || pathLower.includes('api/')) score *= 1.1;
+      }
+      
+      return { ...c, score };
+    })
     .sort((a, b) => b.score - a.score);
 
   return scoredChunks.slice(0, topK).map(c => ({
     path: c.path,
-    content: `// RAG Semantic Similarity Score: ${(c.score * 100).toFixed(1)}%\n${c.content}`
+    content: `// RAG Semantic Similarity Score: ${(c.score * 100).toFixed(1)}% (Intent: ${intent})\n${c.content}`
   }));
 }
