@@ -5,12 +5,13 @@ export function buildPromptText(
   repoData: RepoData, 
   taskInstruction: string,
   additionalContext?: string, 
-  analyzeIssues?: boolean
+  analyzeIssues?: boolean,
+  referenceRepoData?: RepoData
 ): string {
-  return `--- TASK INSTRUCTION ---
+  let prompt = `--- TASK INSTRUCTION ---
 ${taskInstruction}
 
---- REPOSITORY CONTEXT ---
+--- TARGET REPOSITORY CONTEXT ---
 Repository Name: ${repoData.info.owner}/${repoData.info.repo}
 Description: ${repoData.info.description}
 
@@ -22,8 +23,27 @@ ${repoData.readme.substring(0, 2000)}
 
 Dependencies:
 ${repoData.dependencies.substring(0, 2000)}
-${repoData.sourceFiles && repoData.sourceFiles.length > 0 ? `\nKey Source Files:\n${repoData.sourceFiles.map(f => `--- ${f.path} ---\n${f.content.substring(0, 2000)}\n`).join('\n')}` : ''}
-${additionalContext ? `\nAdditional Context / Future Development Directions:\n${additionalContext}\n` : ''}${analyzeIssues ? `\nCRITICAL INSTRUCTION: Perform a preliminary analysis of the provided repository data. Identify any obvious errors, bugs, architectural inconsistencies, or critically outdated dependencies. Include these findings directly in the generated output.\n` : ''}`;
+${repoData.sourceFiles && repoData.sourceFiles.length > 0 ? `\nKey Source Files:\n${repoData.sourceFiles.map(f => `--- ${f.path} ---\n${f.content.substring(0, 2000)}\n`).join('\n')}` : ''}`;
+
+  if (referenceRepoData) {
+    prompt += `\n\n--- REFERENCE REPOSITORY CONTEXT (READ-ONLY) ---
+Repository Name: ${referenceRepoData.info.owner}/${referenceRepoData.info.repo}
+Description: ${referenceRepoData.info.description}
+
+File Tree (partial):
+${referenceRepoData.tree.slice(0, 500).join('\n')}
+
+README:
+${referenceRepoData.readme.substring(0, 2000)}
+
+Dependencies:
+${referenceRepoData.dependencies.substring(0, 2000)}
+${referenceRepoData.sourceFiles && referenceRepoData.sourceFiles.length > 0 ? `\nKey Source Files:\n${referenceRepoData.sourceFiles.map(f => `--- ${f.path} ---\n${f.content.substring(0, 2000)}\n`).join('\n')}` : ''}`;
+  }
+
+  prompt += `\n${additionalContext ? `\nAdditional Context / Future Development Directions:\n${additionalContext}\n` : ''}${analyzeIssues ? `\nCRITICAL INSTRUCTION: Perform a preliminary analysis of the provided repository data. Identify any obvious errors, bugs, architectural inconsistencies, or critically outdated dependencies. Include these findings directly in the generated output.\n` : ''}`;
+
+  return prompt;
 }
 
 export async function rewriteQueryWithGemini(query: string): Promise<{optimizedQuery: string, intent: string}> {
@@ -74,9 +94,10 @@ export async function generateSystemPrompt(
   taskInstruction: string,
   additionalContext?: string, 
   analyzeIssues?: boolean, 
-  usedOllama?: boolean
+  usedOllama?: boolean,
+  referenceRepoData?: RepoData
 ): Promise<{ text: string, modelVersion: string }> {
-  const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues);
+  const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData);
 
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   const response = await ai.models.generateContent({

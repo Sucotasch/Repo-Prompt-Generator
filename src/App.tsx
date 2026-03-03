@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Github, FileText, Loader2, Copy, Check, Download, Settings2, AlertTriangle, Save, Trash2, Folder } from 'lucide-react';
+import { Github, FileText, Loader2, Copy, Check, Download, Settings2, AlertTriangle, Save, Trash2, Folder, ChevronDown, Database } from 'lucide-react';
 import { fetchRepoData } from './services/githubService';
 import { processLocalFolder } from './services/localFileService';
 import { generateSystemPrompt, buildPromptText, rewriteQueryWithGemini } from './services/geminiService';
@@ -15,6 +15,46 @@ Generate a system prompt that includes:
 3. Instructions for the AI on how to assist with this specific codebase.
 4. Any specific rules or guidelines for contributing to this project.`,
   
+  audit: `You are an expert Principal Software Engineer conducting a rigorous code audit. Do not rely solely on the README; perform a deep analysis of the provided codebase.
+
+Your audit must include:
+1. **Algorithm & Architecture**: A detailed, step-by-step description of the core algorithms and data flow.
+2. **Defect Identification**: Pinpoint logical errors, dead code (non-functional functions), bugs, race conditions, and bottlenecks.
+3. **Performance Impact**: Analyze any adverse performance impacts caused by the identified deficiencies (e.g., memory leaks, O(n^2) loops).
+4. **Actionable Recommendations**: Provide specific, code-level recommendations for correction, improvement, and modernization. 
+
+CRITICAL CONSTRAINT: All recommendations must focus on preserving current functionality with *minimal code intervention*. Do not suggest complete rewrites unless absolutely necessary. Format the output as a structured Markdown report.`,
+
+  integration: `You are an expert Principal Software Architect specializing in system integration, code migration, and architectural review. 
+You are provided with two distinct codebases:
+1. **[TARGET_REPO]**: The project you need to analyze and potentially modify.
+2. **[REFERENCE_REPO]**: The library, SDK, or example project proposed for integration or as a source of architectural patterns.
+
+Your task is to critically evaluate the user's request to integrate concepts or code from [REFERENCE_REPO] into [TARGET_REPO]. Do not blindly execute the integration; first, assess its feasibility and value.
+
+Your analysis MUST include the following sections in a structured Markdown report:
+
+1. **Feasibility & Impact Analysis**:
+   - Evaluate the architectural fit: Does [REFERENCE_REPO] align with the current stack and paradigms of [TARGET_REPO]?
+   - Identify the benefits and risks/costs.
+   - Provide a definitive verdict: Is this integration recommended, partially recommended, or strongly discouraged?
+   - *If the user has not specified a particular feature to integrate, proactively analyze both codebases and identify the top 1-3 architectural patterns, utilities, or features from [REFERENCE_REPO] that would provide the most value if integrated into [TARGET_REPO].*
+
+2. **Architectural Mapping** (If recommended or partially recommended):
+   - Explain conceptually how the components of [REFERENCE_REPO] map to the existing structures in [TARGET_REPO].
+   - Highlight any architectural bottlenecks or conflicts.
+
+3. **Integration Plan & Code Implementation** (If recommended):
+   - Provide a step-by-step migration or integration plan.
+   - Identify the exact files in [TARGET_REPO] that need to change.
+   - Supply the actual code snippets, strictly basing your API calls, class names, and patterns on the code found in [REFERENCE_REPO]. Do not hallucinate methods.
+
+CRITICAL RULES & GUARDRAILS:
+1. **Domain Preservation (CRITICAL)**: The core purpose, business logic, and domain terminology of [TARGET_REPO] MUST remain completely unchanged. Do not import domain-specific concepts, terminology, or features from [REFERENCE_REPO].
+2. **Pattern Extraction Only**: Treat [REFERENCE_REPO] STRICTLY as a source of technical patterns, architectural solutions, APIs, or algorithms. Abstract these technical solutions away from their original business context before applying them to [TARGET_REPO].
+3. **Read-Only Reference**: DO NOT modify the [REFERENCE_REPO]. It is read-only context.
+4. **Minimal Intervention**: If integration is recommended, do it with the least possible disruption to the existing [TARGET_REPO] architecture.`,
+
   security: `You are an expert cybersecurity auditor. Analyze the provided GitHub repository data to identify hidden threats, dangerous system calls, and data exfiltration mechanisms. Look for "holes", intentionally malicious code, and vulnerabilities (SQL injections, insecure system calls, hardcoded keys, hidden requests to external IPs, socket usage, unauthorized URL access). 
 
 Highlight the use of functions that execute system commands (e.g., eval, exec, subprocess, os.system, P/Invoke) that could lead to RCE. Find attempts to read confidential files (.env, .ssh/id_rsa, /etc/passwd, browser configs) or access Keychain/Credential Manager. Check for obfuscation, strange Base64 strings, or on-the-fly decrypted data blocks. Check the dependencies for "typosquatting".
@@ -65,6 +105,15 @@ export default function App() {
   const [maxFiles, setMaxFiles] = useState(initialSettings.maxFiles || 5);
   const [inputMode, setInputMode] = useState<'github' | 'local'>(initialSettings.inputMode || 'github');
   const [localFiles, setLocalFiles] = useState<FileList | null>(null);
+  
+  // Reference Repository State
+  const [referenceInputMode, setReferenceInputMode] = useState<'github' | 'local'>('github');
+  const [referenceUrl, setReferenceUrl] = useState('');
+  const [referenceLocalFiles, setReferenceLocalFiles] = useState<FileList | null>(null);
+  const [referenceMaxFiles, setReferenceMaxFiles] = useState(initialSettings.maxFiles || 5);
+  const [cachedReferenceRepoData, setCachedReferenceRepoData] = useState<any>(null);
+  const [referenceCacheKey, setReferenceCacheKey] = useState<string>('');
+
   const [templateMode, setTemplateMode] = useState<string>('default');
   const [savedTemplates, setSavedTemplates] = useState<SavedTemplate[]>(() => {
     try {
@@ -88,6 +137,9 @@ export default function App() {
   const [ollamaSummaryPredict, setOllamaSummaryPredict] = useState(initialSettings.ollamaSummaryPredict || 500);
   const [ollamaFinalPredict, setOllamaFinalPredict] = useState(initialSettings.ollamaFinalPredict || 2000);
   const [ollamaTemperature, setOllamaTemperature] = useState(initialSettings.ollamaTemperature !== undefined ? initialSettings.ollamaTemperature : 0.3);
+  const [useQueryExpansion, setUseQueryExpansion] = useState(initialSettings.useQueryExpansion !== undefined ? initialSettings.useQueryExpansion : true);
+  const [useIntentReranking, setUseIntentReranking] = useState(initialSettings.useIntentReranking !== undefined ? initialSettings.useIntentReranking : true);
+  const [showAdvancedRag, setShowAdvancedRag] = useState(false);
   
   const [ollamaConnected, setOllamaConnected] = useState<boolean | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
@@ -123,10 +175,12 @@ export default function App() {
       ollamaNumCtx,
       ollamaSummaryPredict,
       ollamaFinalPredict,
-      ollamaTemperature
+      ollamaTemperature,
+      useQueryExpansion,
+      useIntentReranking
     };
     localStorage.setItem('gemini_app_settings', JSON.stringify(settings));
-  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature]);
+  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature, useQueryExpansion, useIntentReranking]);
 
   const handleTemplateChange = (mode: string) => {
     setTemplateMode(mode);
@@ -263,38 +317,84 @@ pause`;
       if (repoData.isTruncated) {
         setIsTruncated(true);
       }
+
+      let referenceRepoData;
+      if (templateMode === 'integration') {
+        if (referenceInputMode === 'github' && referenceUrl) {
+          const currentRefCacheKey = `${referenceUrl}-${githubToken}-${referenceMaxFiles}`;
+          if (cachedReferenceRepoData && referenceCacheKey === currentRefCacheKey) {
+            setStatus('Using cached reference repository data...');
+            referenceRepoData = cachedReferenceRepoData;
+          } else {
+            setStatus('Fetching reference repository data...');
+            referenceRepoData = await fetchRepoData(referenceUrl, githubToken, referenceMaxFiles);
+            setCachedReferenceRepoData(referenceRepoData);
+            setReferenceCacheKey(currentRefCacheKey);
+          }
+        } else if (referenceInputMode === 'local' && referenceLocalFiles && referenceLocalFiles.length > 0) {
+          setStatus('Processing local reference files...');
+          referenceRepoData = await processLocalFolder(referenceLocalFiles, referenceMaxFiles);
+          setCachedReferenceRepoData(null);
+          setReferenceCacheKey('');
+        }
+        
+        if (referenceRepoData && referenceRepoData.isTruncated) {
+          setIsTruncated(true);
+        }
+      }
       
       if (useRag && repoData.sourceFiles && repoData.sourceFiles.length > 0) {
         try {
           let optimizedQuery = additionalContext;
           let queryIntent = 'GENERAL';
           if (additionalContext.trim() !== '') {
-            setStatus('Optimizing RAG query with LLM...');
-            try {
-              let result;
-              if (useOllamaForFinal) {
-                result = await rewriteQueryWithOllama(additionalContext, ollamaUrl, ollamaModel);
-              } else {
-                result = await rewriteQueryWithGemini(additionalContext);
+            if (useQueryExpansion || useIntentReranking) {
+              setStatus('Optimizing RAG query with LLM...');
+              try {
+                let result;
+                if (useOllamaForFinal) {
+                  result = await rewriteQueryWithOllama(additionalContext, ollamaUrl, ollamaModel);
+                } else {
+                  result = await rewriteQueryWithGemini(additionalContext);
+                }
+                
+                if (useQueryExpansion) {
+                  optimizedQuery = result.optimizedQuery;
+                }
+                if (useIntentReranking) {
+                  queryIntent = result.intent;
+                }
+                
+                setLastOptimizedQuery({ query: optimizedQuery, intent: queryIntent });
+                console.log("Original RAG query:", additionalContext);
+                console.log("Optimized RAG query:", optimizedQuery);
+                console.log("Detected Intent:", queryIntent);
+              } catch (e) {
+                console.warn("Query optimization failed, using original query", e);
+                setLastOptimizedQuery(null);
               }
-              optimizedQuery = result.optimizedQuery;
-              queryIntent = result.intent;
-              setLastOptimizedQuery({ query: optimizedQuery, intent: queryIntent });
-              console.log("Original RAG query:", additionalContext);
-              console.log("Optimized RAG query:", optimizedQuery);
-              console.log("Detected Intent:", queryIntent);
-            } catch (e) {
-              console.warn("Query optimization failed, using original query", e);
-              setLastOptimizedQuery(null);
+            } else {
+              setLastOptimizedQuery({ query: optimizedQuery, intent: 'GENERAL' });
             }
           } else {
              setLastOptimizedQuery(null);
           }
 
+          const getFallbackQuery = () => {
+            if (templateMode === 'audit') return "core logic, complex algorithms, potential bugs, performance bottlenecks, architecture";
+            if (templateMode === 'security') return "security vulnerabilities, authentication, authorization, cryptography, network requests, file access, user input validation";
+            if (templateMode === 'docs') return "main entry points, exported functions, public API, core architecture, high-level modules";
+            if (templateMode === 'integration') return "system architecture, main components, interfaces, exported functions, core business logic, data models";
+            if (templateMode === 'eli5') return "core functionality, main purpose, basic structure, simple logic";
+            return customInstruction.substring(0, 500);
+          };
+          
+          const finalRagQuery = (optimizedQuery || getFallbackQuery()).substring(0, 1000);
+
           setStatus('Running RAG: Filtering codebase...');
           const ragFiles = await performRAG(
             repoData.sourceFiles,
-            optimizedQuery || customInstruction, // fallback to customInstruction if no additional context
+            finalRagQuery,
             queryIntent,
             ollamaUrl,
             ragModel,
@@ -302,6 +402,20 @@ pause`;
             (msg) => setStatus(msg)
           );
           repoData = { ...repoData, sourceFiles: ragFiles };
+          
+          if (referenceRepoData && referenceRepoData.sourceFiles && referenceRepoData.sourceFiles.length > 0) {
+            setStatus('Running RAG: Filtering reference codebase...');
+            const refRagFiles = await performRAG(
+              referenceRepoData.sourceFiles,
+              finalRagQuery,
+              queryIntent,
+              ollamaUrl,
+              ragModel,
+              ragTopK,
+              (msg) => setStatus(msg)
+            );
+            referenceRepoData = { ...referenceRepoData, sourceFiles: refRagFiles };
+          }
         } catch (e: any) {
           setError(`RAG failed: ${e.message}`);
           setLoading(false);
@@ -333,13 +447,30 @@ pause`;
           dependencies: await summarize(repoData.dependencies),
           sourceFiles: summarizedSourceFiles
         };
+
+        if (referenceRepoData) {
+          const refSummarizedSourceFiles = [];
+          if (referenceRepoData.sourceFiles) {
+            for (const file of referenceRepoData.sourceFiles) {
+              setStatus(`Summarizing reference ${file.path} with Ollama...`);
+              const summary = await summarize(file.content);
+              refSummarizedSourceFiles.push({ path: file.path, content: summary });
+            }
+          }
+          referenceRepoData = {
+            ...referenceRepoData,
+            readme: await summarize(referenceRepoData.readme),
+            dependencies: await summarize(referenceRepoData.dependencies),
+            sourceFiles: refSummarizedSourceFiles
+          };
+        }
       }
       
       let generatedPrompt = '';
       let finalModel = '';
       if (useOllamaForFinal && ollamaConnected !== false) {
         setStatus('Generating final prompt with local Ollama...');
-        const promptText = buildPromptText(repoData, customInstruction, additionalContext, analyzeIssues);
+        const promptText = buildPromptText(repoData, customInstruction, additionalContext, analyzeIssues, referenceRepoData);
         generatedPrompt = await generate_final_prompt_with_ollama(promptText, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaFinalPredict, ollamaTemperature);
         
         finalModel = `Ollama (${ollamaModel})`;
@@ -351,7 +482,7 @@ pause`;
         }
       } else {
         setStatus('Generating system prompt with Gemini...');
-        const result = await generateSystemPrompt(repoData, customInstruction, additionalContext, analyzeIssues, usedOllama);
+        const result = await generateSystemPrompt(repoData, customInstruction, additionalContext, analyzeIssues, usedOllama, referenceRepoData);
         generatedPrompt = result.text;
         finalModel = result.modelVersion;
       }
@@ -520,6 +651,90 @@ pause`;
                 </p>
               </div>
             </div>
+
+            {templateMode === 'integration' && (
+              <div className="mt-4 p-4 bg-slate-50 border border-slate-200 rounded-xl">
+                <h3 className="text-sm font-semibold text-slate-800 mb-3 flex items-center">
+                  <Database className="w-4 h-4 mr-2 text-indigo-500" />
+                  Reference Repository (Source of Truth)
+                </h3>
+                <div className="flex border-b border-slate-200 mb-4">
+                  <button
+                    type="button"
+                    className={`py-1.5 px-3 text-xs font-medium border-b-2 transition-colors ${referenceInputMode === 'github' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}
+                    onClick={() => setReferenceInputMode('github')}
+                  >
+                    <Github className="w-3 h-3 inline-block mr-1.5" />
+                    GitHub
+                  </button>
+                  <button
+                    type="button"
+                    className={`py-1.5 px-3 text-xs font-medium border-b-2 transition-colors ${referenceInputMode === 'local' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}
+                    onClick={() => setReferenceInputMode('local')}
+                  >
+                    <Folder className="w-3 h-3 inline-block mr-1.5" />
+                    Local
+                  </button>
+                </div>
+                
+                <div className="flex flex-col sm:flex-row gap-4">
+                  {referenceInputMode === 'github' ? (
+                    <div className="relative flex-grow">
+                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <Github className="h-4 w-4 text-slate-400" />
+                      </div>
+                      <input
+                        type="url"
+                        placeholder="https://github.com/owner/reference-repo"
+                        className="block w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow"
+                        value={referenceUrl}
+                        onChange={(e) => setReferenceUrl(e.target.value)}
+                        disabled={loading}
+                      />
+                    </div>
+                  ) : (
+                    <div className="flex-grow">
+                      <input
+                        type="file"
+                        // @ts-ignore
+                        webkitdirectory=""
+                        directory=""
+                        multiple
+                        onChange={(e) => {
+                          e.preventDefault();
+                          setReferenceLocalFiles(e.target.files);
+                        }}
+                        className="block w-full text-sm text-slate-500 file:mr-4 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
+                        disabled={loading}
+                      />
+                      {referenceLocalFiles && referenceLocalFiles.length > 0 && (
+                        <p className="mt-1 text-xs text-slate-600">
+                          Selected {referenceLocalFiles.length} files
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  <div className="w-full sm:w-40">
+                    <input
+                      type="number"
+                      placeholder="Max Files"
+                      className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                      value={referenceMaxFiles}
+                      onChange={(e) => setReferenceMaxFiles(Number(e.target.value))}
+                      min={1}
+                      max={referenceInputMode === 'local' ? 200 : (githubToken ? 200 : 10)}
+                      disabled={loading}
+                      title={referenceInputMode === 'local' ? 'Limit: 200 files' : (githubToken ? 'Limit: 200 files' : 'Limit: 10 files (Add token to increase)')}
+                    />
+                    <p className="mt-1 text-[10px] text-slate-500 leading-tight">
+                      {referenceInputMode === 'local' 
+                        ? 'Max: 200 (Local)' 
+                        : (githubToken ? 'Max: 200 (Token)' : 'Max: 10 (No Token)')}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
             
             <div className="mt-4 p-4 bg-indigo-50/50 rounded-xl border border-indigo-100">
               <div className="flex items-center mb-3">
@@ -537,6 +752,8 @@ pause`;
               >
                 <optgroup label="Built-in Templates">
                   <option value="default">Default (gemini.md System Prompt)</option>
+                  <option value="audit">Code Audit (Deep Analysis & Fixes)</option>
+                  <option value="integration">Integration & Migration Expert</option>
                   <option value="security">Security Auditor (Vulnerability Scan)</option>
                   <option value="docs">Documentation Writer (Wiki/README)</option>
                   <option value="eli5">Explain Like I'm 5 (Safety Check)</option>
@@ -643,19 +860,19 @@ pause`;
 
             <div className="mt-2">
               <label htmlFor="additionalContext" className="block text-sm font-medium text-slate-700 mb-2">
-                Additional Context (Optional)
+                {templateMode === 'integration' ? 'Integration Goal (Task Directive)' : 'Additional Context / RAG Query (Optional)'}
               </label>
               <textarea
                 id="additionalContext"
                 rows={3}
-                placeholder="e.g., I'm planning to add GPU acceleration support for Nvidia RTX 4xxx series..."
+                placeholder={templateMode === 'integration' ? "What do you want to integrate? (Leave empty to let AI discover the best architectural patterns to borrow from the Reference Repo)" : "e.g., I'm planning to add GPU acceleration support for Nvidia RTX 4xxx series..."}
                 className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow resize-y"
                 value={additionalContext}
                 onChange={(e) => setAdditionalContext(e.target.value)}
                 disabled={loading}
               />
               <p className="mt-2 text-xs text-slate-500">
-                Provide any specific goals, future directions, or constraints you want the AI to know about.
+                {templateMode === 'integration' ? 'Describe what exactly you want to integrate or migrate from the Reference Repo.' : 'Provide any specific goals, future directions, or constraints you want the AI to know about.'}
               </p>
             </div>
 
@@ -797,6 +1014,43 @@ pause`;
                           max={50}
                         />
                       </div>
+                    </div>
+                  )}
+
+                  {useRag && (
+                    <div className="pt-2 border-t border-slate-100">
+                      <button
+                        type="button"
+                        onClick={() => setShowAdvancedRag(!showAdvancedRag)}
+                        className="flex items-center text-xs font-medium text-slate-500 hover:text-slate-700 transition-colors"
+                      >
+                        <Settings2 className="w-3 h-3 mr-1" />
+                        Advanced RAG Settings
+                        <ChevronDown className={`w-3 h-3 ml-1 transition-transform ${showAdvancedRag ? 'rotate-180' : ''}`} />
+                      </button>
+                      
+                      {showAdvancedRag && (
+                        <div className="mt-3 space-y-2 pl-1">
+                          <label className="flex items-center space-x-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={useQueryExpansion}
+                              onChange={(e) => setUseQueryExpansion(e.target.checked)}
+                              className="w-3.5 h-3.5 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span className="text-xs text-slate-600">AI Query Expansion (Expands query with synonyms)</span>
+                          </label>
+                          <label className="flex items-center space-x-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={useIntentReranking}
+                              onChange={(e) => setUseIntentReranking(e.target.checked)}
+                              className="w-3.5 h-3.5 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span className="text-xs text-slate-600">Intent-Aware Reranking (Boosts files based on context)</span>
+                          </label>
+                        </div>
+                      )}
                     </div>
                   )}
 
