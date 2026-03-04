@@ -74,10 +74,17 @@ export async function performRAG(
   onProgress?: (msg: string) => void
 ): Promise<{path: string, content: string}[]> {
   
+  const RAG_SYSTEM_INSTRUCTION = `
+Analyze the provided code snippets. When determining relevance:
+1. Focus on "Concrete Identifiers" (Variable names, Exported Classes, Route Definitions).
+2. Avoid "Abstract Sentiment" (The logic 'feels' like it's for security).
+3. Prioritize files containing the specific "Retrieval Keywords" provided in the query.
+`;
+
   onProgress?.('Generating embedding for your query...');
   let queryEmbedding: number[];
   try {
-    queryEmbedding = await getEmbedding(query, ollamaUrl, model);
+    queryEmbedding = await getEmbedding(query + "\n" + RAG_SYSTEM_INSTRUCTION, ollamaUrl, model);
   } catch (e: any) {
     throw new Error(`Failed to embed query. Make sure you have pulled the model (e.g., 'ollama pull ${model}'). Details: ${e.message}`);
   }

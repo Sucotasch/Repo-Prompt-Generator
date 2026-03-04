@@ -64,18 +64,19 @@ export async function rewriteQueryWithOllama(
   const prompt = `You are an AI assistant optimizing a search query for a Retrieval-Augmented Generation (RAG) system operating on a code repository.
 The user's original query is: "${query}"
 
-Your task is to perform two actions:
-1. Rewrite and expand this query to improve semantic search results. Include synonyms, related technical terms, and likely variable/function names.
-2. Classify the user's intent into one of the following categories:
-   - BUG_HUNT: Looking for errors, bugs, infinite loops, crashes, or debugging.
-   - ARCHITECTURE: Understanding how things work, structure, flow, or documentation.
-   - UI_UX: Looking for frontend components, styles, buttons, views, or user interface.
-   - DATA: Database, saving, API calls, state management, or data flow.
-   - GENERAL: Default category if none of the above fit perfectly.
+Your task is to:
+1. Expand this query into 10-15 specific retrieval keywords.
+2. Classify the intent (BUG_HUNT, ARCHITECTURE, UI_UX, DATA, GENERAL).
+
+STRICT KEYWORD RULES:
+- MUST: Use concrete technical nouns, API names, function signatures, or file paths.
+- MUST: Each keyword = ONE technical concept only.
+- MUST NOT: Use abstract themes (e.g., "cleaner code", "better performance").
+- MUST NOT: Use narrative/summary style keywords.
 
 Return ONLY a valid JSON object with the following structure, nothing else. Do not use markdown formatting blocks like \`\`\`json.
 {
-  "optimizedQuery": "expanded query string here",
+  "optimizedQuery": "keyword1, keyword2, keyword3...",
   "intent": "CATEGORY_NAME"
 }`;
 
