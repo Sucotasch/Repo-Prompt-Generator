@@ -116,7 +116,7 @@ export async function processLocalFolder(files: FileList, maxFiles: number): Pro
   }
 
   return {
-    info: { owner: 'local', repo: repoName, defaultBranch: 'local', description: 'Local folder analysis' },
+    info: { owner: 'local', repo: repoName, defaultBranch: 'local', branch: 'local', description: 'Local folder analysis' },
     tree: finalTreePaths,
     readme,
     dependencies,

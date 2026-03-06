@@ -22,6 +22,9 @@ export function buildPromptText(
   prompt += `<CODEBASE>\n`;
   prompt += `--- TARGET REPOSITORY CONTEXT ---\n`;
   prompt += `Repository Name: ${repoData.info.owner}/${repoData.info.repo}\n`;
+  if (repoData.info.branch) {
+    prompt += `Branch: ${repoData.info.branch}\n`;
+  }
   prompt += `Description: ${repoData.info.description}\n\n`;
   prompt += `File Tree (partial):\n${repoData.tree.slice(0, 500).join('\n')}\n\n`;
   prompt += `README:\n${repoData.readme.substring(0, 2000)}\n\n`;
@@ -33,6 +36,9 @@ export function buildPromptText(
   if (referenceRepoData) {
     prompt += `\n\n--- REFERENCE REPOSITORY CONTEXT (READ-ONLY) ---\n`;
     prompt += `Repository Name: ${referenceRepoData.info.owner}/${referenceRepoData.info.repo}\n`;
+    if (referenceRepoData.info.branch) {
+      prompt += `Branch: ${referenceRepoData.info.branch}\n`;
+    }
     prompt += `Description: ${referenceRepoData.info.description}\n\n`;
     prompt += `File Tree (partial):\n${referenceRepoData.tree.slice(0, 500).join('\n')}\n\n`;
     prompt += `README:\n${referenceRepoData.readme.substring(0, 2000)}\n\n`;

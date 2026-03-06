@@ -12,14 +12,10 @@ async function startServer() {
   // API route to fetch GitHub data
   app.post("/api/repo", async (req, res) => {
     try {
-      const { owner, repo, branch, token, maxFiles = 5 } = req.body;
+      const { owner, repo, token, maxFiles = 5 } = req.body;
       
       if (!owner || !repo || typeof owner !== 'string' || typeof repo !== 'string') {
         return res.status(400).json({ error: "Invalid request. Owner and repo are required." });
-      }
-
-      if (branch && typeof branch !== 'string') {
-        return res.status(400).json({ error: "Invalid request. Branch must be a string." });
       }
 
       const headers: Record<string, string> = {};
@@ -48,14 +44,11 @@ async function startServer() {
       const defaultBranch = infoData.default_branch;
       const description = infoData.description || 'No description provided.';
 
-      const targetBranch = branch || defaultBranch;
-      const encodedBranch = encodeURIComponent(targetBranch);
-
       const HARD_IGNORE = ['venv', '.venv', 'node_modules', '.git', '__pycache__', 'dist', 'build'];
       const SECRET_IGNORE = ['.env', '.pem', '.key', '.cert', '.p12', 'secrets.json', 'credentials.json', 'id_rsa'];
 
       // Fetch tree
-      const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${encodedBranch}?recursive=1`, { headers });
+      const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`, { headers });
       let treePaths: string[] = [];
       
       if (treeRes.ok) {
@@ -68,16 +61,11 @@ async function startServer() {
             const isSecret = SECRET_IGNORE.some(secret => path.endsWith(secret) || path.includes(`/${secret}`));
             return !isHardIgnored && !isSecret;
           });
-      } else {
-        if (treeRes.status === 404) {
-          return res.status(404).json({ error: `Branch, tag, or commit '${targetBranch}' not found in repository.` });
-        }
-        return res.status(treeRes.status).json({ error: `Failed to fetch repository tree: ${treeRes.statusText}` });
       }
 
       // Fetch README
       let readme = '';
-      const readmeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/readme?ref=${encodedBranch}`, { headers });
+      const readmeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/readme`, { headers });
       if (readmeRes.ok) {
         const readmeData = await readmeRes.json();
         try {
@@ -93,7 +81,7 @@ async function startServer() {
       
       for (const file of depFiles) {
         if (treePaths.includes(file)) {
-          const fileRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${file}?ref=${encodedBranch}`, { headers });
+          const fileRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${file}`, { headers });
           if (fileRes.ok) {
             const fileData = await fileRes.json();
             try {
@@ -162,7 +150,7 @@ async function startServer() {
       filesToFetch = filesToFetch.slice(0, limit);
 
       for (const file of filesToFetch) {
-        const fileRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${file}?ref=${encodedBranch}`, { headers });
+        const fileRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${file}`, { headers });
         if (fileRes.ok) {
           const fileData = await fileRes.json();
           try {
@@ -181,7 +169,7 @@ async function startServer() {
       }
 
       res.json({
-        info: { owner, repo, defaultBranch, branch: targetBranch, description },
+        info: { owner, repo, defaultBranch, description },
         tree: treePaths,
         readme,
         dependencies,
