@@ -6,42 +6,52 @@ export function buildPromptText(
   taskInstruction: string,
   additionalContext?: string, 
   analyzeIssues?: boolean,
-  referenceRepoData?: RepoData
+  referenceRepoData?: RepoData,
+  attachedDocs?: {name: string, content: string}[]
 ): string {
-  let prompt = `--- TASK INSTRUCTION ---
-${taskInstruction}
+  let prompt = `<SYSTEM_TEMPLATE>\n${taskInstruction}\n</SYSTEM_TEMPLATE>\n\n`;
 
---- TARGET REPOSITORY CONTEXT ---
-Repository Name: ${repoData.info.owner}/${repoData.info.repo}
-Description: ${repoData.info.description}
-
-File Tree (partial):
-${repoData.tree.slice(0, 500).join('\n')}
-
-README:
-${repoData.readme.substring(0, 2000)}
-
-Dependencies:
-${repoData.dependencies.substring(0, 2000)}
-${repoData.sourceFiles && repoData.sourceFiles.length > 0 ? `\nKey Source Files:\n${repoData.sourceFiles.map(f => `--- ${f.path} ---\n${f.content.substring(0, 2000)}\n`).join('\n')}` : ''}`;
-
-  if (referenceRepoData) {
-    prompt += `\n\n--- REFERENCE REPOSITORY CONTEXT (READ-ONLY) ---
-Repository Name: ${referenceRepoData.info.owner}/${referenceRepoData.info.repo}
-Description: ${referenceRepoData.info.description}
-
-File Tree (partial):
-${referenceRepoData.tree.slice(0, 500).join('\n')}
-
-README:
-${referenceRepoData.readme.substring(0, 2000)}
-
-Dependencies:
-${referenceRepoData.dependencies.substring(0, 2000)}
-${referenceRepoData.sourceFiles && referenceRepoData.sourceFiles.length > 0 ? `\nKey Source Files:\n${referenceRepoData.sourceFiles.map(f => `--- ${f.path} ---\n${f.content.substring(0, 2000)}\n`).join('\n')}` : ''}`;
+  if (attachedDocs && attachedDocs.length > 0) {
+    prompt += `<EXTERNAL_DOCUMENTS>\n`;
+    attachedDocs.forEach(doc => {
+      prompt += `--- Document: ${doc.name} ---\n${doc.content}\n\n`;
+    });
+    prompt += `</EXTERNAL_DOCUMENTS>\n\n`;
   }
 
-  prompt += `\n${additionalContext ? `\nAdditional Context / Future Development Directions:\n${additionalContext}\n` : ''}${analyzeIssues ? `\nCRITICAL INSTRUCTION: Perform a preliminary analysis of the provided repository data. Identify any obvious errors, bugs, architectural inconsistencies, or critically outdated dependencies. Include these findings directly in the generated output.\n` : ''}`;
+  prompt += `<CODEBASE>\n`;
+  prompt += `--- TARGET REPOSITORY CONTEXT ---\n`;
+  prompt += `Repository Name: ${repoData.info.owner}/${repoData.info.repo}\n`;
+  prompt += `Description: ${repoData.info.description}\n\n`;
+  prompt += `File Tree (partial):\n${repoData.tree.slice(0, 500).join('\n')}\n\n`;
+  prompt += `README:\n${repoData.readme.substring(0, 2000)}\n\n`;
+  prompt += `Dependencies:\n${repoData.dependencies.substring(0, 2000)}\n`;
+  if (repoData.sourceFiles && repoData.sourceFiles.length > 0) {
+    prompt += `\nKey Source Files:\n${repoData.sourceFiles.map(f => `--- ${f.path} ---\n${f.content.substring(0, 2000)}\n`).join('\n')}`;
+  }
+
+  if (referenceRepoData) {
+    prompt += `\n\n--- REFERENCE REPOSITORY CONTEXT (READ-ONLY) ---\n`;
+    prompt += `Repository Name: ${referenceRepoData.info.owner}/${referenceRepoData.info.repo}\n`;
+    prompt += `Description: ${referenceRepoData.info.description}\n\n`;
+    prompt += `File Tree (partial):\n${referenceRepoData.tree.slice(0, 500).join('\n')}\n\n`;
+    prompt += `README:\n${referenceRepoData.readme.substring(0, 2000)}\n\n`;
+    prompt += `Dependencies:\n${referenceRepoData.dependencies.substring(0, 2000)}\n`;
+    if (referenceRepoData.sourceFiles && referenceRepoData.sourceFiles.length > 0) {
+      prompt += `\nKey Source Files:\n${referenceRepoData.sourceFiles.map(f => `--- ${f.path} ---\n${f.content.substring(0, 2000)}\n`).join('\n')}`;
+    }
+  }
+  prompt += `\n</CODEBASE>\n\n`;
+
+  prompt += `<FINAL_TASK>\n`;
+  if (additionalContext && additionalContext.trim()) {
+    prompt += `${additionalContext.trim()}\n\n`;
+  }
+  if (analyzeIssues) {
+    prompt += `CRITICAL INSTRUCTION: Perform a preliminary analysis of the provided repository data. Identify any obvious errors, bugs, architectural inconsistencies, or critically outdated dependencies. Include these findings directly in the generated output.\n\n`;
+  }
+  prompt += `CRITICAL REMINDER: Execute the instructions defined in <SYSTEM_TEMPLATE> and <FINAL_TASK> using the provided codebase and external documents. Do not lose focus on the primary objective.\n`;
+  prompt += `</FINAL_TASK>\n`;
 
   return prompt;
 }
@@ -96,9 +106,10 @@ export async function generateSystemPrompt(
   additionalContext?: string, 
   analyzeIssues?: boolean, 
   usedOllama?: boolean,
-  referenceRepoData?: RepoData
+  referenceRepoData?: RepoData,
+  attachedDocs?: {name: string, content: string}[]
 ): Promise<{ text: string, modelVersion: string }> {
-  const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData);
+  const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs);
 
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   const response = await ai.models.generateContent({

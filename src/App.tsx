@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Github, FileText, Loader2, Copy, Check, Download, Settings2, AlertTriangle, Save, Trash2, Folder, ChevronDown, Database } from 'lucide-react';
+import { Github, FileText, Loader2, Copy, Check, Download, Settings2, AlertTriangle, Save, Trash2, Folder, ChevronDown, Database, Paperclip, X } from 'lucide-react';
 import { fetchRepoData } from './services/githubService';
 import { processLocalFolder } from './services/localFileService';
 import { generateSystemPrompt, buildPromptText, rewriteQueryWithGemini } from './services/geminiService';
@@ -125,6 +125,8 @@ export default function App() {
   });
   const [customInstruction, setCustomInstruction] = useState(TEMPLATES.default);
   const [additionalContext, setAdditionalContext] = useState('');
+  const [ragQuery, setRagQuery] = useState('');
+  const [attachedDocs, setAttachedDocs] = useState<{name: string, content: string}[]>([]);
   const [analyzeIssues, setAnalyzeIssues] = useState(false);
   const [useOllama, setUseOllama] = useState(initialSettings.useOllama || false);
   const [useOllamaForFinal, setUseOllamaForFinal] = useState(initialSettings.useOllamaForFinal || false);
@@ -149,6 +151,7 @@ export default function App() {
   const [prompt, setPrompt] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
   const [lastOptimizedQuery, setLastOptimizedQuery] = useState<{query: string, intent: string} | null>(null);
+  const [generatedFileName, setGeneratedFileName] = useState<string>('gemini.md');
   const [copied, setCopied] = useState(false);
   const [status, setStatus] = useState('');
   const [isTruncated, setIsTruncated] = useState(false);
@@ -270,6 +273,26 @@ pause`;
     URL.revokeObjectURL(url);
   };
 
+  const handleAttachDocs = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+    const files = Array.from(e.target.files) as File[];
+    const newDocs: {name: string, content: string}[] = [];
+    for (const file of files) {
+      try {
+        const content = await file.text();
+        newDocs.push({ name: file.name, content });
+      } catch (err) {
+        console.error(`Failed to read file ${file.name}`, err);
+      }
+    }
+    setAttachedDocs(prev => [...prev, ...newDocs]);
+    e.target.value = '';
+  };
+
+  const removeAttachedDoc = (index: number) => {
+    setAttachedDocs(prev => prev.filter((_, i) => i !== index));
+  };
+
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (inputMode === 'github' && !url) return;
@@ -318,6 +341,16 @@ pause`;
         setIsTruncated(true);
       }
 
+      // Generate file name
+      let projectName = 'project';
+      if (repoData.info && repoData.info.repo) {
+        projectName = repoData.info.repo;
+      }
+      const templateName = templateMode === 'default' ? 'gemini' : templateMode;
+      const date = new Date();
+      const timestamp = `${date.getFullYear()}${(date.getMonth() + 1).toString().padStart(2, '0')}${date.getDate().toString().padStart(2, '0')}_${date.getHours().toString().padStart(2, '0')}${date.getMinutes().toString().padStart(2, '0')}`;
+      setGeneratedFileName(`${projectName}_${templateName}_${timestamp}.md`);
+
       let referenceRepoData;
       if (templateMode === 'integration') {
         if (referenceInputMode === 'github' && referenceUrl) {
@@ -345,17 +378,17 @@ pause`;
       
       if (useRag && repoData.sourceFiles && repoData.sourceFiles.length > 0) {
         try {
-          let optimizedQuery = additionalContext;
+          let optimizedQuery = ragQuery;
           let queryIntent = 'GENERAL';
-          if (additionalContext.trim() !== '') {
+          if (ragQuery.trim() !== '') {
             if (useQueryExpansion || useIntentReranking) {
               setStatus('Optimizing RAG query with LLM...');
               try {
                 let result;
                 if (useOllamaForFinal) {
-                  result = await rewriteQueryWithOllama(additionalContext, ollamaUrl, ollamaModel);
+                  result = await rewriteQueryWithOllama(ragQuery, ollamaUrl, ollamaModel);
                 } else {
-                  result = await rewriteQueryWithGemini(additionalContext);
+                  result = await rewriteQueryWithGemini(ragQuery);
                 }
                 
                 if (useQueryExpansion) {
@@ -366,7 +399,7 @@ pause`;
                 }
                 
                 setLastOptimizedQuery({ query: optimizedQuery, intent: queryIntent });
-                console.log("Original RAG query:", additionalContext);
+                console.log("Original RAG query:", ragQuery);
                 console.log("Optimized RAG query:", optimizedQuery);
                 console.log("Detected Intent:", queryIntent);
               } catch (e) {
@@ -390,6 +423,11 @@ pause`;
           };
           
           const finalRagQuery = (optimizedQuery || getFallbackQuery()).substring(0, 1000);
+
+          // Update the UI state so the user can see what was actually used for the search
+          if (!lastOptimizedQuery || lastOptimizedQuery.query.trim() === '') {
+            setLastOptimizedQuery({ query: finalRagQuery, intent: queryIntent || 'AUTO_FALLBACK' });
+          }
 
           setStatus('Running RAG: Filtering codebase...');
           const ragFiles = await performRAG(
@@ -470,7 +508,7 @@ pause`;
       let finalModel = '';
       if (useOllamaForFinal && ollamaConnected !== false) {
         setStatus('Generating final prompt with local Ollama...');
-        const promptText = buildPromptText(repoData, customInstruction, additionalContext, analyzeIssues, referenceRepoData);
+        const promptText = buildPromptText(repoData, customInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs);
         generatedPrompt = await generate_final_prompt_with_ollama(promptText, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaFinalPredict, ollamaTemperature);
         
         finalModel = `Ollama (${ollamaModel})`;
@@ -482,7 +520,7 @@ pause`;
         }
       } else {
         setStatus('Generating system prompt with Gemini...');
-        const result = await generateSystemPrompt(repoData, customInstruction, additionalContext, analyzeIssues, usedOllama, referenceRepoData);
+        const result = await generateSystemPrompt(repoData, customInstruction, additionalContext, analyzeIssues, usedOllama, referenceRepoData, attachedDocs);
         generatedPrompt = result.text;
         finalModel = result.modelVersion;
       }
@@ -511,7 +549,7 @@ pause`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'gemini.md';
+      a.download = generatedFileName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -860,20 +898,49 @@ pause`;
 
             <div className="mt-2">
               <label htmlFor="additionalContext" className="block text-sm font-medium text-slate-700 mb-2">
-                {templateMode === 'integration' ? 'Integration Goal (Task Directive)' : 'Additional Context / RAG Query (Optional)'}
+                Task Instructions & External Context
               </label>
               <textarea
                 id="additionalContext"
                 rows={3}
                 placeholder={templateMode === 'integration' ? "What do you want to integrate? (Leave empty to let AI discover the best architectural patterns to borrow from the Reference Repo)" : "e.g., I'm planning to add GPU acceleration support for Nvidia RTX 4xxx series..."}
-                className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow resize-y"
+                className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow resize-y mb-2"
                 value={additionalContext}
                 onChange={(e) => setAdditionalContext(e.target.value)}
                 disabled={loading}
               />
-              <p className="mt-2 text-xs text-slate-500">
-                {templateMode === 'integration' ? 'Describe what exactly you want to integrate or migrate from the Reference Repo.' : 'Provide any specific goals, future directions, or constraints you want the AI to know about.'}
-              </p>
+              
+              {attachedDocs.length > 0 && (
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {attachedDocs.map((doc, i) => (
+                    <div key={i} className="flex items-center gap-1 bg-indigo-50 text-indigo-700 px-2 py-1 rounded-md text-sm border border-indigo-100">
+                      <Paperclip className="w-3 h-3" />
+                      <span className="truncate max-w-[150px]">{doc.name}</span>
+                      <button type="button" onClick={() => removeAttachedDoc(i)} className="hover:text-indigo-900 ml-1">
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-slate-500">
+                  {templateMode === 'integration' ? 'Describe what exactly you want to integrate or migrate from the Reference Repo.' : 'Provide any specific goals, future directions, or constraints you want the AI to know about.'}
+                </p>
+                <label className="cursor-pointer inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-200">
+                  <Paperclip className="w-3 h-3" />
+                  Attach Documents (.md, .txt)
+                  <input 
+                    type="file" 
+                    multiple 
+                    accept=".md,.txt,.json,.csv,.log" 
+                    className="hidden" 
+                    onChange={handleAttachDocs}
+                    disabled={loading}
+                  />
+                </label>
+              </div>
             </div>
 
             <div className="mt-2 flex items-center">
@@ -976,12 +1043,25 @@ pause`;
                   </div>
                   
                   {useRag && (
-                    <div className="flex flex-col sm:flex-row gap-4 p-3 bg-indigo-50/50 rounded-lg border border-indigo-100">
-                      <div className="flex-1">
-                        <label className="block text-xs font-medium text-indigo-700 mb-1">Embedding Model (RAG)</label>
-                        {availableModels.length > 0 ? (
-                          <select
-                            value={ragModel}
+                    <div className="flex flex-col gap-4 p-3 bg-indigo-50/50 rounded-lg border border-indigo-100">
+                      <div className="w-full">
+                        <label className="block text-xs font-medium text-indigo-700 mb-1">Target Components (RAG Search Query)</label>
+                        <input
+                          type="text"
+                          value={ragQuery}
+                          onChange={(e) => setRagQuery(e.target.value)}
+                          placeholder="e.g., authentication flow, database models, payment gateway..."
+                          className="block w-full px-3 py-2 border border-indigo-200 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
+                          disabled={loading}
+                        />
+                        <p className="mt-1 text-[10px] text-indigo-500">Leave empty to auto-generate based on the selected template.</p>
+                      </div>
+                      <div className="flex flex-col sm:flex-row gap-4">
+                        <div className="flex-1">
+                          <label className="block text-xs font-medium text-indigo-700 mb-1">Embedding Model (RAG)</label>
+                          {availableModels.length > 0 ? (
+                            <select
+                              value={ragModel}
                             onChange={(e) => setRagModel(e.target.value)}
                             className="block w-full px-3 py-2 border border-indigo-200 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
                             disabled={loading}
@@ -1015,6 +1095,7 @@ pause`;
                         />
                       </div>
                     </div>
+                  </div>
                   )}
 
                   {useRag && (
@@ -1175,7 +1256,7 @@ pause`;
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50/50">
               <div className="flex items-center space-x-2 flex-wrap gap-y-2">
                 <FileText className="w-5 h-5 text-slate-500" />
-                <h3 className="text-sm font-medium text-slate-900">gemini.md</h3>
+                <h3 className="text-sm font-medium text-slate-900">{generatedFileName}</h3>
                 {usedModel && (
                   <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 text-indigo-800">
                     Model: {usedModel}
