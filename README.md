@@ -229,6 +229,721 @@ ollama serve
 *   `/src/types`: TypeScript интерфейсы для обеспечения типобезопасности.
 *   `server.ts`: Серверная часть для обхода ограничений CORS некоторых API.
 
+# ПРИМЕР ДОКУМЕНТАЦИИ СГЕНЕРИРОВАННЫЙ ПРИ ПОМОЩИ МОДЕЛИ QWEN 3.5 PLUS
+
+> **🤖 Prompt Generation Metadata**
+> - **Model:** qwen3.5-plus
+> - **Target Repository:** https://github.com/Sucotasch/Repo-Prompt-Generator
+> - **RAG Query:** "ollama. RAG, api, openrouter"
+> - **Additional Context:** Included
+
+---
+
+# Repo Prompt Generator
+
+<div align="center">
+
+![GHBanner](https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6)
+
+**Генератор промптов для анализа кода на основе AI**
+
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue)](https://www.typescriptlang.org/)
+[![React](https://img.shields.io/badge/React-19.0-61dafb)](https://reactjs.org/)
+[![Vite](https://img.shields.io/badge/Vite-6.2-646cff)](https://vitejs.dev/)
+[![Node.js](https://img.shields.io/badge/Node.js-Required-339933)](https://nodejs.org/)
+
+</div>
+
+---
+
+## 📋 Содержание
+
+- [О проекте](#-о-проекте)
+- [Возможности](#-возможности)
+- [Архитектура](#-архитектура)
+- [Алгоритм работы](#-алгоритм-работы)
+- [Установка](#-установка)
+- [Конфигурация](#-конфигурация)
+- [Использование](#-использование)
+- [Поддерживаемые AI-провайдеры](#-поддерживаемые-ai-провайдеры)
+- [Шаблоны промптов](#-шаблоны-промптов)
+- [RAG Система](#-rag-система)
+- [Примеры использования](#-примеры-использования)
+- [Troubleshooting](#-troubleshooting)
+- [Лицензия](#-лицензия)
+
+---
+
+## 🎯 О проекте
+
+**Repo Prompt Generator** — это инструмент для автоматической генерации структурированных промптов и аудита кода на основе репозиториев GitHub или локальных файлов. Приложение использует возможности современных LLM (Gemini, Qwen, Ollama, OpenAI-compatible) для анализа кодовой базы и создания детальной документации.
+
+### Основное назначение
+
+- Генерация промптов формата `gemini.md` для AI-ассистентов
+- Автоматический аудит кода с выявлением проблем безопасности
+- Создание технической документации по репозиторию
+- Интеграционный анализ между разными кодовыми базами
+- RAG-поиск по коду для точного нахождения релевантных фрагментов
+
+---
+
+## ✨ Возможности
+
+| Функция | Описание |
+|---------|----------|
+| 🔍 **Анализ репозиториев** | Поддержка GitHub URL и локальных файлов |
+| 🤖 **Мульти-провайдер AI** | Gemini, Qwen, Ollama, OpenAI-compatible API |
+| 📄 **Генерация промптов** | Автоматическое создание структурированных промптов |
+| 🔒 **Аудит безопасности** | Выявление уязвимостей и проблем безопасности |
+| 📚 **Документация** | Генерация технической документации |
+| 🔗 **Интеграционный анализ** | Сравнение и маппинг между репозиториями |
+| 🧠 **RAG-поиск** | Семантический поиск по кодовой базе |
+| 💾 **Кэширование** | Оптимизация повторных запросов |
+| 🎨 **Современный UI** | React 19 + TailwindCSS + Framer Motion |
+
+---
+
+## 🏗️ Архитектура
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Frontend (React 19)                       │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+│  │   App.tsx   │  │  Components │  │      State Management   │  │
+│  └──────┬──────┘  └─────────────┘  └─────────────────────────┘  │
+│         │                                                        │
+│         ▼                                                        │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                    Service Layer                             │ │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │ │
+│  │  │ githubService│  │localFileServ.│  │    aiAdapter.ts  │   │ │
+│  │  └──────────────┘  └──────────────┘  └──────────────────┘   │ │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │ │
+│  │  │geminiService │  │ ollamaService│  │  qwenService.ts  │   │ │
+│  │  └──────────────┘  └──────────────┘  └──────────────────┘   │ │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │ │
+│  │  │  ragService  │  │openaiCompat. │  │   templates/     │   │ │
+│  │  └──────────────┘  └──────────────┘  └──────────────────┘   │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│         │                                                        │
+│         ▼                                                        │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                    Backend (Express + tsx)                   │ │
+│  │                      server.ts                               │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+              ┌───────────────────────────────┐
+              │      External AI Providers    │
+              │  Gemini │ Qwen │ Ollama │ API │
+              └───────────────────────────────┘
+```
+
+### Структура проекта
+
+```
+Repo-Prompt-Generator/
+├── server.ts                 # Express сервер для API запросов
+├── src/
+│   ├── App.tsx              # Главный компонент приложения
+│   ├── main.tsx             # Точка входа React
+│   ├── index.css            # Глобальные стили
+│   ├── services/
+│   │   ├── aiAdapter.ts     # Адаптер для AI провайдеров
+│   │   ├── geminiService.ts # Интеграция с Google Gemini
+│   │   ├── qwenService.ts   # Интеграция с Alibaba Qwen
+│   │   ├── ollamaService.ts # Интеграция с Ollama (локально)
+│   │   ├── openaiCompatibleService.ts  # OpenAI-compatible API
+│   │   ├── githubService.ts # Работа с GitHub API
+│   │   ├── localFileService.ts # Работа с локальными файлами
+│   │   └── ragService.ts    # RAG система поиска
+│   └── templates/
+│       ├── index.ts         # Экспорт всех шаблонов
+│       ├── default.ts       # Шаблон по умолчанию
+│       ├── audit.ts         # Шаблон аудита безопасности
+│       ├── docs.ts          # Шаблон документации
+│       ├── eli5.ts          # Шаблон объяснения (ELI5)
+│       ├── integration.ts   # Шаблон интеграции
+│       └── security.ts      # Шаблон безопасности
+├── .env.example             # Пример переменных окружения
+├── package.json             # Зависимости и скрипты
+├── tsconfig.json            # Конфигурация TypeScript
+└── vite.config.ts           # Конфигурация Vite
+```
+
+---
+
+## 🔄 Алгоритм работы
+
+```mermaid
+flowchart TD
+    A[Старт] --> B{Выбор источника}
+    B -->|GitHub URL| C[fetchRepoData]
+    B -->|Локальные файлы| D[processLocalFolder]
+    
+    C --> E[Получение файлов репозитория]
+    D --> E
+    
+    E --> F{Использовать RAG?}
+    F -->|Да| G[Оптимизация запроса через LLM]
+    F -->|Нет| H[Прямая генерация промпта]
+    
+    G --> I[Создание эмбеддингов]
+    I --> J[Семантический поиск top-K]
+    J --> K[Получение релевантных чанков]
+    
+    K --> L[Выбор шаблона]
+    H --> L
+    
+    L --> M{Выбор AI провайдера}
+    M -->|Gemini| N[generateSystemPrompt]
+    M -->|Qwen| O[generateSystemPromptWithQwen]
+    M -->|Ollama| P[generate_final_prompt_with_ollama]
+    M -->|Custom| Q[generate_final_prompt_with_openai_compatible]
+    
+    N --> R[Генерация финального промпта]
+    O --> R
+    P --> R
+    Q --> R
+    
+    R --> S[Вывод результата]
+    S --> T[Копирование/Экспорт]
+```
+
+### Детали процесса RAG
+
+1. **Чанкирование**: Файлы разбиваются на чанки по 30 строк (~8000 символов)
+2. **Эмбеддинг**: Каждый чанк преобразуется в векторное представление
+3. **Оптимизация запроса**: LLM извлекает технические ключевые слова
+4. **Семантический поиск**: Вычисление косинусного сходства между запросом и чанками
+5. **Ранжирование**: Выбор top-K наиболее релевантных фрагментов
+
+---
+
+## 📦 Установка
+
+### Требования
+
+| Компонент | Версия | Примечание |
+|-----------|--------|------------|
+| Node.js | 18+ | Обязательно |
+| npm | 9+ | Менеджер пакетов |
+| Git | Любой | Для клонирования репозитория |
+| Ollama | Опционально | Для локальных моделей |
+
+### Шаг 1: Клонирование репозитория
+
+```bash
+git clone https://github.com/Sucotasch/Repo-Prompt-Generator.git
+cd Repo-Prompt-Generator
+```
+
+### Шаг 2: Установка зависимостей
+
+```bash
+npm install
+```
+
+### Шаг 3: Настройка переменных окружения
+
+```bash
+# Скопируйте пример файла окружения
+cp .env.example .env.local
+```
+
+### Шаг 4: Запуск приложения
+
+```bash
+# Режим разработки (с hot-reload)
+npm run dev
+
+# Сборка для продакшена
+npm run build
+
+# Предварительный просмотр сборки
+npm run preview
+
+# Очистка сборки
+npm run clean
+
+# Линтинг TypeScript
+npm run lint
+```
+
+---
+
+## ⚙️ Конфигурация
+
+### Переменные окружения
+
+Создайте файл `.env.local` в корне проекта:
+
+```bash
+# Обязательные
+GEMINI_API_KEY=your_gemini_api_key_here
+
+# Опциональные - Qwen
+QWEN_API_TOKEN=your_qwen_token
+QWEN_RESOURCE_URL=https://dashscope.aliyuncs.com
+
+# Опциональные - Ollama
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=coder-model
+
+# Опциональные - OpenAI Compatible
+CUSTOM_API_BASE_URL=https://api.openai.com/v1
+CUSTOM_API_KEY=your_openai_key
+CUSTOM_MODEL=gpt-4
+```
+
+### Настройка Ollama (для локальных моделей)
+
+1. Установите Ollama: https://ollama.ai
+
+2. Скачайте необходимую модель:
+```bash
+ollama pull coder-model
+# или
+ollama pull llama2
+# или
+ollama pull mistral
+```
+
+3. Запустите Ollama с поддержкой CORS:
+
+**Windows** (используйте предоставленный скрипт):
+```bash
+# В приложении нажмите "Download Ollama Starter Script"
+# Или создайте start-ollama.bat вручную
+```
+
+**Linux/Mac**:
+```bash
+export OLLAMA_ORIGINS="http://localhost:5173"
+ollama serve
+```
+
+---
+
+## 🚀 Использование
+
+### Основной интерфейс
+
+Приложение предоставляет веб-интерфейс со следующими элементами:
+
+1. **Выбор источника кода**
+   - GitHub URL (публичные/приватные репозитории)
+   - Загрузка локальных файлов
+
+2. **Настройки AI**
+   - Выбор провайдера (Gemini/Qwen/Ollama/Custom)
+   - Настройка параметров модели
+
+3. **RAG настройки**
+   - Включение/выключение RAG поиска
+   - Оптимизация запросов
+   - Количество результатов (top-K)
+
+4. **Выбор шаблона**
+   - Default, Audit, Docs, ELI5, Integration, Security
+
+### Работа с GitHub репозиторием
+
+```
+1. Вставьте URL репозитория: https://github.com/user/repo
+2. Укажите GitHub Token (для приватных репо)
+3. Установите лимит файлов (maxFiles)
+4. Нажмите "Fetch Repository"
+```
+
+### Работа с локальными файлами
+
+```
+1. Нажмите "Attach Files"
+2. Выберите файлы или папку
+3. Установите лимит файлов
+4. Нажмите "Process Local Files"
+```
+
+---
+
+## 🤖 Поддерживаемые AI-провайдеры
+
+### Google Gemini (Рекомендуемый)
+
+```typescript
+// Автоматически используется по умолчанию
+// Требуется только GEMINI_API_KEY
+```
+
+**Преимущества:**
+- Высокое качество генерации
+- Большой контекст (до 1M токенов)
+- Быстрая обработка
+
+**Получение ключа:** https://aistudio.google.com/apikey
+
+### Alibaba Qwen
+
+```typescript
+// Требуется токен DashScope
+const config = {
+  qwenToken: "your_token",
+  qwenResourceUrl: "https://dashscope.aliyuncs.com"
+};
+```
+
+**Преимущества:**
+- Хорошая поддержка кода
+- Альтернатива Gemini
+
+### Ollama (Локально)
+
+```typescript
+// Полностью локальная работа
+const config = {
+  ollamaUrl: "http://localhost:11434",
+  ollamaModel: "coder-model"
+};
+```
+
+**Преимущества:**
+- Полная приватность
+- Бесплатно
+- Работает офлайн
+
+### OpenAI Compatible
+
+```typescript
+// Для любых OpenAI-compatible API
+const config = {
+  customBaseUrl: "https://api.openai.com/v1",
+  customApiKey: "your_key",
+  customModel: "gpt-4"
+};
+```
+
+**Поддерживаемые сервисы:**
+- OpenAI API
+- Azure OpenAI
+- LocalAI
+- vLLM
+- И другие совместимые API
+
+---
+
+## 📝 Шаблоны промптов
+
+### Default Template
+
+Базовый шаблон для общего анализа кода.
+
+```typescript
+// src/templates/default.ts
+{
+  name: "Default Analysis",
+  description: "Общий анализ структуры и функциональности",
+  defaultSearchQuery: "main entry point, core modules, exports, dependencies"
+}
+```
+
+### Audit Template
+
+Шаблон для аудита кода и выявления проблем.
+
+```typescript
+// src/templates/audit.ts
+{
+  name: "Code Audit",
+  description: "Выявление проблем архитектуры и кода",
+  defaultSearchQuery: "error handling, validation, edge cases, technical debt"
+}
+```
+
+### Security Template
+
+Шаблон для анализа безопасности.
+
+```typescript
+// src/templates/security.ts
+{
+  name: "Security Audit",
+  description: "Поиск уязвимостей и проблем безопасности",
+  defaultSearchQuery: "authentication, authorization, input validation, secrets"
+}
+```
+
+### Docs Template
+
+Шаблон для генерации документации.
+
+```typescript
+// src/templates/docs.ts
+{
+  name: "Documentation",
+  description: "Создание технической документации",
+  defaultSearchQuery: "public APIs, exported functions, configuration, usage examples"
+}
+```
+
+### ELI5 Template
+
+Шаблон для простого объяснения (Explain Like I'm 5).
+
+```typescript
+// src/templates/eli5.ts
+{
+  name: "ELI5",
+  description: "Простое объяснение для новичков",
+  defaultSearchQuery: "main purpose, how it works, key features"
+}
+```
+
+### Integration Template
+
+Шаблон для анализа интеграции между репозиториями.
+
+```typescript
+// src/templates/integration.ts
+{
+  name: "Integration Analysis",
+  description: "Анализ возможности интеграции компонентов",
+  defaultSearchQuery: "system architecture, main components, interfaces, exported functions"
+}
+```
+
+---
+
+## 🧠 RAG Система
+
+### Как работает RAG
+
+**RAG (Retrieval-Augmented Generation)** позволяет находить релевантные фрагменты кода перед генерацией ответа.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    RAG Pipeline                              │
+├─────────────────────────────────────────────────────────────┤
+│  1. Query → LLM Optimization → Technical Keywords           │
+│  2. Keywords → Embedding Model → Vector Representation      │
+│  3. Code Chunks → Embedding Model → Vector Database         │
+│  4. Cosine Similarity → Top-K Results → Context             │
+│  5. Context + Query → LLM → Final Response                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Настройки RAG
+
+| Параметр | Значение по умолчанию | Описание |
+|----------|----------------------|----------|
+| `topK` | 10 | Количество возвращаемых результатов |
+| `linesPerChunk` | 30 | Строк в одном чанке |
+| `maxCharsPerChunk` | 8000 | Максимум символов в чанке |
+| `useQueryExpansion` | false | Расширение запроса через LLM |
+| `useIntentReranking` | false | Переранжирование по интенту |
+
+### Оптимизация запросов
+
+Система автоматически оптимизирует запросы, извлекая:
+
+- ✅ Конкретные технические термины
+- ✅ Имена функций и классов
+- ✅ Пути к файлам
+- ✅ API названия
+
+- ❌ Абстрактные понятия ("чистый код")
+- ❌ Повествовательные описания
+
+Пример оптимизации:
+```
+Исходный: "Найди где обрабатываются ошибки аутентификации"
+Оптимизированный: "authentication, error handling, login, validateCredentials, AuthError"
+Интент: BUGFIX
+```
+
+---
+
+## 💡 Примеры использования
+
+### Пример 1: Генерация промпта для аудита безопасности
+
+```typescript
+// 1. Выберите шаблон "Security Audit"
+// 2. Укажите GitHub репозиторий
+// 3. Включите RAG с запросом:
+const ragQuery = "authentication, JWT, session management, password hashing";
+
+// 4. Выберите AI провайдер (Gemini)
+// 5. Нажмите "Generate Prompt"
+
+// Результат будет содержать:
+// - Анализ уязвимостей
+// - Рекомендации по исправлению
+// - Конкретные файлы для изменения
+```
+
+### Пример 2: Создание документации
+
+```typescript
+// 1. Выберите шаблон "Documentation"
+// 2. Загрузите локальные файлы проекта
+// 3. RAG запрос:
+const ragQuery = "exported functions, public API, configuration options";
+
+// 4. Сгенерируйте документацию
+// 5. Экспортируйте в markdown
+```
+
+### Пример 3: Интеграционный анализ
+
+```typescript
+// 1. Выберите шаблон "Integration"
+// 2. Укажите целевой репозиторий
+// 3. Укажите референсный репозиторий (откуда брать паттерны)
+// 4. RAG запрос:
+const ragQuery = "API endpoints, data models, service layer";
+
+// 5. Получите план интеграции с кодом
+```
+
+### Пример 4: Локальная работа с Ollama
+
+```bash
+# 1. Запустите Ollama
+ollama serve
+
+# 2. В приложении выберите:
+#    - AI Provider: Ollama
+#    - URL: http://localhost:11434
+#    - Model: coder-model
+
+# 3. Все запросы будут обрабатываться локально
+```
+
+### Пример 5: Использование с кастомным API
+
+```typescript
+// Для совместимых с OpenAI сервисов:
+const config = {
+  provider: 'custom',
+  customBaseUrl: 'https://your-api.com/v1',
+  customApiKey: 'your-key',
+  customModel: 'your-model-name'
+};
+
+// Поддерживает:
+// - OpenAI
+// - Azure OpenAI
+// - LocalAI
+// - vLLM
+// - И другие
+```
+
+---
+
+## 🔧 Troubleshooting
+
+### Ошибка: "Failed to embed query"
+
+**Причина:** Ollama модель не загружена
+
+**Решение:**
+```bash
+ollama pull coder-model
+# или используйте другую модель
+ollama pull llama2
+```
+
+### Ошибка: "CORS Error"
+
+**Причина:** Ollama блокирует запросы из браузера
+
+**Решение:**
+```bash
+# Windows - используйте start-ollama.bat
+# Linux/Mac:
+export OLLAMA_ORIGINS="http://localhost:5173"
+ollama serve
+```
+
+### Ошибка: "Rate Limit Exceeded"
+
+**Причина:** Превышен лимит запросов к API
+
+**Решение:**
+- Подождите сброса лимита
+- Используйте другой провайдер
+- Включите кэширование
+
+### Ошибка: "Repository not found"
+
+**Причина:** Неправильный URL или приватный репозиторий без токена
+
+**Решение:**
+- Проверьте URL репозитория
+- Добавьте GitHub Token в настройки
+- Убедитесь в правах доступа
+
+### Ошибка: "Failed to parse JSON"
+
+**Причина:** AI вернул некорректный JSON
+
+**Решение:**
+- Попробуйте другого провайдера
+- Упростите запрос
+- Проверьте логи в консоли
+
+---
+
+## 📊 Технические характеристики
+
+| Параметр | Значение |
+|----------|----------|
+| Фреймворк | React 19 |
+| Сборщик | Vite 6.2 |
+| Язык | TypeScript 5.8 |
+| Стили | TailwindCSS 4.1 |
+| Анимации | Framer Motion 12 |
+| Сервер | Express 4.21 |
+| AI SDK | @google/genai 1.29 |
+| Безопасность | DOMPurify 3.3 |
+
+---
+
+## 📄 Лицензия
+
+Этот проект распространяется под лицензией MIT. См. файл [LICENSE](LICENSE) для деталей.
+
+---
+
+## 🤝 Вклад в проект
+
+1. Fork репозитория
+2. Создайте feature branch (`git checkout -b feature/amazing-feature`)
+3. Закоммитьте изменения (`git commit -m 'Add amazing feature'`)
+4. Push в branch (`git push origin feature/amazing-feature`)
+5. Откройте Pull Request
+
+---
+
+## 📞 Контакты
+
+- **Repository:** https://github.com/Sucotasch/Repo-Prompt-Generator
+- **AI Studio App:** https://ai.studio/apps/86641903-660b-41c3-870c-5eda53771f82
+
+---
+
+<div align="center">
+
+**Made with ❤️ for developers**
+
+Если этот проект был вам полезен, поставьте ⭐ на GitHub!
+
+</div>
+
+
 ---
 
 **Разработчик:** Sucotasch
