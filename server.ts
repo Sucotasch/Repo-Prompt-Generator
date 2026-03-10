@@ -257,12 +257,19 @@ async function startServer() {
         return res.status(response.status).json({ error: data.error?.message || data.message || `Qwen API Error: ${JSON.stringify(data)}` });
       }
 
+      const rateLimitRemaining = response.headers.get("X-RateLimit-Remaining");
+      const rateLimitReset = response.headers.get("X-RateLimit-Reset");
+
       // Map OpenAI format back to the format expected by the frontend
       res.json({
         output: {
           text: data.choices?.[0]?.message?.content || ""
         },
-        model: data.model
+        model: data.model,
+        rateLimit: {
+          remaining: rateLimitRemaining,
+          reset: rateLimitReset
+        }
       });
     } catch (error: any) {
       console.error("Error proxying Qwen request:", error);

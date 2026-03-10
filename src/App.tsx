@@ -4,6 +4,7 @@ import { fetchRepoData } from './services/githubService';
 import { processLocalFolder } from './services/localFileService';
 import { generateSystemPrompt, buildPromptText, rewriteQueryWithGemini } from './services/geminiService';
 import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama, rewriteQueryWithOllama } from './services/ollamaService';
+import { fetchOpenAICompatibleModels } from './services/openaiCompatibleService';
 import { generatePrompt, rewriteQuery, AIProvider } from './services/aiAdapter';
 import { performRAG } from './services/ragService';
 import { startDeviceAuth, pollDeviceToken } from './services/qwenAuthService';
@@ -63,6 +64,7 @@ export default function App() {
   const [qwenAuthStatus, setQwenAuthStatus] = useState<'idle' | 'polling' | 'success' | 'error'>('idle');
   const [qwenAuthUrl, setQwenAuthUrl] = useState<string | null>(null);
   const [qwenAuthMessage, setQwenAuthMessage] = useState<string>('');
+  const [qwenRateLimit, setQwenRateLimit] = useState<{remaining: string, reset: string} | null>(null);
   const [useRag, setUseRag] = useState(initialSettings.useRag || false);
   const [ragModel, setRagModel] = useState(initialSettings.ragModel || '');
   const [ragTopK, setRagTopK] = useState(initialSettings.ragTopK || 10);
@@ -74,6 +76,16 @@ export default function App() {
   const [ollamaTemperature, setOllamaTemperature] = useState(initialSettings.ollamaTemperature !== undefined ? initialSettings.ollamaTemperature : 0.3);
   const [useQueryExpansion, setUseQueryExpansion] = useState(initialSettings.useQueryExpansion !== undefined ? initialSettings.useQueryExpansion : true);
   const [useIntentReranking, setUseIntentReranking] = useState(initialSettings.useIntentReranking !== undefined ? initialSettings.useIntentReranking : true);
+  
+  // Custom API Provider State
+  const [customBaseUrl, setCustomBaseUrl] = useState(initialSettings.customBaseUrl || '');
+  const [customApiKey, setCustomApiKey] = useState(initialSettings.customApiKey || '');
+  const [customModel, setCustomModel] = useState(initialSettings.customModel || '');
+  const [availableCustomModels, setAvailableCustomModels] = useState<string[]>([]);
+  const [testingCustomProvider, setTestingCustomProvider] = useState(false);
+  const [customProviderConnected, setCustomProviderConnected] = useState<boolean | null>(null);
+  const [customProviderError, setCustomProviderError] = useState<string | null>(null);
+
   const [showAdvancedRag, setShowAdvancedRag] = useState(false);
   
   const [ollamaConnected, setOllamaConnected] = useState<boolean | null>(null);
@@ -116,10 +128,13 @@ export default function App() {
       ollamaFinalPredict,
       ollamaTemperature,
       useQueryExpansion,
-      useIntentReranking
+      useIntentReranking,
+      customBaseUrl,
+      customApiKey,
+      customModel
     };
     localStorage.setItem('gemini_app_settings', JSON.stringify(settings));
-  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, aiProvider, qwenOAuthToken, qwenResourceUrl, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature, useQueryExpansion, useIntentReranking]);
+  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, aiProvider, qwenOAuthToken, qwenResourceUrl, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature, useQueryExpansion, useIntentReranking, customBaseUrl, customApiKey, customModel]);
 
   const handleTemplateChange = (mode: string) => {
     setTemplateMode(mode);
@@ -225,6 +240,33 @@ export default function App() {
       setAvailableModels([]);
     }
     setTestingOllama(false);
+  };
+
+  const handleTestCustomProvider = async () => {
+    if (!customBaseUrl || !customApiKey) {
+      alert("Please enter both Base URL and API Key.");
+      return;
+    }
+    setTestingCustomProvider(true);
+    setCustomProviderError(null);
+    try {
+      const models = await fetchOpenAICompatibleModels(customBaseUrl, customApiKey);
+      setAvailableCustomModels(models);
+      setCustomProviderConnected(true);
+      if (models.length > 0 && !models.includes(customModel)) {
+        setCustomModel(models[0]);
+      }
+    } catch (e: any) {
+      console.error(e);
+      setCustomProviderConnected(false);
+      let msg = e.message || "Unknown error";
+      if (msg === "Failed to fetch") {
+        msg = "Network or CORS error. The API might block browser requests to /models. You can still type the model name manually (e.g., grok-4-latest) and try generating.";
+      }
+      setCustomProviderError(msg);
+      setAvailableCustomModels([]);
+    }
+    setTestingCustomProvider(false);
   };
 
   const handleQwenLogin = async () => {
@@ -412,7 +454,7 @@ pause`;
         setIsTruncated(true);
       }
 
-      // Generate file name
+      // Generate file name base
       let projectName = 'project';
       if (repoData.info && repoData.info.repo) {
         projectName = repoData.info.repo;
@@ -420,7 +462,6 @@ pause`;
       const templateName = templateMode === 'default' ? 'gemini' : templateMode;
       const date = new Date();
       const timestamp = `${date.getFullYear()}${(date.getMonth() + 1).toString().padStart(2, '0')}${date.getDate().toString().padStart(2, '0')}_${date.getHours().toString().padStart(2, '0')}${date.getMinutes().toString().padStart(2, '0')}`;
-      setGeneratedFileName(`${projectName}_${templateName}_${timestamp}.md`);
 
       let referenceRepoData;
       if (templateMode === 'integration') {
@@ -459,7 +500,16 @@ pause`;
                 if (useOllamaForFinal) {
                   result = await rewriteQueryWithOllama(ragQuery, ollamaUrl, ollamaModel);
                 } else {
-                  result = await rewriteQuery(aiProvider, ragQuery, { qwenToken: qwenOAuthToken, qwenResourceUrl: qwenResourceUrl || undefined });
+                  result = await rewriteQuery(aiProvider, ragQuery, { 
+                    qwenToken: qwenOAuthToken, 
+                    qwenResourceUrl: qwenResourceUrl || undefined,
+                    customBaseUrl,
+                    customApiKey,
+                    customModel
+                  });
+                  if (aiProvider === 'qwen' && result.rateLimit) {
+                    setQwenRateLimit(result.rateLimit);
+                  }
                 }
                 
                 if (useQueryExpansion) {
@@ -582,12 +632,6 @@ pause`;
         generatedPrompt = await generate_final_prompt_with_ollama(promptText, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaFinalPredict, ollamaTemperature);
         
         finalModel = `Ollama (${ollamaModel})`;
-
-        if (usedOllama) {
-          generatedPrompt = `> **Note:** This prompt was fully generated and pre-processed by a local LLM.\n\n` + generatedPrompt;
-        } else {
-          generatedPrompt = `> **Note:** This prompt was generated by a local LLM.\n\n` + generatedPrompt;
-        }
       } else {
         setStatus(`Generating system prompt with ${aiProvider}...`);
         const result = await generatePrompt(
@@ -599,11 +643,36 @@ pause`;
           usedOllama, 
           referenceRepoData, 
           attachedDocs,
-          { qwenToken: qwenOAuthToken, qwenResourceUrl: qwenResourceUrl || undefined }
+          { 
+            qwenToken: qwenOAuthToken, 
+            qwenResourceUrl: qwenResourceUrl || undefined,
+            customBaseUrl,
+            customApiKey,
+            customModel
+          }
         );
         generatedPrompt = result.text;
         finalModel = result.modelVersion;
+        if (aiProvider === 'qwen' && result.rateLimit) {
+          setQwenRateLimit(result.rateLimit);
+        }
       }
+      
+      let metadata = `> **🤖 Prompt Generation Metadata**\n`;
+      metadata += `> - **Model:** ${finalModel}\n`;
+      metadata += `> - **Target Repository:** ${url || 'Local Folder'}\n`;
+      if (referenceUrl) metadata += `> - **Reference Repository:** ${referenceUrl}\n`;
+      if (useRag && ragQuery) {
+        metadata += `> - **RAG Query:** "${ragQuery}"\n`;
+      }
+      if (additionalContext) metadata += `> - **Additional Context:** Included\n`;
+      if (usedOllama) metadata += `> - **Pre-processing:** Local LLM (Ollama)\n`;
+      metadata += `\n---\n\n`;
+
+      generatedPrompt = metadata + generatedPrompt;
+
+      const safeModelName = finalModel.replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').toLowerCase();
+      setGeneratedFileName(`${projectName}_${templateName}_${safeModelName}_${timestamp}.md`);
       
       setPrompt(generatedPrompt);
       setUsedModel(finalModel);
@@ -1074,7 +1143,112 @@ pause`;
                 <option value="gemini">✨ Gemini (default)</option>
                 <option value="qwen">🔥 Qwen (via OAuth)</option>
                 <option value="ollama">🏠 Ollama (local, private)</option>
+                <option value="custom">🌐 Custom (OpenAI Compatible)</option>
               </select>
+              
+              {aiProvider === 'custom' && (
+                <div className="mt-4 p-4 bg-white border border-slate-200 rounded-lg shadow-sm space-y-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-sm font-medium text-slate-700">
+                      Custom Provider Settings
+                    </label>
+                    <select
+                      className="text-xs border border-slate-300 rounded px-2 py-1 bg-slate-50"
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          setCustomBaseUrl(e.target.value);
+                          setCustomProviderConnected(null);
+                        }
+                      }}
+                      defaultValue=""
+                    >
+                      <option value="" disabled>Load Preset...</option>
+                      <option value="https://openrouter.ai/api/v1">OpenRouter</option>
+                      <option value="https://api.groq.com/openai/v1">Groq</option>
+                      <option value="https://api.x.ai/v1">xAI (Grok)</option>
+                      <option value="https://models.inference.ai.azure.com">GitHub Models</option>
+                      <option value="https://api.mistral.ai/v1">Mistral</option>
+                      <option value="https://api.cerebras.ai/v1">Cerebras</option>
+                    </select>
+                  </div>
+                  
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">Base URL (OpenAI Compatible)</label>
+                    <input
+                      type="text"
+                      value={customBaseUrl}
+                      onChange={(e) => { setCustomBaseUrl(e.target.value); setCustomProviderConnected(null); }}
+                      placeholder="e.g., https://api.groq.com/openai/v1"
+                      className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                      disabled={loading}
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">API Key</label>
+                    <input
+                      type="password"
+                      value={customApiKey}
+                      onChange={(e) => { setCustomApiKey(e.target.value); setCustomProviderConnected(null); }}
+                      placeholder="sk-..."
+                      className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                      disabled={loading}
+                    />
+                  </div>
+                  
+                  <div className="flex items-end gap-3">
+                    <div className="flex-1">
+                      <label className="block text-xs font-medium text-slate-500 mb-1">Model Name</label>
+                      <input
+                        type="text"
+                        list="custom-models-list"
+                        value={customModel}
+                        onChange={(e) => setCustomModel(e.target.value)}
+                        placeholder="e.g., llama3-8b-8192"
+                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
+                        disabled={loading}
+                      />
+                      {availableCustomModels.length > 0 && (
+                        <datalist id="custom-models-list">
+                          {availableCustomModels.map(m => (
+                            <option key={m} value={m} />
+                          ))}
+                        </datalist>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleTestCustomProvider}
+                      disabled={testingCustomProvider || loading}
+                      className="text-xs px-3 py-2 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50 h-[38px]"
+                    >
+                      {testingCustomProvider ? 'Fetching...' : 'Fetch Models'}
+                    </button>
+                  </div>
+                  
+                  {customProviderConnected === true && (
+                    <p className="text-xs text-emerald-600 flex items-center mt-2">
+                      <Check className="w-3 h-3 mr-1" /> Successfully connected to provider
+                    </p>
+                  )}
+                  {customProviderConnected === false && (
+                    <div className="p-3 bg-red-50 border border-red-100 rounded-lg text-xs text-red-600 flex items-start mt-2">
+                      <AlertTriangle className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />
+                      <div>
+                        <strong>Connection failed:</strong> {customProviderError || "Check URL and API Key."}
+                      </div>
+                    </div>
+                  )}
+                  
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 flex items-start mt-2">
+                    <AlertTriangle className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />
+                    <p>
+                      <strong>Warning:</strong> Free API providers often have strict context limits (e.g., 8k or 32k tokens). 
+                      It is highly recommended to keep <strong>RAG enabled</strong> with a small Top-K to avoid "Context length exceeded" errors.
+                    </p>
+                  </div>
+                </div>
+              )}
               
               {aiProvider === 'qwen' && (
                 <div className="mt-3">
@@ -1083,21 +1257,43 @@ pause`;
                   </label>
                   
                   {qwenOAuthToken ? (
-                    <div className="flex items-center justify-between p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
-                      <div className="flex items-center text-emerald-700 text-sm font-medium">
-                        <Check className="w-4 h-4 mr-2" />
-                        Authenticated with Qwen
+                    <div>
+                      <div className="flex items-center justify-between p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
+                        <div className="flex items-center text-emerald-700 text-sm font-medium">
+                          <Check className="w-4 h-4 mr-2" />
+                          Authenticated with Qwen
+                        </div>
+                        <button
+                          onClick={() => {
+                            setQwenOAuthToken('');
+                            setQwenAuthStatus('idle');
+                            setQwenAuthMessage('');
+                            setQwenRateLimit(null);
+                          }}
+                          className="text-xs text-slate-500 hover:text-slate-700 underline"
+                        >
+                          Sign Out
+                        </button>
                       </div>
-                      <button
-                        onClick={() => {
-                          setQwenOAuthToken('');
-                          setQwenAuthStatus('idle');
-                          setQwenAuthMessage('');
-                        }}
-                        className="text-xs text-slate-500 hover:text-slate-700 underline"
-                      >
-                        Sign Out
-                      </button>
+                      {qwenRateLimit && qwenRateLimit.remaining && (
+                        <div className="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs">
+                          <div className="flex justify-between items-center mb-1">
+                            <span className="font-medium text-slate-700">Qwen OAuth Quota</span>
+                            <span className="text-slate-500">{qwenRateLimit.remaining} requests remaining</span>
+                          </div>
+                          <div className="w-full bg-slate-200 rounded-full h-1.5 mb-1">
+                            <div 
+                              className={`h-1.5 rounded-full ${parseInt(qwenRateLimit.remaining) > 100 ? 'bg-emerald-500' : parseInt(qwenRateLimit.remaining) > 20 ? 'bg-amber-500' : 'bg-red-500'}`} 
+                              style={{ width: `${Math.min(100, Math.max(0, (parseInt(qwenRateLimit.remaining) / 1000) * 100))}%` }}
+                            ></div>
+                          </div>
+                          {qwenRateLimit.reset && (
+                            <p className="text-slate-500 text-[10px] text-right">
+                              Resets at: {new Date(parseInt(qwenRateLimit.reset) * 1000).toLocaleString()}
+                            </p>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div className="space-y-3">

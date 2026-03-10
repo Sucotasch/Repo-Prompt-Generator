@@ -124,9 +124,6 @@ export async function generateSystemPrompt(
   });
 
   let finalPrompt = response.text || "Failed to generate prompt.";
-  if (usedOllama) {
-    finalPrompt = `> **Note:** This context was pre-processed by local LLM.\n\n` + finalPrompt;
-  }
 
   // Extract model version from response if available, otherwise fallback to the requested model
   const modelVersion = (response as any).modelVersion || (response as any).model || "gemini-3-flash-preview";

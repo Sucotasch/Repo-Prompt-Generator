@@ -1,7 +1,7 @@
 import { RepoData } from "./githubService";
 import { buildPromptText } from "./geminiService";
 
-export async function rewriteQueryWithQwen(query: string, token: string, resourceUrl?: string): Promise<{optimizedQuery: string, intent: string}> {
+export async function rewriteQueryWithQwen(query: string, token: string, resourceUrl?: string): Promise<{optimizedQuery: string, intent: string, rateLimit?: { remaining: string, reset: string }}> {
   if (!query?.trim()) return { optimizedQuery: query, intent: 'GENERAL' };
 
   const prompt = `Optimize the search query for RAG over a code repository. Return ONLY JSON:
@@ -28,7 +28,8 @@ Query: "${query}"`;
     const parsed = JSON.parse(text);
     return {
       optimizedQuery: parsed.optimizedQuery || query,
-      intent: parsed.intent || 'GENERAL'
+      intent: parsed.intent || 'GENERAL',
+      rateLimit: data.rateLimit
     };
   } catch (e) {
     console.error("Failed to rewrite query with Qwen:", e);
@@ -46,7 +47,7 @@ export async function generateSystemPromptWithQwen(
   referenceRepoData?: RepoData,
   attachedDocs?: {name: string, content: string}[],
   resourceUrl?: string
-): Promise<{ text: string, modelVersion: string }> {
+): Promise<{ text: string, modelVersion: string, rateLimit?: { remaining: string, reset: string } }> {
 
   const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs);
 
@@ -67,12 +68,9 @@ export async function generateSystemPromptWithQwen(
 
   let finalPrompt = data.output?.text || "Failed to generate prompt.";
 
-  if (usedOllama) {
-    finalPrompt = `> **Note:** Context pre-processed by local LLM.\n\n` + finalPrompt;
-  }
-
   return { 
     text: finalPrompt, 
-    modelVersion: data.model || "coder-model" 
+    modelVersion: data.model || "coder-model",
+    rateLimit: data.rateLimit
   };
 }
