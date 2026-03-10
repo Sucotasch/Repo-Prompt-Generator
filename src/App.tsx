@@ -4,83 +4,10 @@ import { fetchRepoData } from './services/githubService';
 import { processLocalFolder } from './services/localFileService';
 import { generateSystemPrompt, buildPromptText, rewriteQueryWithGemini } from './services/geminiService';
 import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama, rewriteQueryWithOllama } from './services/ollamaService';
+import { generatePrompt, rewriteQuery, AIProvider } from './services/aiAdapter';
 import { performRAG } from './services/ragService';
-
-const TEMPLATES = {
-  default: `You are an expert software engineer and AI assistant. Based on the following GitHub repository information, generate a comprehensive system prompt suitable for further development of the project using Gemini CLI or Antigravity. The prompt should be formatted as markdown, ready to be saved as \`gemini.md\`.
-
-Generate a system prompt that includes:
-1. The project's purpose and tech stack.
-2. The architectural patterns and conventions used.
-3. Instructions for the AI on how to assist with this specific codebase.
-4. Any specific rules or guidelines for contributing to this project.`,
-  
-  audit: `You are an expert Principal Software Engineer conducting a rigorous code audit. Do not rely solely on the README; perform a deep analysis of the provided codebase.
-
-Your audit must include:
-1. **Algorithm & Architecture**: A detailed, step-by-step description of the core algorithms and data flow.
-2. **Defect Identification**: Pinpoint logical errors, dead code (non-functional functions), bugs, race conditions, and bottlenecks.
-3. **Performance Impact**: Analyze any adverse performance impacts caused by the identified deficiencies (e.g., memory leaks, O(n^2) loops).
-4. **Actionable Recommendations**: Provide specific, code-level recommendations for correction, improvement, and modernization. 
-
-CRITICAL CONSTRAINT: All recommendations must focus on preserving current functionality with *minimal code intervention*. Do not suggest complete rewrites unless absolutely necessary. Format the output as a structured Markdown report.`,
-
-  integration: `You are an expert Principal Software Architect specializing in system integration, code migration, and architectural review. 
-You are provided with two distinct codebases:
-1. **[TARGET_REPO]**: The project you need to analyze and potentially modify.
-2. **[REFERENCE_REPO]**: The library, SDK, or example project proposed for integration or as a source of architectural patterns.
-
-Your task is to critically evaluate the user's request to integrate concepts or code from [REFERENCE_REPO] into [TARGET_REPO]. Do not blindly execute the integration; first, assess its feasibility and value.
-
-Your analysis MUST include the following sections in a structured Markdown report:
-
-1. **Feasibility & Impact Analysis**:
-   - Evaluate the architectural fit: Does [REFERENCE_REPO] align with the current stack and paradigms of [TARGET_REPO]?
-   - Identify the benefits and risks/costs.
-   - Provide a definitive verdict: Is this integration recommended, partially recommended, or strongly discouraged?
-   - *If the user has not specified a particular feature to integrate, proactively analyze both codebases and identify the top 1-3 architectural patterns, utilities, or features from [REFERENCE_REPO] that would provide the most value if integrated into [TARGET_REPO].*
-
-2. **Architectural Mapping** (If recommended or partially recommended):
-   - Explain conceptually how the components of [REFERENCE_REPO] map to the existing structures in [TARGET_REPO].
-   - Highlight any architectural bottlenecks or conflicts.
-
-3. **Integration Plan & Code Implementation** (If recommended):
-   - Provide a step-by-step migration or integration plan.
-   - Identify the exact files in [TARGET_REPO] that need to change.
-   - Supply the actual code snippets, strictly basing your API calls, class names, and patterns on the code found in [REFERENCE_REPO]. Do not hallucinate methods.
-
-CRITICAL RULES & GUARDRAILS:
-1. **Domain Preservation (CRITICAL)**: The core purpose, business logic, and domain terminology of [TARGET_REPO] MUST remain completely unchanged. Do not import domain-specific concepts, terminology, or features from [REFERENCE_REPO].
-2. **Pattern Extraction Only**: Treat [REFERENCE_REPO] STRICTLY as a source of technical patterns, architectural solutions, APIs, or algorithms. Abstract these technical solutions away from their original business context before applying them to [TARGET_REPO].
-3. **Read-Only Reference**: DO NOT modify the [REFERENCE_REPO]. It is read-only context.
-4. **Minimal Intervention**: If integration is recommended, do it with the least possible disruption to the existing [TARGET_REPO] architecture.`,
-
-  security: `You are an expert cybersecurity auditor. Analyze the provided GitHub repository data to identify hidden threats, dangerous system calls, and data exfiltration mechanisms. Look for "holes", intentionally malicious code, and vulnerabilities (SQL injections, insecure system calls, hardcoded keys, hidden requests to external IPs, socket usage, unauthorized URL access). 
-
-Highlight the use of functions that execute system commands (e.g., eval, exec, subprocess, os.system, P/Invoke) that could lead to RCE. Find attempts to read confidential files (.env, .ssh/id_rsa, /etc/passwd, browser configs) or access Keychain/Credential Manager. Check for obfuscation, strange Base64 strings, or on-the-fly decrypted data blocks. Check the dependencies for "typosquatting".
-
-Provide a detailed report in Markdown, ending with a Risk Assessment (Low/Medium/High) and a list of all suspicious fragments.`,
-
-  docs: `You are an expert technical writer and software architect. Analyze the provided GitHub repository data to create comprehensive technical documentation in Markdown format (suitable for a Wiki or a detailed README.md). Make the code understandable.
-
-Include:
-1. Real capabilities of the program.
-2. Algorithm of operation and architecture.
-3. Installation and configuration process.
-4. Examples of using the main functions.`,
-
-  eli5: `Explain what this repository does as if I am a 5-year-old child, but focus heavily on safety. 
-
-Tell me in very simple, funny, and exaggerated (but accurate) terms:
-1. What does this code actually do? (e.g., "It draws pictures of cats" or "It's a boring calculator").
-2. Is it safe to run? 
-3. If it's dangerous, warn me dramatically! (e.g., "Don't even think about running this! It's a malicious joke that will encrypt your C: drive!").
-4. If it's just old or broken, tell me (e.g., "Nothing scary will happen, but it probably won't even run because the code is older than your grandma. You can look at it to learn, but don't try to make it work for you.").
-
-Keep the tone light, entertaining, and extremely easy to understand, but ensure the safety assessment is completely accurate based on the code provided.`,
-
-  custom: ''
-};
+import { startDeviceAuth, pollDeviceToken } from './services/qwenAuthService';
+import { getTemplate, getAllTemplates } from './templates';
 
 interface SavedTemplate {
   id: string;
@@ -123,15 +50,21 @@ export default function App() {
       return [];
     }
   });
-  const [customInstruction, setCustomInstruction] = useState(TEMPLATES.default);
+  const [customInstruction, setCustomInstruction] = useState('');
   const [additionalContext, setAdditionalContext] = useState('');
   const [ragQuery, setRagQuery] = useState('');
   const [attachedDocs, setAttachedDocs] = useState<{name: string, content: string}[]>([]);
   const [analyzeIssues, setAnalyzeIssues] = useState(false);
   const [useOllama, setUseOllama] = useState(initialSettings.useOllama || false);
   const [useOllamaForFinal, setUseOllamaForFinal] = useState(initialSettings.useOllamaForFinal || false);
+  const [aiProvider, setAiProvider] = useState<AIProvider>(initialSettings.aiProvider || 'gemini');
+  const [qwenOAuthToken, setQwenOAuthToken] = useState(initialSettings.qwenOAuthToken || '');
+  const [qwenResourceUrl, setQwenResourceUrl] = useState(initialSettings.qwenResourceUrl || '');
+  const [qwenAuthStatus, setQwenAuthStatus] = useState<'idle' | 'polling' | 'success' | 'error'>('idle');
+  const [qwenAuthUrl, setQwenAuthUrl] = useState<string | null>(null);
+  const [qwenAuthMessage, setQwenAuthMessage] = useState<string>('');
   const [useRag, setUseRag] = useState(initialSettings.useRag || false);
-  const [ragModel, setRagModel] = useState(initialSettings.ragModel || 'nomic-embed-text');
+  const [ragModel, setRagModel] = useState(initialSettings.ragModel || '');
   const [ragTopK, setRagTopK] = useState(initialSettings.ragTopK || 10);
   const [ollamaUrl, setOllamaUrl] = useState(initialSettings.ollamaUrl || 'http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState(initialSettings.ollamaModel || 'llama3');
@@ -170,6 +103,9 @@ export default function App() {
       maxFiles,
       useOllama,
       useOllamaForFinal,
+      aiProvider,
+      qwenOAuthToken,
+      qwenResourceUrl,
       useRag,
       ragModel,
       ragTopK,
@@ -183,13 +119,11 @@ export default function App() {
       useIntentReranking
     };
     localStorage.setItem('gemini_app_settings', JSON.stringify(settings));
-  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature, useQueryExpansion, useIntentReranking]);
+  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, aiProvider, qwenOAuthToken, qwenResourceUrl, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature, useQueryExpansion, useIntentReranking]);
 
   const handleTemplateChange = (mode: string) => {
     setTemplateMode(mode);
-    if (mode in TEMPLATES) {
-      setCustomInstruction(TEMPLATES[mode as keyof typeof TEMPLATES]);
-    } else if (mode === 'custom') {
+    if (mode === 'custom') {
       setCustomInstruction('');
     } else {
       const tpl = savedTemplates.find(t => t.id === mode);
@@ -232,6 +166,51 @@ export default function App() {
     handleTemplateChange('default');
   };
 
+  const handleExportTemplates = () => {
+    if (savedTemplates.length === 0) {
+      alert('No custom templates to export.');
+      return;
+    }
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(savedTemplates, null, 2));
+    const downloadAnchorNode = document.createElement('a');
+    downloadAnchorNode.setAttribute("href", dataStr);
+    downloadAnchorNode.setAttribute("download", "gemini_custom_templates.json");
+    document.body.appendChild(downloadAnchorNode);
+    downloadAnchorNode.click();
+    downloadAnchorNode.remove();
+  };
+
+  const handleImportTemplates = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const imported = JSON.parse(event.target?.result as string);
+        if (Array.isArray(imported)) {
+          const existingIds = new Set(savedTemplates.map(t => t.id));
+          const newTemplates = [...savedTemplates];
+          let added = 0;
+          for (const t of imported) {
+            if (t.id && t.name && t.content && !existingIds.has(t.id)) {
+              newTemplates.push(t);
+              added++;
+            }
+          }
+          setSavedTemplates(newTemplates);
+          localStorage.setItem('gemini_custom_templates', JSON.stringify(newTemplates));
+          alert(`Successfully imported ${added} templates.`);
+        } else {
+          alert('Invalid templates file format.');
+        }
+      } catch (err) {
+        alert('Failed to parse templates file.');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
   const handleTestOllama = async () => {
     setTestingOllama(true);
     const isConnected = await checkOllamaConnection(ollamaUrl);
@@ -246,6 +225,57 @@ export default function App() {
       setAvailableModels([]);
     }
     setTestingOllama(false);
+  };
+
+  const handleQwenLogin = async () => {
+    try {
+      setQwenAuthStatus('polling');
+      setQwenAuthMessage('Starting authorization...');
+      
+      const authData = await startDeviceAuth();
+      setQwenAuthUrl(authData.verification_uri_complete);
+      setQwenAuthMessage('Please open the URL in your browser to authorize.');
+      
+      // Open the URL in a new tab
+      window.open(authData.verification_uri_complete, '_blank');
+
+      let pollInterval = 2000;
+      const maxAttempts = Math.ceil(authData.expires_in / (pollInterval / 1000));
+      
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const tokenResponse = await pollDeviceToken(authData.device_code, authData.codeVerifier);
+        
+        if (tokenResponse.status === 'success') {
+          // Store the access token
+          setQwenOAuthToken(tokenResponse.data.access_token);
+          if (tokenResponse.data.resource_url) {
+            setQwenResourceUrl(tokenResponse.data.resource_url);
+          }
+          setQwenAuthStatus('success');
+          setQwenAuthMessage('Authentication successful!');
+          setQwenAuthUrl(null);
+          return;
+        }
+        
+        if (tokenResponse.status === 'pending') {
+          if (tokenResponse.slowDown) {
+            pollInterval = Math.min(pollInterval * 1.5, 10000);
+          } else {
+            pollInterval = 2000;
+          }
+          await new Promise(resolve => setTimeout(resolve, pollInterval));
+          continue;
+        }
+      }
+      
+      setQwenAuthStatus('error');
+      setQwenAuthMessage('Authorization timed out. Please try again.');
+      setQwenAuthUrl(null);
+    } catch (error: any) {
+      setQwenAuthStatus('error');
+      setQwenAuthMessage(error.message || 'Failed to authenticate with Qwen.');
+      setQwenAuthUrl(null);
+    }
   };
 
   const handleDownloadBat = () => {
@@ -293,10 +323,51 @@ pause`;
     setAttachedDocs(prev => prev.filter((_, i) => i !== index));
   };
 
+  const getSystemPrompt = (mode: string, customText?: string): string => {
+    const template = getTemplate(mode);
+    
+    if (!template) {
+      // Fallback to original behavior for custom or saved templates
+      return customText || '';
+    }
+
+    // Build enhanced prompt with deliverables and metrics
+    const promptParts = [
+      template.systemInstruction,
+    ];
+
+    if (template.deliverables && template.deliverables.length > 0) {
+      promptParts.push('', '## 📦 Required Deliverables', ...template.deliverables.map(d => `- ${d}`));
+    }
+
+    if (template.successMetrics && template.successMetrics.length > 0) {
+      promptParts.push('', '## ✅ Success Criteria', ...template.successMetrics.map(m => `- ${m}`));
+    }
+
+    if (template.evidenceRequirements && template.evidenceRequirements.length > 0) {
+      promptParts.push('', '## 🔍 Evidence Requirements', ...template.evidenceRequirements.map(e => `- ${e}`));
+    }
+
+    if (template.tone) {
+      promptParts.push('', '## 🎭 Tone', template.tone);
+    }
+
+    if (template.constraints && template.constraints.length > 0) {
+      promptParts.push('', '## ⚠️ Constraints', ...template.constraints.map(c => `- ${c}`));
+    }
+
+    return promptParts.join('\n');
+  };
+
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (inputMode === 'github' && !url) return;
     if (inputMode === 'local' && (!localFiles || localFiles.length === 0)) return;
+    
+    if (useRag && !ragModel) {
+      setError('Please select an Embedding Model for RAG. It is required to process the repository files.');
+      return;
+    }
     
     setLoading(true);
     setError(null);
@@ -388,7 +459,7 @@ pause`;
                 if (useOllamaForFinal) {
                   result = await rewriteQueryWithOllama(ragQuery, ollamaUrl, ollamaModel);
                 } else {
-                  result = await rewriteQueryWithGemini(ragQuery);
+                  result = await rewriteQuery(aiProvider, ragQuery, { qwenToken: qwenOAuthToken, qwenResourceUrl: qwenResourceUrl || undefined });
                 }
                 
                 if (useQueryExpansion) {
@@ -414,11 +485,8 @@ pause`;
           }
 
           const getFallbackQuery = () => {
-            if (templateMode === 'audit') return "core logic, complex algorithms, potential bugs, performance bottlenecks, architecture";
-            if (templateMode === 'security') return "security vulnerabilities, authentication, authorization, cryptography, network requests, file access, user input validation";
-            if (templateMode === 'docs') return "main entry points, exported functions, public API, core architecture, high-level modules";
-            if (templateMode === 'integration') return "system architecture, main components, interfaces, exported functions, core business logic, data models";
-            if (templateMode === 'eli5') return "core functionality, main purpose, basic structure, simple logic";
+            const template = getTemplate(templateMode);
+            if (template) return template.defaultSearchQuery;
             return customInstruction.substring(0, 500);
           };
           
@@ -506,9 +574,11 @@ pause`;
       
       let generatedPrompt = '';
       let finalModel = '';
+      const taskInstruction = getSystemPrompt(templateMode, customInstruction);
+      
       if (useOllamaForFinal && ollamaConnected !== false) {
         setStatus('Generating final prompt with local Ollama...');
-        const promptText = buildPromptText(repoData, customInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs);
+        const promptText = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs);
         generatedPrompt = await generate_final_prompt_with_ollama(promptText, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaFinalPredict, ollamaTemperature);
         
         finalModel = `Ollama (${ollamaModel})`;
@@ -519,8 +589,18 @@ pause`;
           generatedPrompt = `> **Note:** This prompt was generated by a local LLM.\n\n` + generatedPrompt;
         }
       } else {
-        setStatus('Generating system prompt with Gemini...');
-        const result = await generateSystemPrompt(repoData, customInstruction, additionalContext, analyzeIssues, usedOllama, referenceRepoData, attachedDocs);
+        setStatus(`Generating system prompt with ${aiProvider}...`);
+        const result = await generatePrompt(
+          aiProvider,
+          repoData, 
+          taskInstruction, 
+          additionalContext, 
+          analyzeIssues, 
+          usedOllama, 
+          referenceRepoData, 
+          attachedDocs,
+          { qwenToken: qwenOAuthToken, qwenResourceUrl: qwenResourceUrl || undefined }
+        );
         generatedPrompt = result.text;
         finalModel = result.modelVersion;
       }
@@ -775,125 +855,148 @@ pause`;
             )}
             
             <div className="mt-4 p-4 bg-indigo-50/50 rounded-xl border border-indigo-100">
-              <div className="flex items-center mb-3">
-                <Settings2 className="w-4 h-4 text-indigo-600 mr-2" />
-                <label htmlFor="templateMode" className="block text-sm font-medium text-slate-700">
-                  Task Template
-                </label>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center">
+                  <Settings2 className="w-4 h-4 text-indigo-600 mr-2" />
+                  <label htmlFor="templateMode" className="block text-sm font-medium text-slate-700">
+                    Task Template
+                  </label>
+                </div>
+                <div className="flex gap-3">
+                  <button type="button" onClick={handleExportTemplates} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">
+                    Export
+                  </button>
+                  <label className="text-xs text-indigo-600 hover:text-indigo-800 font-medium cursor-pointer">
+                    Import
+                    <input type="file" accept=".json" className="hidden" onChange={handleImportTemplates} />
+                  </label>
+                </div>
               </div>
-              <select
-                id="templateMode"
-                value={templateMode}
-                onChange={(e) => handleTemplateChange(e.target.value)}
-                className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white mb-3"
-                disabled={loading}
-              >
-                <optgroup label="Built-in Templates">
-                  <option value="default">Default (gemini.md System Prompt)</option>
-                  <option value="audit">Code Audit (Deep Analysis & Fixes)</option>
-                  <option value="integration">Integration & Migration Expert</option>
-                  <option value="security">Security Auditor (Vulnerability Scan)</option>
-                  <option value="docs">Documentation Writer (Wiki/README)</option>
-                  <option value="eli5">Explain Like I'm 5 (Safety Check)</option>
-                </optgroup>
-                {savedTemplates.length > 0 && (
-                  <optgroup label="Your Saved Templates">
-                    {savedTemplates.map(t => (
-                      <option key={t.id} value={t.id}>{t.name}</option>
+              <div className="mb-4">
+                <select
+                  id="templateMode"
+                  value={templateMode}
+                  onChange={(e) => handleTemplateChange(e.target.value)}
+                  className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow"
+                  disabled={loading}
+                >
+                  <optgroup label="Built-in Templates">
+                    {getAllTemplates().map((template) => (
+                      <option key={template.metadata.id} value={template.metadata.id}>
+                        {template.metadata.name} - {template.metadata.description}
+                      </option>
                     ))}
                   </optgroup>
-                )}
-                <optgroup label="Custom">
-                  <option value="custom">Write new custom instruction...</option>
-                </optgroup>
-              </select>
+                  {savedTemplates.length > 0 && (
+                    <optgroup label="Saved Templates">
+                      {savedTemplates.map(t => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  <optgroup label="Custom">
+                    <option value="custom">Custom Prompt</option>
+                  </optgroup>
+                </select>
+              </div>
 
-              <div className="relative">
-                <textarea
-                  rows={6}
-                  placeholder="Enter your custom system instruction here. The repository context (Tree, README, Dependencies) will be automatically appended to your prompt."
-                  className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow resize-y"
-                  value={customInstruction}
-                  onChange={(e) => {
-                    setCustomInstruction(e.target.value);
-                    if (!templateMode.startsWith('user_') && templateMode !== 'custom') {
-                      setTemplateMode('custom');
-                    }
-                  }}
-                  disabled={loading}
-                />
-                <div className="flex justify-end gap-2 mt-3">
-                  {templateMode.startsWith('user_') && (
-                    <button
-                      type="button"
-                      onClick={handleDeleteTemplate}
-                      disabled={loading}
-                      className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-50"
-                    >
-                      <Trash2 className="w-4 h-4 mr-1.5" />
-                      Delete
-                    </button>
-                  )}
-                  {templateMode.startsWith('user_') && customInstruction.trim() !== '' && (
-                    <button
-                      type="button"
-                      onClick={handleSaveTemplate}
-                      disabled={loading}
-                      className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors disabled:opacity-50"
-                    >
-                      <Save className="w-4 h-4 mr-1.5" />
-                      Save Changes
-                    </button>
-                  )}
-                  {!templateMode.startsWith('user_') && customInstruction.trim() !== '' && (
-                    isSavingNew ? (
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="text"
-                          value={newTemplateName}
-                          onChange={(e) => setNewTemplateName(e.target.value)}
-                          placeholder="Template name..."
-                          className="px-3 py-1.5 text-sm border border-slate-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                          autoFocus
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              confirmSaveTemplate(e);
-                            } else if (e.key === 'Escape') {
-                              setIsSavingNew(false);
-                            }
-                          }}
-                        />
-                        <button
-                          type="button"
-                          onClick={confirmSaveTemplate}
-                          disabled={!newTemplateName.trim() || loading}
-                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors disabled:opacity-50"
-                        >
-                          Save
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setIsSavingNew(false)}
-                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
+              {getTemplate(templateMode) ? (
+                <div className="relative">
+                  <label className="block text-xs font-medium text-slate-500 mb-1">Template Content (Read-only)</label>
+                  <pre className="block w-full px-3 py-3 border border-slate-200 rounded-xl leading-5 bg-slate-50 text-slate-600 sm:text-sm whitespace-pre-wrap max-h-48 overflow-y-auto font-mono text-xs">
+                    {getSystemPrompt(templateMode, customInstruction)}
+                  </pre>
+                </div>
+              ) : (
+                <div className="relative">
+                  <textarea
+                    rows={6}
+                    placeholder="Enter your custom system instruction here. The repository context (Tree, README, Dependencies) will be automatically appended to your prompt."
+                    className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow resize-y"
+                    value={customInstruction}
+                    onChange={(e) => {
+                      setCustomInstruction(e.target.value);
+                      if (!templateMode.startsWith('user_') && templateMode !== 'custom') {
+                        setTemplateMode('custom');
+                      }
+                    }}
+                    disabled={loading}
+                  />
+                  <div className="flex justify-end gap-2 mt-3">
+                    {templateMode.startsWith('user_') && (
                       <button
                         type="button"
-                        onClick={() => setIsSavingNew(true)}
+                        onClick={handleDeleteTemplate}
+                        disabled={loading}
+                        className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        <Trash2 className="w-4 h-4 mr-1.5" />
+                        Delete
+                      </button>
+                    )}
+                    {templateMode.startsWith('user_') && customInstruction.trim() !== '' && (
+                      <button
+                        type="button"
+                        onClick={handleSaveTemplate}
                         disabled={loading}
                         className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors disabled:opacity-50"
                       >
                         <Save className="w-4 h-4 mr-1.5" />
-                        Save as Template
+                        Save Changes
                       </button>
-                    )
-                  )}
+                    )}
+                    {!templateMode.startsWith('user_') && customInstruction.trim() !== '' && (
+                      isSavingNew ? (
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={newTemplateName}
+                            onChange={(e) => setNewTemplateName(e.target.value)}
+                            placeholder="Template name..."
+                            className="px-3 py-1.5 text-sm border border-slate-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                            autoFocus
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                confirmSaveTemplate(e);
+                              } else if (e.key === 'Escape') {
+                                setIsSavingNew(false);
+                              }
+                            }}
+                          />
+                          <button
+                            type="button"
+                            onClick={confirmSaveTemplate}
+                            disabled={!newTemplateName.trim() || loading}
+                            className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors disabled:opacity-50"
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsSavingNew(false)}
+                            className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setIsSavingNew(true)}
+                          disabled={loading}
+                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors disabled:opacity-50"
+                        >
+                          <Save className="w-4 h-4 mr-1.5" />
+                          Save as Template
+                        </button>
+                      )
+                    )}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
 
             <div className="mt-2">
@@ -955,6 +1058,87 @@ pause`;
               <label htmlFor="analyzeIssues" className="ml-2 block text-sm text-slate-700 cursor-pointer">
                 Analyze repository for obvious errors, bugs, and outdated dependencies
               </label>
+            </div>
+
+            {/* AI Provider Settings */}
+            <div className="mt-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
+              <label className="block text-sm font-medium text-slate-700 mb-2">
+                AI Provider
+              </label>
+              <select
+                value={aiProvider}
+                onChange={(e) => setAiProvider(e.target.value as AIProvider)}
+                className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm mb-2"
+                disabled={loading}
+              >
+                <option value="gemini">✨ Gemini (default)</option>
+                <option value="qwen">🔥 Qwen (via OAuth)</option>
+                <option value="ollama">🏠 Ollama (local, private)</option>
+              </select>
+              
+              {aiProvider === 'qwen' && (
+                <div className="mt-3">
+                  <label className="block text-xs font-medium text-slate-500 mb-2">
+                    Qwen Account Authentication
+                  </label>
+                  
+                  {qwenOAuthToken ? (
+                    <div className="flex items-center justify-between p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
+                      <div className="flex items-center text-emerald-700 text-sm font-medium">
+                        <Check className="w-4 h-4 mr-2" />
+                        Authenticated with Qwen
+                      </div>
+                      <button
+                        onClick={() => {
+                          setQwenOAuthToken('');
+                          setQwenAuthStatus('idle');
+                          setQwenAuthMessage('');
+                        }}
+                        className="text-xs text-slate-500 hover:text-slate-700 underline"
+                      >
+                        Sign Out
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <button
+                        onClick={handleQwenLogin}
+                        disabled={qwenAuthStatus === 'polling'}
+                        className="w-full flex items-center justify-center px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                      >
+                        {qwenAuthStatus === 'polling' ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            Waiting for Authorization...
+                          </>
+                        ) : (
+                          'Login via Qwen'
+                        )}
+                      </button>
+                      
+                      {qwenAuthStatus === 'polling' && qwenAuthUrl && (
+                        <div className="p-3 bg-indigo-50 border border-indigo-100 rounded-lg text-sm text-indigo-800">
+                          <p className="mb-2">A new tab should have opened. If not, click the link below to authorize:</p>
+                          <a href={qwenAuthUrl} target="_blank" rel="noreferrer" className="font-mono text-xs break-all underline">
+                            {qwenAuthUrl}
+                          </a>
+                        </div>
+                      )}
+                      
+                      {qwenAuthStatus === 'error' && (
+                        <div className="p-3 bg-red-50 border border-red-100 rounded-lg text-sm text-red-600 flex items-start">
+                          <AlertTriangle className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />
+                          <span>{qwenAuthMessage}</span>
+                        </div>
+                      )}
+                      
+                      <p className="text-xs text-slate-500">
+                        This uses the official Qwen OAuth Device Flow. Your token is securely proxied through the backend and never exposed to third parties.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Ollama Settings */}
@@ -1066,6 +1250,7 @@ pause`;
                             className="block w-full px-3 py-2 border border-indigo-200 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
                             disabled={loading}
                           >
+                            <option value="" disabled>Select an embedding model...</option>
                             {availableModels.map(m => (
                               <option key={m} value={m}>{m}</option>
                             ))}

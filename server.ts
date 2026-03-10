@@ -194,6 +194,127 @@ async function startServer() {
     }
   });
 
+  // API route to proxy Qwen requests
+  app.post("/api/qwen", async (req, res) => {
+    try {
+      const { token, resourceUrl, prompt, model = "coder-model", isJson = false } = req.body;
+      
+      if (!token) {
+        return res.status(401).json({ error: "Qwen OAuth token is required." });
+      }
+
+      const payload: any = {
+        model,
+        messages: [
+          { role: "system", content: "You are an expert software architect. Output clean markdown." },
+          { role: "user", content: prompt }
+        ],
+        temperature: isJson ? 0.1 : 0.3,
+      };
+      
+      if (isJson) {
+        payload.response_format = { type: "json_object" };
+      }
+
+      let endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+      if (resourceUrl) {
+        let baseUrl = resourceUrl;
+        if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
+          baseUrl = "https://" + baseUrl;
+        }
+        try {
+          const urlObj = new URL(baseUrl);
+          if (urlObj.pathname === "/" || urlObj.pathname === "") {
+             endpoint = new URL("/v1/chat/completions", baseUrl).toString();
+          } else {
+             endpoint = baseUrl;
+          }
+        } catch (e) {
+          endpoint = baseUrl;
+        }
+      }
+
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const text = await response.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        console.error("Qwen API returned non-JSON:", text);
+        return res.status(response.status).json({ error: `Qwen API returned non-JSON: ${text.substring(0, 100)}` });
+      }
+      
+      if (!response.ok) {
+        console.error("Qwen API error:", data);
+        return res.status(response.status).json({ error: data.error?.message || data.message || `Qwen API Error: ${JSON.stringify(data)}` });
+      }
+
+      // Map OpenAI format back to the format expected by the frontend
+      res.json({
+        output: {
+          text: data.choices?.[0]?.message?.content || ""
+        },
+        model: data.model
+      });
+    } catch (error: any) {
+      console.error("Error proxying Qwen request:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
+  });
+
+  // Proxy for Qwen OAuth Device Code
+  app.post("/api/qwen/device/code", async (req, res) => {
+    try {
+      const response = await fetch("https://chat.qwen.ai/api/v1/oauth2/device/code", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Accept": "application/json",
+        },
+        body: new URLSearchParams(req.body).toString()
+      });
+      const data = await response.json();
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Proxy for Qwen OAuth Token Polling
+  app.post("/api/qwen/device/token", async (req, res) => {
+    try {
+      const response = await fetch("https://chat.qwen.ai/api/v1/oauth2/token", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Accept": "application/json",
+        },
+        body: new URLSearchParams(req.body).toString()
+      });
+      
+      const text = await response.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+        console.log("Qwen Token Response:", { ...data, access_token: data.access_token ? "***" : undefined, refresh_token: data.refresh_token ? "***" : undefined, id_token: data.id_token ? "***" : undefined });
+      } catch (e) {
+        return res.status(response.status).send(text);
+      }
+      
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
