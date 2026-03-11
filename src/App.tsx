@@ -41,6 +41,7 @@ export default function App() {
   const [referenceMaxFiles, setReferenceMaxFiles] = useState(initialSettings.maxFiles || 5);
   const [cachedReferenceRepoData, setCachedReferenceRepoData] = useState<any>(null);
   const [referenceCacheKey, setReferenceCacheKey] = useState<string>('');
+  const [useReferenceRepo, setUseReferenceRepo] = useState(false);
 
   const [templateMode, setTemplateMode] = useState<string>('default');
   const [savedTemplates, setSavedTemplates] = useState<SavedTemplate[]>(() => {
@@ -491,7 +492,10 @@ pause`;
       const timestamp = `${date.getFullYear()}${(date.getMonth() + 1).toString().padStart(2, '0')}${date.getDate().toString().padStart(2, '0')}_${date.getHours().toString().padStart(2, '0')}${date.getMinutes().toString().padStart(2, '0')}`;
 
       let referenceRepoData;
-      if (templateMode === 'integration') {
+      const isCustomMode = templateMode === 'custom' || templateMode.startsWith('user_');
+      const shouldFetchReference = templateMode === 'integration' || (isCustomMode && useReferenceRepo);
+
+      if (shouldFetchReference) {
         if (referenceInputMode === 'github' && referenceUrl) {
           const currentRefCacheKey = `${referenceUrl}-${githubToken}-${referenceMaxFiles}`;
           if (cachedReferenceRepoData && referenceCacheKey === currentRefCacheKey) {
@@ -940,7 +944,7 @@ pause`;
               </div>
             </div>
 
-            {templateMode === 'integration' && (
+            {(templateMode === 'integration' || ((templateMode === 'custom' || templateMode.startsWith('user_')) && useReferenceRepo)) && (
               <div className="mt-4 p-4 bg-slate-50 border border-slate-200 rounded-xl">
                 <h3 className="text-sm font-semibold text-slate-800 mb-3 flex items-center">
                   <Database className="w-4 h-4 mr-2 text-indigo-500" />
@@ -1094,8 +1098,20 @@ pause`;
                     }}
                     disabled={loading}
                   />
-                  <div className="flex justify-end gap-2 mt-3">
-                    {templateMode.startsWith('user_') && (
+                  <div className="flex justify-between items-center mt-3">
+                    <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer hover:text-indigo-600 transition-colors">
+                      <input
+                        type="checkbox"
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
+                        checked={useReferenceRepo}
+                        onChange={(e) => setUseReferenceRepo(e.target.checked)}
+                        disabled={loading}
+                      />
+                      <Database className="w-4 h-4" />
+                      <span>Add Reference Repository (for comparison, porting, etc.)</span>
+                    </label>
+                    <div className="flex justify-end gap-2">
+                      {templateMode.startsWith('user_') && (
                       <button
                         type="button"
                         onClick={handleDeleteTemplate}
@@ -1164,6 +1180,7 @@ pause`;
                         </button>
                       )
                     )}
+                    </div>
                   </div>
                 </div>
               )}
