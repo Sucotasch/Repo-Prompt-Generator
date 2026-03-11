@@ -1,7 +1,7 @@
 import { RepoData } from "./githubService";
 import { buildPromptText } from "./geminiService";
 
-export async function rewriteQueryWithQwen(query: string, token: string, resourceUrl?: string): Promise<{optimizedQuery: string, intent: string, rateLimit?: { remaining: string, reset: string }}> {
+export async function rewriteQueryWithQwen(query: string, token: string, resourceUrl?: string): Promise<{optimizedQuery: string, intent: string, rateLimit?: { remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string }}> {
   if (!query?.trim()) return { optimizedQuery: query, intent: 'GENERAL' };
 
   const prompt = `Optimize the search query for RAG over a code repository. Return ONLY JSON:
@@ -22,7 +22,12 @@ Query: "${query}"`;
     });
 
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Qwen request failed");
+    if (!response.ok) {
+      const err: any = new Error(data.error || "Qwen request failed");
+      err.rateLimit = data.rateLimit;
+      err.status = response.status;
+      throw err;
+    }
 
     const text = data.output?.text || '{}';
     const parsed = JSON.parse(text);
@@ -31,9 +36,9 @@ Query: "${query}"`;
       intent: parsed.intent || 'GENERAL',
       rateLimit: data.rateLimit
     };
-  } catch (e) {
+  } catch (e: any) {
     console.error("Failed to rewrite query with Qwen:", e);
-    return { optimizedQuery: query, intent: 'GENERAL' };
+    return { optimizedQuery: query, intent: 'GENERAL', rateLimit: e.rateLimit };
   }
 }
 
@@ -47,7 +52,7 @@ export async function generateSystemPromptWithQwen(
   referenceRepoData?: RepoData,
   attachedDocs?: {name: string, content: string}[],
   resourceUrl?: string
-): Promise<{ text: string, modelVersion: string, rateLimit?: { remaining: string, reset: string } }> {
+): Promise<{ text: string, modelVersion: string, rateLimit?: { remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string } }> {
 
   const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs);
 
@@ -64,7 +69,12 @@ export async function generateSystemPromptWithQwen(
   });
 
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Qwen request failed");
+  if (!response.ok) {
+    const err: any = new Error(data.error || "Qwen request failed");
+    err.rateLimit = data.rateLimit;
+    err.status = response.status;
+    throw err;
+  }
 
   let finalPrompt = data.output?.text || "Failed to generate prompt.";
 

@@ -64,7 +64,7 @@ export default function App() {
   const [qwenAuthStatus, setQwenAuthStatus] = useState<'idle' | 'polling' | 'success' | 'error'>('idle');
   const [qwenAuthUrl, setQwenAuthUrl] = useState<string | null>(null);
   const [qwenAuthMessage, setQwenAuthMessage] = useState<string>('');
-  const [qwenRateLimit, setQwenRateLimit] = useState<{remaining: string, reset: string} | null>(null);
+  const [qwenRateLimit, setQwenRateLimit] = useState<{remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string} | null>(null);
   const [useRag, setUseRag] = useState(initialSettings.useRag || false);
   const [ragModel, setRagModel] = useState(initialSettings.ragModel || '');
   const [ragTopK, setRagTopK] = useState(initialSettings.ragTopK || 10);
@@ -92,6 +92,7 @@ export default function App() {
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [testingOllama, setTestingOllama] = useState(false);
   const [loading, setLoading] = useState(false);
+  const abortControllerRef = React.useRef<AbortController | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
@@ -401,8 +402,28 @@ pause`;
     return promptParts.join('\n');
   };
 
-  const handleGenerate = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const cancelGeneration = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setLoading(false);
+    setStatus('Generation cancelled by user.');
+  };
+
+  const delay = (ms: number, signal?: AbortSignal) => {
+    return new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) return reject(new Error('Aborted'));
+      const timeout = setTimeout(resolve, ms);
+      signal?.addEventListener('abort', () => {
+        clearTimeout(timeout);
+        reject(new Error('Aborted'));
+      });
+    });
+  };
+
+  const handleGenerate = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (inputMode === 'github' && !url) return;
     if (inputMode === 'local' && (!localFiles || localFiles.length === 0)) return;
     
@@ -411,6 +432,12 @@ pause`;
       return;
     }
     
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
+    const signal = abortControllerRef.current.signal;
+
     setLoading(true);
     setError(null);
     setPrompt(null);
@@ -488,6 +515,10 @@ pause`;
         }
       }
       
+      let currentQwenRateLimit: any = null;
+      let finalUsedRagQuery = '';
+      let finalUsedOptimizedQuery = '';
+
       if (useRag && repoData.sourceFiles && repoData.sourceFiles.length > 0) {
         try {
           let optimizedQuery = ragQuery;
@@ -509,11 +540,13 @@ pause`;
                   });
                   if (aiProvider === 'qwen' && result.rateLimit) {
                     setQwenRateLimit(result.rateLimit);
+                    currentQwenRateLimit = result.rateLimit;
                   }
                 }
                 
                 if (useQueryExpansion) {
                   optimizedQuery = result.optimizedQuery;
+                  setStatus(`RAG query optimized: ${optimizedQuery}`);
                 }
                 if (useIntentReranking) {
                   queryIntent = result.intent;
@@ -541,6 +574,8 @@ pause`;
           };
           
           const finalRagQuery = (optimizedQuery || getFallbackQuery()).substring(0, 1000);
+          finalUsedRagQuery = ragQuery;
+          finalUsedOptimizedQuery = optimizedQuery || finalRagQuery;
 
           // Update the UI state so the user can see what was actually used for the search
           if (!lastOptimizedQuery || lastOptimizedQuery.query.trim() === '') {
@@ -633,6 +668,22 @@ pause`;
         
         finalModel = `Ollama (${ollamaModel})`;
       } else {
+        if (aiProvider === 'qwen' && currentQwenRateLimit) {
+          const remainingReqs = parseInt(currentQwenRateLimit.remainingRequests || '1', 10);
+          const remainingTokens = parseInt(currentQwenRateLimit.remainingTokens || '100000', 10);
+          
+          if (remainingReqs <= 0 || remainingTokens < 10000) {
+            const resetReqs = parseInt(currentQwenRateLimit.resetRequests || '0', 10);
+            const resetTokens = parseInt(currentQwenRateLimit.resetTokens || '0', 10);
+            const waitTime = Math.max(resetReqs, resetTokens) + 2000; // 2 seconds buffer
+            
+            if (waitTime > 0) {
+              setStatus(`Qwen rate limit reached. Pausing for ${Math.ceil(waitTime / 1000)} seconds to reset quota...`);
+              await delay(waitTime, signal);
+            }
+          }
+        }
+
         setStatus(`Generating system prompt with ${aiProvider}...`);
         const result = await generatePrompt(
           aiProvider,
@@ -662,11 +713,34 @@ pause`;
       metadata += `> - **Model:** ${finalModel}\n`;
       metadata += `> - **Target Repository:** ${url || 'Local Folder'}\n`;
       if (referenceUrl) metadata += `> - **Reference Repository:** ${referenceUrl}\n`;
-      if (useRag && ragQuery) {
-        metadata += `> - **RAG Query:** "${ragQuery}"\n`;
+      
+      if (useRag) {
+        if (finalUsedRagQuery) {
+          metadata += `> - **Original RAG Query:** "${finalUsedRagQuery}"\n`;
+          if (finalUsedOptimizedQuery && finalUsedOptimizedQuery !== finalUsedRagQuery) {
+            metadata += `> - **Optimized RAG Query:** "${finalUsedOptimizedQuery}"\n`;
+          }
+        } else {
+          metadata += `> - **Auto-generated RAG Query:** "${finalUsedOptimizedQuery || 'Unknown'}"\n`;
+        }
       }
-      if (additionalContext) metadata += `> - **Additional Context:** Included\n`;
       if (usedOllama) metadata += `> - **Pre-processing:** Local LLM (Ollama)\n`;
+      
+      metadata += `> \n`;
+      metadata += `> <details><summary><b>Task Instructions</b></summary>\n> \n`;
+      metadata += `> \`\`\`text\n`;
+      metadata += taskInstruction.split('\n').map(line => `> ${line}`).join('\n') + '\n';
+      metadata += `> \`\`\`\n`;
+      metadata += `> </details>\n`;
+
+      if (additionalContext) {
+        metadata += `>\n> <details><summary><b>Additional Context</b></summary>\n> \n`;
+        metadata += `> \`\`\`text\n`;
+        metadata += additionalContext.split('\n').map(line => `> ${line}`).join('\n') + '\n';
+        metadata += `> \`\`\`\n`;
+        metadata += `> </details>\n`;
+      }
+
       metadata += `\n---\n\n`;
 
       generatedPrompt = metadata + generatedPrompt;
@@ -784,20 +858,47 @@ pause`;
                   )}
                 </div>
               )}
-              <button
-                type="submit"
-                disabled={loading || (inputMode === 'github' ? !url : (!localFiles || localFiles.length === 0))}
-                className="inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                {loading ? (
-                  <>
-                    <Loader2 className="animate-spin -ml-1 mr-2 h-5 w-5" />
-                    Generating...
-                  </>
-                ) : (
-                  inputMode === 'github' && cachedRepoData && cacheKey === `${url}-${githubToken}-${maxFiles}` ? 'Regenerate Prompt (Cached)' : 'Generate Prompt'
+              <div className="flex flex-col sm:flex-row gap-4">
+                <button
+                  type="submit"
+                  disabled={loading || (inputMode === 'github' ? !url : (!localFiles || localFiles.length === 0))}
+                  className="flex-1 inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 className="animate-spin -ml-1 mr-2 h-5 w-5" />
+                      Generating...
+                    </>
+                  ) : (
+                    inputMode === 'github' && cachedRepoData && cacheKey === `${url}-${githubToken}-${maxFiles}` ? 'Regenerate Prompt (Cached)' : 'Generate Prompt'
+                  )}
+                </button>
+                {loading && (
+                  <button
+                    type="button"
+                    onClick={cancelGeneration}
+                    className="inline-flex items-center justify-center px-6 py-3 border border-slate-300 text-base font-medium rounded-xl text-slate-700 bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+                  >
+                    <X className="-ml-1 mr-2 h-5 w-5" />
+                    Cancel
+                  </button>
                 )}
-              </button>
+              </div>
+              
+              {aiProvider === 'qwen' && qwenRateLimit && qwenRateLimit.remainingRequests && (
+                <div className="flex items-center justify-center gap-4 text-xs text-slate-500">
+                  <div className="flex items-center gap-1.5" title="Qwen Requests Quota">
+                    <div className={`w-2 h-2 rounded-full ${parseInt(qwenRateLimit.remainingRequests) > 10 ? 'bg-emerald-500' : 'bg-amber-500'}`}></div>
+                    <span>Reqs: {qwenRateLimit.remainingRequests}</span>
+                  </div>
+                  {qwenRateLimit.remainingTokens && (
+                    <div className="flex items-center gap-1.5" title="Qwen Tokens Quota">
+                      <div className={`w-2 h-2 rounded-full ${parseInt(qwenRateLimit.remainingTokens) > 50000 ? 'bg-emerald-500' : 'bg-amber-500'}`}></div>
+                      <span>Tokens: {qwenRateLimit.remainingTokens}</span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1169,6 +1270,7 @@ pause`;
                       <option value="https://models.inference.ai.azure.com">GitHub Models</option>
                       <option value="https://api.mistral.ai/v1">Mistral</option>
                       <option value="https://api.cerebras.ai/v1">Cerebras</option>
+                      <option value="https://api.moonshot.cn/v1">Kimi (Moonshot)</option>
                     </select>
                   </div>
                   
@@ -1275,21 +1377,43 @@ pause`;
                           Sign Out
                         </button>
                       </div>
-                      {qwenRateLimit && qwenRateLimit.remaining && (
+                      {qwenRateLimit && (
                         <div className="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs">
-                          <div className="flex justify-between items-center mb-1">
-                            <span className="font-medium text-slate-700">Qwen OAuth Quota</span>
-                            <span className="text-slate-500">{qwenRateLimit.remaining} requests remaining</span>
-                          </div>
-                          <div className="w-full bg-slate-200 rounded-full h-1.5 mb-1">
-                            <div 
-                              className={`h-1.5 rounded-full ${parseInt(qwenRateLimit.remaining) > 100 ? 'bg-emerald-500' : parseInt(qwenRateLimit.remaining) > 20 ? 'bg-amber-500' : 'bg-red-500'}`} 
-                              style={{ width: `${Math.min(100, Math.max(0, (parseInt(qwenRateLimit.remaining) / 1000) * 100))}%` }}
-                            ></div>
-                          </div>
-                          {qwenRateLimit.reset && (
-                            <p className="text-slate-500 text-[10px] text-right">
-                              Resets at: {new Date(parseInt(qwenRateLimit.reset) * 1000).toLocaleString()}
+                          {qwenRateLimit.remainingRequests ? (
+                            <>
+                              <div className="flex justify-between items-center mb-1">
+                                <span className="font-medium text-slate-700">Qwen Quota (Reqs)</span>
+                                <span className="text-slate-500">{qwenRateLimit.remainingRequests} remaining</span>
+                              </div>
+                              <div className="w-full bg-slate-200 rounded-full h-1.5 mb-2">
+                                <div 
+                                  className={`h-1.5 rounded-full ${parseInt(qwenRateLimit.remainingRequests) > 10 ? 'bg-emerald-500' : parseInt(qwenRateLimit.remainingRequests) > 2 ? 'bg-amber-500' : 'bg-red-500'}`} 
+                                  style={{ width: `${Math.min(100, Math.max(0, (parseInt(qwenRateLimit.remainingRequests) / 30) * 100))}%` }}
+                                ></div>
+                              </div>
+                            </>
+                          ) : (
+                            <div className="text-slate-500 italic mb-2">Rate limit headers not provided by Qwen API</div>
+                          )}
+                          
+                          {qwenRateLimit.remainingTokens && (
+                            <>
+                              <div className="flex justify-between items-center mb-1">
+                                <span className="font-medium text-slate-700">Qwen Quota (Tokens)</span>
+                                <span className="text-slate-500">{qwenRateLimit.remainingTokens} remaining</span>
+                              </div>
+                              <div className="w-full bg-slate-200 rounded-full h-1.5 mb-1">
+                                <div 
+                                  className={`h-1.5 rounded-full ${parseInt(qwenRateLimit.remainingTokens) > 50000 ? 'bg-emerald-500' : parseInt(qwenRateLimit.remainingTokens) > 10000 ? 'bg-amber-500' : 'bg-red-500'}`} 
+                                  style={{ width: `${Math.min(100, Math.max(0, (parseInt(qwenRateLimit.remainingTokens) / 100000) * 100))}%` }}
+                                ></div>
+                              </div>
+                            </>
+                          )}
+                          
+                          {qwenRateLimit.resetRequests && (
+                            <p className="text-slate-500 text-[10px] text-right mt-1">
+                              Resets in: {Math.ceil(parseInt(qwenRateLimit.resetRequests) / 1000)}s
                             </p>
                           )}
                         </div>

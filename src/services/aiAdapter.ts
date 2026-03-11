@@ -19,7 +19,7 @@ export async function rewriteQuery(
     customApiKey?: string;
     customModel?: string;
   }
-): Promise<{optimizedQuery: string, intent: string, rateLimit?: { remaining: string, reset: string }}> {
+): Promise<{optimizedQuery: string, intent: string, rateLimit?: { remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string }}> {
   if (provider === 'qwen' && options?.qwenToken) {
     return await rewriteQueryWithQwen(query, options.qwenToken, options.qwenResourceUrl);
   } else if (provider === 'ollama' && options?.ollamaUrl && options?.ollamaModel) {
@@ -50,7 +50,7 @@ export async function generatePrompt(
     customApiKey?: string;
     customModel?: string;
   }
-): Promise<{ text: string, modelVersion: string, rateLimit?: { remaining: string, reset: string } }> {
+): Promise<{ text: string, modelVersion: string, rateLimit?: { remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string } }> {
   if (provider === 'qwen' && options?.qwenToken) {
     return await generateSystemPromptWithQwen(
       repoData, taskInstruction, options.qwenToken, additionalContext, analyzeIssues, usedOllama, referenceRepoData, attachedDocs, options.qwenResourceUrl

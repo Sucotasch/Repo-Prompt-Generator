@@ -252,13 +252,27 @@ async function startServer() {
         return res.status(response.status).json({ error: `Qwen API returned non-JSON: ${text.substring(0, 100)}` });
       }
       
+      console.log("Qwen API Headers:", Object.fromEntries(response.headers.entries()));
+
+      const rateLimitRemainingRequests = response.headers.get("X-RateLimit-Remaining-Requests") || response.headers.get("x-ratelimit-remaining-requests");
+      const rateLimitResetRequests = response.headers.get("X-RateLimit-Reset-Requests") || response.headers.get("x-ratelimit-reset-requests");
+      const rateLimitRemainingTokens = response.headers.get("X-RateLimit-Remaining-Tokens") || response.headers.get("x-ratelimit-remaining-tokens");
+      const rateLimitResetTokens = response.headers.get("X-RateLimit-Reset-Tokens") || response.headers.get("x-ratelimit-reset-tokens");
+
+      const rateLimit = {
+        remainingRequests: rateLimitRemainingRequests,
+        resetRequests: rateLimitResetRequests,
+        remainingTokens: rateLimitRemainingTokens,
+        resetTokens: rateLimitResetTokens
+      };
+
       if (!response.ok) {
         console.error("Qwen API error:", data);
-        return res.status(response.status).json({ error: data.error?.message || data.message || `Qwen API Error: ${JSON.stringify(data)}` });
+        return res.status(response.status).json({ 
+          error: data.error?.message || data.message || `Qwen API Error: ${JSON.stringify(data)}`,
+          rateLimit
+        });
       }
-
-      const rateLimitRemaining = response.headers.get("X-RateLimit-Remaining");
-      const rateLimitReset = response.headers.get("X-RateLimit-Reset");
 
       // Map OpenAI format back to the format expected by the frontend
       res.json({
@@ -266,10 +280,7 @@ async function startServer() {
           text: data.choices?.[0]?.message?.content || ""
         },
         model: data.model,
-        rateLimit: {
-          remaining: rateLimitRemaining,
-          reset: rateLimitReset
-        }
+        rateLimit
       });
     } catch (error: any) {
       console.error("Error proxying Qwen request:", error);
