@@ -31,3 +31,5 @@ tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"
 isahc = "1.7.2"
 futures-util = "0.3.32"
+tokio = { version = "1", features = ["full"] }
+urlencoding = "2.1"

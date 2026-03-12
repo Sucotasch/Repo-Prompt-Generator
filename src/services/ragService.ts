@@ -8,7 +8,7 @@ export async function getEmbedding(text: string, ollamaUrl: string, model: strin
   if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
     const { invoke } = await import('@tauri-apps/api/core');
     try {
-      return await invoke('ollama_embed', {
+      return await invoke<number[]>('ollama_embed', {
         url: ollamaUrl,
         model,
         prompt: text
@@ -80,16 +80,24 @@ function chunkText(text: string, linesPerChunk: number = 30): string[] {
 export async function performRAG(
   sourceFiles: { path: string, content: string }[],
   query: string,
+  intent: string,
   ollamaUrl: string,
   model: string,
   topK: number = 10,
   onProgress?: (msg: string) => void
 ): Promise<{ path: string, content: string }[]> {
+  
+  const RAG_SYSTEM_INSTRUCTION = `
+Analyze the provided code snippets. When determining relevance:
+1. Focus on "Concrete Identifiers" (Variable names, Exported Classes, Route Definitions).
+2. Avoid "Abstract Sentiment" (The logic 'feels' like it's for security).
+3. Prioritize files containing the specific "Retrieval Keywords" provided in the query.
+`;
 
   onProgress?.('Generating embedding for your query...');
   let queryEmbedding: number[];
   try {
-    queryEmbedding = await getEmbedding(query, ollamaUrl, model);
+    queryEmbedding = await getEmbedding(query + "\n" + RAG_SYSTEM_INSTRUCTION, ollamaUrl, model);
   } catch (e: any) {
     throw new Error(`Failed to embed query. Make sure you have pulled the model (e.g., 'ollama pull ${model}'). Details: ${e.message}`);
   }
@@ -121,17 +129,58 @@ export async function performRAG(
     }
   }
 
-  onProgress?.('Calculating semantic similarity...');
+  onProgress?.('Calculating semantic similarity with intent-aware reranking...');
+  
+  // Extract simple keywords from the original query to do hybrid lexical boosting
+  // We remove common stop words and keep words >= 3 chars
+  const stopWords = ['what', 'where', 'when', 'how', 'why', 'who', 'the', 'and', 'for', 'with', 'about', 'this', 'that'];
+  const rawKeywords = query.toLowerCase().split(/[\s,.;]+/).filter(w => w.length >= 3 && !stopWords.includes(w));
+  // Keep only up to 5 of the most unique/longest words to prevent over-boosting common terms
+  const keywords = rawKeywords.sort((a, b) => b.length - a.length).slice(0, 5);
+
   const scoredChunks = allChunks
     .filter(c => c.embedding)
-    .map(c => ({
-      ...c,
-      score: cosineSimilarity(queryEmbedding, c.embedding!)
-    }))
+    .map(c => {
+      let score = cosineSimilarity(queryEmbedding, c.embedding!);
+      
+      const pathLower = c.path.toLowerCase();
+      const contentLower = c.content.toLowerCase();
+
+      // Hybrid Lexical Boosting: Check for exact keyword matches
+      let keywordMatches = 0;
+      for (const kw of keywords) {
+        if (contentLower.includes(kw) || pathLower.includes(kw)) {
+          keywordMatches++;
+        }
+      }
+      // If a specific keyword is found, significantly boost the semantic score
+      // Adding 0.5 absolutely guarantees it outranks generic semantic matches
+      if (keywordMatches > 0) {
+        score += (0.50 * keywordMatches);
+      }
+
+      // Intent-Aware Reranking Multipliers
+      if (intent === 'BUG_HUNT') {
+        if (pathLower.includes('.test.') || pathLower.includes('.spec.')) score *= 1.1;
+        if (contentLower.includes('error') || contentLower.includes('catch') || contentLower.includes('throw')) score *= 1.1;
+      } else if (intent === 'ARCHITECTURE') {
+        if (pathLower.endsWith('.md') || pathLower.includes('docs/')) score *= 1.2;
+        if (pathLower.includes('types') || pathLower.includes('interfaces')) score *= 1.1;
+        if (pathLower.includes('index.') || pathLower.includes('main.') || pathLower.includes('app.')) score *= 1.1;
+      } else if (intent === 'UI_UX') {
+        if (pathLower.endsWith('.tsx') || pathLower.endsWith('.jsx') || pathLower.endsWith('.css') || pathLower.endsWith('.scss')) score *= 1.2;
+        if (pathLower.includes('components/') || pathLower.includes('views/') || pathLower.includes('pages/')) score *= 1.1;
+      } else if (intent === 'DATA') {
+        if (pathLower.endsWith('.sql') || pathLower.includes('db/') || pathLower.includes('models/')) score *= 1.2;
+        if (pathLower.includes('services/') || pathLower.includes('store/') || pathLower.includes('api/')) score *= 1.1;
+      }
+      
+      return { ...c, score };
+    })
     .sort((a, b) => b.score - a.score);
 
   return scoredChunks.slice(0, topK).map(c => ({
     path: c.path,
-    content: `// RAG Semantic Similarity Score: ${(c.score * 100).toFixed(1)}%\n${c.content}`
+    content: `// RAG Semantic Similarity Score: ${(c.score * 100).toFixed(1)}% (Intent: ${intent})\n${c.content}`
   }));
 }

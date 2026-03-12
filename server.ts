@@ -12,10 +12,14 @@ async function startServer() {
   // API route to fetch GitHub data
   app.post("/api/repo", async (req, res) => {
     try {
-      const { owner, repo, token, maxFiles = 5 } = req.body;
+      const { owner, repo, branch, token, maxFiles = 5 } = req.body;
       
       if (!owner || !repo || typeof owner !== 'string' || typeof repo !== 'string') {
         return res.status(400).json({ error: "Invalid request. Owner and repo are required." });
+      }
+
+      if (branch && typeof branch !== 'string') {
+        return res.status(400).json({ error: "Invalid request. Branch must be a string." });
       }
 
       const headers: Record<string, string> = {};
@@ -44,11 +48,14 @@ async function startServer() {
       const defaultBranch = infoData.default_branch;
       const description = infoData.description || 'No description provided.';
 
+      const targetBranch = branch || defaultBranch;
+      const encodedBranch = encodeURIComponent(targetBranch);
+
       const HARD_IGNORE = ['venv', '.venv', 'node_modules', '.git', '__pycache__', 'dist', 'build'];
       const SECRET_IGNORE = ['.env', '.pem', '.key', '.cert', '.p12', 'secrets.json', 'credentials.json', 'id_rsa'];
 
       // Fetch tree
-      const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`, { headers });
+      const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${encodedBranch}?recursive=1`, { headers });
       let treePaths: string[] = [];
       
       if (treeRes.ok) {
@@ -61,11 +68,16 @@ async function startServer() {
             const isSecret = SECRET_IGNORE.some(secret => path.endsWith(secret) || path.includes(`/${secret}`));
             return !isHardIgnored && !isSecret;
           });
+      } else {
+        if (treeRes.status === 404) {
+          return res.status(404).json({ error: `Branch, tag, or commit '${targetBranch}' not found in repository.` });
+        }
+        return res.status(treeRes.status).json({ error: `Failed to fetch repository tree: ${treeRes.statusText}` });
       }
 
       // Fetch README
       let readme = '';
-      const readmeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/readme`, { headers });
+      const readmeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/readme?ref=${encodedBranch}`, { headers });
       if (readmeRes.ok) {
         const readmeData = await readmeRes.json();
         try {
@@ -81,7 +93,7 @@ async function startServer() {
       
       for (const file of depFiles) {
         if (treePaths.includes(file)) {
-          const fileRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${file}`, { headers });
+          const fileRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${file}?ref=${encodedBranch}`, { headers });
           if (fileRes.ok) {
             const fileData = await fileRes.json();
             try {
@@ -150,7 +162,7 @@ async function startServer() {
       filesToFetch = filesToFetch.slice(0, limit);
 
       for (const file of filesToFetch) {
-        const fileRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${file}`, { headers });
+        const fileRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${file}?ref=${encodedBranch}`, { headers });
         if (fileRes.ok) {
           const fileData = await fileRes.json();
           try {
@@ -169,7 +181,7 @@ async function startServer() {
       }
 
       res.json({
-        info: { owner, repo, defaultBranch, description },
+        info: { owner, repo, defaultBranch, branch: targetBranch, description },
         tree: treePaths,
         readme,
         dependencies,
@@ -179,6 +191,145 @@ async function startServer() {
     } catch (error: any) {
       console.error("Error fetching repo data:", error);
       res.status(500).json({ error: error.message || "Internal server error" });
+    }
+  });
+
+  // API route to proxy Qwen requests
+  app.post("/api/qwen", async (req, res) => {
+    try {
+      const { token, resourceUrl, prompt, model = "coder-model", isJson = false } = req.body;
+      
+      if (!token) {
+        return res.status(401).json({ error: "Qwen OAuth token is required." });
+      }
+
+      const payload: any = {
+        model,
+        messages: [
+          { role: "system", content: "You are an expert software architect. Output clean markdown." },
+          { role: "user", content: prompt }
+        ],
+        temperature: isJson ? 0.1 : 0.3,
+      };
+      
+      if (isJson) {
+        payload.response_format = { type: "json_object" };
+      }
+
+      let endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+      if (resourceUrl) {
+        let baseUrl = resourceUrl;
+        if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
+          baseUrl = "https://" + baseUrl;
+        }
+        try {
+          const urlObj = new URL(baseUrl);
+          if (urlObj.pathname === "/" || urlObj.pathname === "") {
+             endpoint = new URL("/v1/chat/completions", baseUrl).toString();
+          } else {
+             endpoint = baseUrl;
+          }
+        } catch (e) {
+          endpoint = baseUrl;
+        }
+      }
+
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const text = await response.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        console.error("Qwen API returned non-JSON:", text);
+        return res.status(response.status).json({ error: `Qwen API returned non-JSON: ${text.substring(0, 100)}` });
+      }
+      
+      console.log("Qwen API Headers:", Object.fromEntries(response.headers.entries()));
+
+      const rateLimitRemainingRequests = response.headers.get("X-RateLimit-Remaining-Requests") || response.headers.get("x-ratelimit-remaining-requests");
+      const rateLimitResetRequests = response.headers.get("X-RateLimit-Reset-Requests") || response.headers.get("x-ratelimit-reset-requests");
+      const rateLimitRemainingTokens = response.headers.get("X-RateLimit-Remaining-Tokens") || response.headers.get("x-ratelimit-remaining-tokens");
+      const rateLimitResetTokens = response.headers.get("X-RateLimit-Reset-Tokens") || response.headers.get("x-ratelimit-reset-tokens");
+
+      const rateLimit = {
+        remainingRequests: rateLimitRemainingRequests,
+        resetRequests: rateLimitResetRequests,
+        remainingTokens: rateLimitRemainingTokens,
+        resetTokens: rateLimitResetTokens
+      };
+
+      if (!response.ok) {
+        console.error("Qwen API error:", data);
+        return res.status(response.status).json({ 
+          error: data.error?.message || data.message || `Qwen API Error: ${JSON.stringify(data)}`,
+          rateLimit
+        });
+      }
+
+      // Map OpenAI format back to the format expected by the frontend
+      res.json({
+        output: {
+          text: data.choices?.[0]?.message?.content || ""
+        },
+        model: data.model,
+        rateLimit
+      });
+    } catch (error: any) {
+      console.error("Error proxying Qwen request:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
+  });
+
+  // Proxy for Qwen OAuth Device Code
+  app.post("/api/qwen/device/code", async (req, res) => {
+    try {
+      const response = await fetch("https://chat.qwen.ai/api/v1/oauth2/device/code", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Accept": "application/json",
+        },
+        body: new URLSearchParams(req.body).toString()
+      });
+      const data = await response.json();
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Proxy for Qwen OAuth Token Polling
+  app.post("/api/qwen/device/token", async (req, res) => {
+    try {
+      const response = await fetch("https://chat.qwen.ai/api/v1/oauth2/token", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Accept": "application/json",
+        },
+        body: new URLSearchParams(req.body).toString()
+      });
+      
+      const text = await response.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+        console.log("Qwen Token Response:", { ...data, access_token: data.access_token ? "***" : undefined, refresh_token: data.refresh_token ? "***" : undefined, id_token: data.id_token ? "***" : undefined });
+      } catch (e) {
+        return res.status(response.status).send(text);
+      }
+      
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
     }
   });
 

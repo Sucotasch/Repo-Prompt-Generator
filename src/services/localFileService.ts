@@ -122,7 +122,7 @@ export async function selectLocalFolderWithTauri(maxFiles: number, existingPath?
   }
 
   return {
-    info: { owner: 'local', repo: repoName, defaultBranch: 'local', description: `Local folder: ${selected}` },
+    info: { owner: 'local', repo: repoName, defaultBranch: 'local', branch: 'local', description: `Local folder: ${selected}` },
     tree: finalTreePaths,
     readme,
     dependencies,

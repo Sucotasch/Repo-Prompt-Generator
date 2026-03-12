@@ -22,5 +22,6 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "exclude": ["tauri_branch_temp", "qwen-code-repo", "src-tauri"]
 }

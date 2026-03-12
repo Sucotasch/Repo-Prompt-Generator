@@ -1,37 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { Github, FileText, Loader2, Copy, Check, Download, Settings2, AlertTriangle, Save, Trash2, Folder } from 'lucide-react';
+import { Github, FileText, Loader2, Copy, Check, Download, Settings2, AlertTriangle, Save, Trash2, Folder, ChevronDown, Database, Paperclip, X } from 'lucide-react';
 import { fetchRepoData } from './services/githubService';
-import { selectLocalFolderWithTauri } from './services/localFileService';
-import { generateSystemPrompt, buildPromptText } from './services/geminiService';
-import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama, startOllamaNative, stopOllamaNative, isOllamaRunningNative } from './services/ollamaService';
+import { selectLocalFolderWithTauri, processLocalFolder } from './services/localFileService';
+import { generateSystemPrompt, buildPromptText, rewriteQueryWithGemini } from './services/geminiService';
+import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama, startOllamaNative, stopOllamaNative, isOllamaRunningNative, rewriteQueryWithOllama } from './services/ollamaService';
+import { fetchOpenAICompatibleModels } from './services/openaiCompatibleService';
+import { generatePrompt, rewriteQuery, AIProvider } from './services/aiAdapter';
 import { performRAG } from './services/ragService';
+import { startDeviceAuth, pollDeviceToken } from './services/qwenAuthService';
+import { getTemplate, getAllTemplates } from './templates';
 import { ask } from '@tauri-apps/plugin-dialog';
-
-const TEMPLATES = {
-  default: `You are an expert software engineer and AI assistant. Based on the following GitHub repository information, generate a comprehensive system prompt suitable for further development of the project using Gemini CLI or Antigravity. The prompt should be formatted as markdown, ready to be saved as \`gemini.md\`.
-
-Generate a system prompt that includes:
-1. The project's purpose and tech stack.
-2. The architectural patterns and conventions used.
-3. Instructions for the AI on how to assist with this specific codebase.
-4. Any specific rules or guidelines for contributing to this project.`,
-
-  security: `You are an expert cybersecurity auditor. Analyze the provided GitHub repository data to identify hidden threats, dangerous system calls, and data exfiltration mechanisms. Look for "holes", intentionally malicious code, and vulnerabilities (SQL injections, insecure system calls, hardcoded keys, hidden requests to external IPs, socket usage, unauthorized URL access). 
-
-Highlight the use of functions that execute system commands (e.g., eval, exec, subprocess, os.system, P/Invoke) that could lead to RCE. Find attempts to read confidential files (.env, .ssh/id_rsa, /etc/passwd, browser configs) or access Keychain/Credential Manager. Check for obfuscation, strange Base64 strings, or on-the-fly decrypted data blocks. Check the dependencies for "typosquatting".
-
-Provide a detailed report in Markdown, ending with a Risk Assessment (Low/Medium/High) and a list of all suspicious fragments.`,
-
-  docs: `You are an expert technical writer and software architect. Analyze the provided GitHub repository data to create comprehensive technical documentation in Markdown format (suitable for a Wiki or a detailed README.md). Make the code understandable.
-
-Include:
-1. Real capabilities of the program.
-2. Algorithm of operation and architecture.
-3. Installation and configuration process.
-4. Examples of using the main functions.`,
-
-  custom: ''
-};
 
 interface SavedTemplate {
   id: string;
@@ -58,6 +36,16 @@ export default function App() {
   const [inputMode, setInputMode] = useState<'github' | 'local'>(initialSettings.inputMode || 'github');
   const [localFiles, setLocalFiles] = useState<FileList | null>(null);
   const [selectedLocalPath, setSelectedLocalPath] = useState(initialSettings.selectedLocalPath || '');
+  
+  // Reference Repository State
+  const [referenceInputMode, setReferenceInputMode] = useState<'github' | 'local'>('github');
+  const [referenceUrl, setReferenceUrl] = useState('');
+  const [referenceLocalFiles, setReferenceLocalFiles] = useState<FileList | null>(null);
+  const [selectedReferencePath, setSelectedReferencePath] = useState('');
+  const [referenceMaxFiles, setReferenceMaxFiles] = useState(initialSettings.maxFiles || 5);
+  const [cachedReferenceRepoData, setCachedReferenceRepoData] = useState<any>(null);
+  const [referenceCacheKey, setReferenceCacheKey] = useState<string>('');
+  const [useReferenceRepo, setUseReferenceRepo] = useState(false);
   const [templateMode, setTemplateMode] = useState<string>('default');
   const [savedTemplates, setSavedTemplates] = useState<SavedTemplate[]>(() => {
     try {
@@ -67,13 +55,22 @@ export default function App() {
       return [];
     }
   });
-  const [customInstruction, setCustomInstruction] = useState(TEMPLATES.default);
+  const [customInstruction, setCustomInstruction] = useState('');
   const [additionalContext, setAdditionalContext] = useState('');
+  const [ragQuery, setRagQuery] = useState('');
+  const [attachedDocs, setAttachedDocs] = useState<{name: string, content: string}[]>([]);
   const [analyzeIssues, setAnalyzeIssues] = useState(false);
   const [useOllama, setUseOllama] = useState(initialSettings.useOllama || false);
   const [useOllamaForFinal, setUseOllamaForFinal] = useState(initialSettings.useOllamaForFinal || false);
+  const [aiProvider, setAiProvider] = useState<AIProvider>(initialSettings.aiProvider || 'gemini');
+  const [qwenOAuthToken, setQwenOAuthToken] = useState(initialSettings.qwenOAuthToken || '');
+  const [qwenResourceUrl, setQwenResourceUrl] = useState(initialSettings.qwenResourceUrl || '');
+  const [qwenAuthStatus, setQwenAuthStatus] = useState<'idle' | 'polling' | 'success' | 'error'>('idle');
+  const [qwenAuthUrl, setQwenAuthUrl] = useState<string | null>(null);
+  const [qwenAuthMessage, setQwenAuthMessage] = useState<string>('');
+  const [qwenRateLimit, setQwenRateLimit] = useState<{remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string} | null>(null);
   const [useRag, setUseRag] = useState(initialSettings.useRag || false);
-  const [ragModel, setRagModel] = useState(initialSettings.ragModel || 'nomic-embed-text');
+  const [ragModel, setRagModel] = useState(initialSettings.ragModel || '');
   const [ragTopK, setRagTopK] = useState(initialSettings.ragTopK || 10);
   const [ollamaUrl, setOllamaUrl] = useState(initialSettings.ollamaUrl || 'http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState(initialSettings.ollamaModel || 'llama3');
@@ -81,14 +78,29 @@ export default function App() {
   const [ollamaSummaryPredict, setOllamaSummaryPredict] = useState(initialSettings.ollamaSummaryPredict || 500);
   const [ollamaFinalPredict, setOllamaFinalPredict] = useState(initialSettings.ollamaFinalPredict || 2000);
   const [ollamaTemperature, setOllamaTemperature] = useState(initialSettings.ollamaTemperature !== undefined ? initialSettings.ollamaTemperature : 0.3);
+  const [useQueryExpansion, setUseQueryExpansion] = useState(initialSettings.useQueryExpansion !== undefined ? initialSettings.useQueryExpansion : true);
+  const [useIntentReranking, setUseIntentReranking] = useState(initialSettings.useIntentReranking !== undefined ? initialSettings.useIntentReranking : true);
+  
+  // Custom API Provider State
+  const [customBaseUrl, setCustomBaseUrl] = useState(initialSettings.customBaseUrl || '');
+  const [customApiKey, setCustomApiKey] = useState(initialSettings.customApiKey || '');
+  const [customModel, setCustomModel] = useState(initialSettings.customModel || '');
+  const [availableCustomModels, setAvailableCustomModels] = useState<string[]>([]);
+  const [testingCustomProvider, setTestingCustomProvider] = useState(false);
+  const [customProviderConnected, setCustomProviderConnected] = useState<boolean | null>(null);
+  const [customProviderError, setCustomProviderError] = useState<string | null>(null);
 
+  const [showAdvancedRag, setShowAdvancedRag] = useState(false);
   const [ollamaConnected, setOllamaConnected] = useState<boolean | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [testingOllama, setTestingOllama] = useState(false);
   const [loading, setLoading] = useState(false);
+  const abortControllerRef = React.useRef<AbortController | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
+  const [lastOptimizedQuery, setLastOptimizedQuery] = useState<{query: string, intent: string} | null>(null);
+  const [generatedFileName, setGeneratedFileName] = useState<string>('gemini.md');
   const [copied, setCopied] = useState(false);
   const [status, setStatus] = useState('');
   const [isTruncated, setIsTruncated] = useState(false);
@@ -107,13 +119,13 @@ export default function App() {
 
   useEffect(() => {
     const settings = {
-      inputMode,
       githubToken,
       geminiApiKey,
       proxyAddress,
       maxFiles,
       useOllama,
       useOllamaForFinal,
+      aiProvider,
       useRag,
       ragModel,
       ragTopK,
@@ -123,10 +135,17 @@ export default function App() {
       ollamaSummaryPredict,
       ollamaFinalPredict,
       ollamaTemperature,
-      selectedLocalPath
+      qwenOAuthToken,
+      qwenResourceUrl,
+      selectedLocalPath,
+      useQueryExpansion,
+      useIntentReranking,
+      customBaseUrl,
+      customApiKey,
+      customModel
     };
     localStorage.setItem('gemini_app_settings', JSON.stringify(settings));
-  }, [inputMode, githubToken, geminiApiKey, proxyAddress, maxFiles, useOllama, useOllamaForFinal, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature, selectedLocalPath]);
+  }, [inputMode, githubToken, geminiApiKey, proxyAddress, maxFiles, useOllama, useOllamaForFinal, aiProvider, qwenOAuthToken, qwenResourceUrl, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature, selectedLocalPath, useQueryExpansion, useIntentReranking, customBaseUrl, customApiKey, customModel]);
 
   // Check if env var key exists on mount
   useEffect(() => {
@@ -158,17 +177,13 @@ export default function App() {
         setOllamaStatus('stopped');
       }
     };
-
     checkOllamaStatus();
-    const interval = setInterval(checkOllamaStatus, 5000);
-    return () => clearInterval(interval);
   }, []);
+
 
   const handleTemplateChange = (mode: string) => {
     setTemplateMode(mode);
-    if (mode in TEMPLATES) {
-      setCustomInstruction(TEMPLATES[mode as keyof typeof TEMPLATES]);
-    } else if (mode === 'custom') {
+    if (mode === 'custom') {
       setCustomInstruction('');
     } else {
       const tpl = savedTemplates.find(t => t.id === mode);
@@ -218,6 +233,51 @@ export default function App() {
     handleTemplateChange('default');
   };
 
+  const handleExportTemplates = () => {
+    if (savedTemplates.length === 0) {
+      alert('No custom templates to export.');
+      return;
+    }
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(savedTemplates, null, 2));
+    const downloadAnchorNode = document.createElement('a');
+    downloadAnchorNode.setAttribute("href", dataStr);
+    downloadAnchorNode.setAttribute("download", "gemini_custom_templates.json");
+    document.body.appendChild(downloadAnchorNode);
+    downloadAnchorNode.click();
+    downloadAnchorNode.remove();
+  };
+
+  const handleImportTemplates = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const imported = JSON.parse(event.target?.result as string);
+        if (Array.isArray(imported)) {
+          const existingIds = new Set(savedTemplates.map(t => t.id));
+          const newTemplates = [...savedTemplates];
+          let added = 0;
+          for (const t of imported) {
+            if (t.id && t.name && t.content && !existingIds.has(t.id)) {
+              newTemplates.push(t);
+              added++;
+            }
+          }
+          setSavedTemplates(newTemplates);
+          localStorage.setItem('gemini_custom_templates', JSON.stringify(newTemplates));
+          alert(`Successfully imported ${added} templates.`);
+        } else {
+          alert('Invalid templates file format.');
+        }
+      } catch (err) {
+        alert('Failed to parse templates file.');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
   const handleTestOllama = async () => {
     setTestingOllama(true);
     const isConnected = await checkOllamaConnection(ollamaUrl);
@@ -233,6 +293,7 @@ export default function App() {
     }
     setTestingOllama(false);
   };
+
 
 
   const handleOllamaControl = async (action: 'start' | 'stop') => {
@@ -278,25 +339,215 @@ export default function App() {
     }
   };
 
-  const handleGenerate = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleTestCustomProvider = async () => {
+    if (!customBaseUrl || !customApiKey) {
+      alert("Please enter both Base URL and API Key.");
+      return;
+    }
+    setTestingCustomProvider(true);
+    setCustomProviderError(null);
+    try {
+      const models = await fetchOpenAICompatibleModels(customBaseUrl, customApiKey);
+      setAvailableCustomModels(models);
+      setCustomProviderConnected(true);
+      if (models.length > 0 && !models.includes(customModel)) {
+        setCustomModel(models[0]);
+      }
+    } catch (e: any) {
+      console.error(e);
+      setCustomProviderConnected(false);
+      let msg = e.message || "Unknown error";
+      if (msg === "Failed to fetch") {
+        msg = "Network or CORS error. The API might block browser requests to /models. You can still type the model name manually (e.g., grok-4-latest) and try generating.";
+      }
+      setCustomProviderError(msg);
+      setAvailableCustomModels([]);
+    }
+    setTestingCustomProvider(false);
+  };
+
+  const handleQwenLogin = async () => {
+    try {
+      setQwenAuthStatus('polling');
+      setQwenAuthMessage('Starting authorization...');
+      
+      const authData = await startDeviceAuth();
+      setQwenAuthUrl(authData.verification_uri_complete);
+      setQwenAuthMessage('Please open the URL in your browser to authorize.');
+      
+      // Open the URL in a new tab
+      window.open(authData.verification_uri_complete, '_blank');
+
+      let pollInterval = 2000;
+      const maxAttempts = Math.ceil(authData.expires_in / (pollInterval / 1000));
+      
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const tokenResponse = await pollDeviceToken(authData.device_code, authData.codeVerifier);
+        
+        if (tokenResponse.status === 'success') {
+          // Store the access token
+          setQwenOAuthToken(tokenResponse.data.access_token);
+          if (tokenResponse.data.resource_url) {
+            setQwenResourceUrl(tokenResponse.data.resource_url);
+          }
+          setQwenAuthStatus('success');
+          setQwenAuthMessage('Authentication successful!');
+          setQwenAuthUrl(null);
+          return;
+        }
+        
+        if (tokenResponse.status === 'pending') {
+          if (tokenResponse.slowDown) {
+            pollInterval = Math.min(pollInterval * 1.5, 10000);
+          } else {
+            pollInterval = 2000;
+          }
+          await new Promise(resolve => setTimeout(resolve, pollInterval));
+          continue;
+        }
+      }
+      
+      setQwenAuthStatus('error');
+      setQwenAuthMessage('Authorization timed out. Please try again.');
+      setQwenAuthUrl(null);
+    } catch (error: any) {
+      setQwenAuthStatus('error');
+      setQwenAuthMessage(error.message || 'Failed to authenticate with Qwen.');
+      setQwenAuthUrl(null);
+    }
+  };
+
+  const handleDownloadBat = () => {
+    const origin = window.location.origin;
+    const batContent = `@echo off
+color 0A
+echo ==========================================
+echo Starting Ollama with CORS enabled...
+echo You can now use the Gemini Prompt Generator!
+echo ==========================================
+set OLLAMA_ORIGINS="${origin}"
+echo Closing existing Ollama instances...
+taskkill /f /im ollama.exe >nul 2>&1
+echo Starting Ollama with CORS enabled for ${origin}...
+start "" ollama serve
+pause`;
+    const blob = new Blob([batContent], { type: 'application/bat' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'start-ollama.bat';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+  };
+
+  const handleAttachDocs = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+    const files = Array.from(e.target.files) as File[];
+    const newDocs: {name: string, content: string}[] = [];
+    for (const file of files) {
+      try {
+        const content = await file.text();
+        newDocs.push({ name: file.name, content });
+      } catch (err) {
+        console.error(`Failed to read file ${file.name}`, err);
+      }
+    }
+    setAttachedDocs(prev => [...prev, ...newDocs]);
+    e.target.value = '';
+  };
+
+  const removeAttachedDoc = (index: number) => {
+    setAttachedDocs(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const getSystemPrompt = (mode: string, customText?: string): string => {
+    const template = getTemplate(mode);
+    
+    if (!template) {
+      // Fallback to original behavior for custom or saved templates
+      return customText || '';
+    }
+
+    // Build enhanced prompt with deliverables and metrics
+    const promptParts = [
+      template.systemInstruction,
+    ];
+
+    if (template.deliverables && template.deliverables.length > 0) {
+      promptParts.push('', '## 📦 Required Deliverables', ...template.deliverables.map(d => `- ${d}`));
+    }
+
+    if (template.successMetrics && template.successMetrics.length > 0) {
+      promptParts.push('', '## ✅ Success Criteria', ...template.successMetrics.map(m => `- ${m}`));
+    }
+
+    if (template.evidenceRequirements && template.evidenceRequirements.length > 0) {
+      promptParts.push('', '## 🔍 Evidence Requirements', ...template.evidenceRequirements.map(e => `- ${e}`));
+    }
+
+    if (template.tone) {
+      promptParts.push('', '## 🎭 Tone', template.tone);
+    }
+
+    if (template.constraints && template.constraints.length > 0) {
+      promptParts.push('', '## ⚠️ Constraints', ...template.constraints.map(c => `- ${c}`));
+    }
+
+    return promptParts.join('\n');
+  };
+
+  const cancelGeneration = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setLoading(false);
+    setStatus('Generation cancelled by user.');
+  };
+
+  const delay = (ms: number, signal?: AbortSignal) => {
+    return new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) return reject(new Error('Aborted'));
+      const timeout = setTimeout(resolve, ms);
+      signal?.addEventListener('abort', () => {
+        clearTimeout(timeout);
+        reject(new Error('Aborted'));
+      });
+    });
+  };
+
+  const handleGenerate = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (inputMode === 'github' && !url) return;
-    if (inputMode === 'local' && !selectedLocalPath && (!localFiles || localFiles.length === 0)) {
+    if (inputMode === 'local' && (!localFiles || localFiles.length === 0) && !selectedLocalPath) {
       if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
         await handleSelectLocalFolder();
       }
       return;
     }
-
-    if (useRag && !additionalContext.trim()) {
-      setError("Additional Context is required when RAG is enabled. Please enter your search query (e.g., 'Payment processing logic').");
+    
+    if (useRag && !ragModel) {
+      setError('Please select an Embedding Model for RAG. It is required to process the repository files.');
       return;
     }
+
+
+
+    
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
+    const signal = abortControllerRef.current.signal;
 
     setLoading(true);
     setError(null);
     setPrompt(null);
     setUsedModel(null);
+    setLastOptimizedQuery(null);
     setCopied(false);
     setIsTruncated(false);
 
@@ -341,18 +592,149 @@ export default function App() {
         setIsTruncated(true);
       }
 
-      if (useRag && repoData.sourceFiles && repoData.sourceFiles.length > 0) {
+      // Generate file name base
+      let projectName = 'project';
+      if (repoData.info && repoData.info.repo) {
+        projectName = repoData.info.repo;
+      }
+      const templateName = templateMode === 'default' ? 'gemini' : templateMode;
+      const date = new Date();
+      const timestamp = `${date.getFullYear()}${(date.getMonth() + 1).toString().padStart(2, '0')}${date.getDate().toString().padStart(2, '0')}_${date.getHours().toString().padStart(2, '0')}${date.getMinutes().toString().padStart(2, '0')}`;
+
+      let referenceRepoData;
+      const isCustomMode = templateMode === 'custom' || templateMode.startsWith('user_');
+      const shouldFetchReference = templateMode === 'integration' || (isCustomMode && useReferenceRepo);
+
+      if (shouldFetchReference) {
+        if (referenceInputMode === 'github' && referenceUrl) {
+          const currentRefCacheKey = `${referenceUrl}-${githubToken}-${referenceMaxFiles}`;
+          if (cachedReferenceRepoData && referenceCacheKey === currentRefCacheKey) {
+            setStatus('Using cached reference repository data...');
+            referenceRepoData = cachedReferenceRepoData;
+          } else {
+            setStatus('Fetching reference repository data...');
+            referenceRepoData = await fetchRepoData(referenceUrl, githubToken, referenceMaxFiles);
+            setCachedReferenceRepoData(referenceRepoData);
+            setReferenceCacheKey(currentRefCacheKey);
+          }
+        } else if (referenceInputMode === 'local') {
+          if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+            setStatus('Scanning local reference folder...');
+            referenceRepoData = await selectLocalFolderWithTauri(referenceMaxFiles, selectedReferencePath || undefined);
+            if (!selectedReferencePath && referenceRepoData?.info?.description) {
+              const pathMatch = referenceRepoData.info.description.match(/Local folder: (.+)/);
+              if (pathMatch) setSelectedReferencePath(pathMatch[1]);
+            }
+          } else if (referenceLocalFiles && referenceLocalFiles.length > 0) {
+            setStatus('Processing local reference files...');
+            referenceRepoData = await processLocalFolder(referenceLocalFiles, referenceMaxFiles);
+          }
+          setCachedReferenceRepoData(null);
+          setReferenceCacheKey('');
+        }
+        
+        if (referenceRepoData && referenceRepoData.isTruncated) {
+          setIsTruncated(true);
+        }
+      }
+      
+      let currentQwenRateLimit: any = null;
+      let finalUsedRagQuery = '';
+      let finalUsedOptimizedQuery = '';
+      
+      const hasPrimaryFiles = repoData.sourceFiles && repoData.sourceFiles.length > 0;
+      const hasReferenceFiles = referenceRepoData && referenceRepoData.sourceFiles && referenceRepoData.sourceFiles.length > 0;
+      
+      if (useRag && (hasPrimaryFiles || hasReferenceFiles)) {
         try {
-          setStatus('Running RAG: Filtering codebase...');
-          const ragFiles = await performRAG(
-            repoData.sourceFiles,
-            additionalContext,
-            ollamaUrl,
-            ragModel,
-            ragTopK,
-            (msg) => setStatus(msg)
-          );
-          repoData = { ...repoData, sourceFiles: ragFiles };
+          let optimizedQuery = ragQuery;
+          let queryIntent = 'GENERAL';
+          if (ragQuery.trim() !== '') {
+            if (useQueryExpansion || useIntentReranking) {
+              setStatus('Optimizing RAG query with LLM...');
+              try {
+                let result;
+                if (useOllamaForFinal) {
+                  result = await rewriteQueryWithOllama(ragQuery, ollamaUrl, ollamaModel);
+                } else {
+                  result = await rewriteQuery(aiProvider, ragQuery, { 
+                    qwenToken: qwenOAuthToken, 
+                    qwenResourceUrl: qwenResourceUrl || undefined,
+                    customBaseUrl,
+                    customApiKey,
+                    customModel
+                  });
+                  if (aiProvider === 'qwen' && result.rateLimit) {
+                    setQwenRateLimit(result.rateLimit);
+                    currentQwenRateLimit = result.rateLimit;
+                  }
+                }
+                
+                if (useQueryExpansion) {
+                  optimizedQuery = result.optimizedQuery;
+                  setStatus(`RAG query optimized: ${optimizedQuery}`);
+                }
+                if (useIntentReranking) {
+                  queryIntent = result.intent;
+                }
+                
+                setLastOptimizedQuery({ query: optimizedQuery, intent: queryIntent });
+                console.log("Original RAG query:", ragQuery);
+                console.log("Optimized RAG query:", optimizedQuery);
+                console.log("Detected Intent:", queryIntent);
+              } catch (e) {
+                console.warn("Query optimization failed, using original query", e);
+                setLastOptimizedQuery(null);
+              }
+            } else {
+              setLastOptimizedQuery({ query: optimizedQuery, intent: 'GENERAL' });
+            }
+          } else {
+             setLastOptimizedQuery(null);
+          }
+
+          const getFallbackQuery = () => {
+            const template = getTemplate(templateMode);
+            if (template) return template.defaultSearchQuery;
+            return customInstruction.substring(0, 500);
+          };
+          
+          const finalRagQuery = (optimizedQuery || getFallbackQuery()).substring(0, 1000);
+          finalUsedRagQuery = ragQuery;
+          finalUsedOptimizedQuery = optimizedQuery || finalRagQuery;
+
+          // Update the UI state so the user can see what was actually used for the search
+          if (!lastOptimizedQuery || lastOptimizedQuery.query.trim() === '') {
+            setLastOptimizedQuery({ query: finalRagQuery, intent: queryIntent || 'AUTO_FALLBACK' });
+          }
+
+          if (hasPrimaryFiles) {
+            setStatus('Running RAG: Filtering codebase...');
+            const ragFiles = await performRAG(
+              repoData.sourceFiles,
+              finalRagQuery,
+              queryIntent,
+              ollamaUrl,
+              ragModel,
+              ragTopK,
+              (msg) => setStatus(msg)
+            );
+            repoData = { ...repoData, sourceFiles: ragFiles };
+          }
+          
+          if (hasReferenceFiles) {
+            setStatus('Running RAG: Filtering reference codebase...');
+            const refRagFiles = await performRAG(
+              referenceRepoData.sourceFiles,
+              finalRagQuery,
+              queryIntent,
+              ollamaUrl,
+              ragModel,
+              ragTopK,
+              (msg) => setStatus(msg)
+            );
+            referenceRepoData = { ...referenceRepoData, sourceFiles: refRagFiles };
+          }
         } catch (e: any) {
           setError(`RAG failed: ${e.message}`);
           setLoading(false);
@@ -384,28 +766,121 @@ export default function App() {
           dependencies: await summarize(repoData.dependencies),
           sourceFiles: summarizedSourceFiles
         };
+
+        if (referenceRepoData) {
+          const refSummarizedSourceFiles = [];
+          if (referenceRepoData.sourceFiles) {
+            for (const file of referenceRepoData.sourceFiles) {
+              setStatus(`Summarizing reference ${file.path} with Ollama...`);
+              const summary = await summarize(file.content);
+              refSummarizedSourceFiles.push({ path: file.path, content: summary });
+            }
+          }
+          referenceRepoData = {
+            ...referenceRepoData,
+            readme: await summarize(referenceRepoData.readme),
+            dependencies: await summarize(referenceRepoData.dependencies),
+            sourceFiles: refSummarizedSourceFiles
+          };
+        }
       }
 
       let generatedPrompt = '';
       let finalModel = '';
+      const taskInstruction = getSystemPrompt(templateMode, customInstruction);
+      
       if (useOllamaForFinal && ollamaConnected !== false) {
         setStatus('Generating final prompt with local Ollama...');
-        const promptText = buildPromptText(repoData, customInstruction, additionalContext, analyzeIssues);
+        const promptText = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs);
         generatedPrompt = await generate_final_prompt_with_ollama(promptText, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaFinalPredict, ollamaTemperature);
 
         finalModel = `Ollama (${ollamaModel})`;
-
-        if (usedOllama) {
-          generatedPrompt = `> **Note:** This prompt was fully generated and pre-processed by a local LLM.\n\n` + generatedPrompt;
-        } else {
-          generatedPrompt = `> **Note:** This prompt was generated by a local LLM.\n\n` + generatedPrompt;
-        }
       } else {
-        setStatus('Generating system prompt with Gemini...');
-        const result = await generateSystemPrompt(repoData, customInstruction, geminiApiKey, proxyAddress, additionalContext, analyzeIssues, usedOllama);
+        if (aiProvider === 'qwen' && currentQwenRateLimit) {
+          const remainingReqs = parseInt(currentQwenRateLimit.remainingRequests || '1', 10);
+          const remainingTokens = parseInt(currentQwenRateLimit.remainingTokens || '100000', 10);
+          
+          if (remainingReqs <= 0 || remainingTokens < 10000) {
+            const resetReqs = parseInt(currentQwenRateLimit.resetRequests || '0', 10);
+            const resetTokens = parseInt(currentQwenRateLimit.resetTokens || '0', 10);
+            const waitTime = Math.max(resetReqs, resetTokens) + 2000; // 2 seconds buffer
+            
+            if (waitTime > 0) {
+              setStatus(`Qwen rate limit reached. Pausing for ${Math.ceil(waitTime / 1000)} seconds to reset quota...`);
+              await delay(waitTime, signal);
+            }
+          }
+        }
+
+        setStatus(`Generating system prompt with ${aiProvider}...`);
+        const result = await generatePrompt(
+          aiProvider,
+          repoData, 
+          taskInstruction, 
+          additionalContext, 
+          analyzeIssues, 
+          usedOllama, 
+          referenceRepoData, 
+          attachedDocs,
+          { 
+            qwenToken: qwenOAuthToken, 
+            qwenResourceUrl: qwenResourceUrl || undefined,
+            geminiApiKey,
+            proxyAddress,
+            customBaseUrl,
+            customApiKey,
+            customModel
+          }
+        );
         generatedPrompt = result.text;
         finalModel = result.modelVersion;
+        if (aiProvider === 'qwen' && result.rateLimit) {
+          setQwenRateLimit(result.rateLimit);
+        }
       }
+
+      
+      let metadata = `> **🤖 Prompt Generation Metadata**\n`;
+      metadata += `> - **Model:** ${finalModel}\n`;
+      metadata += `> - **Target Repository:** ${url || 'Local Folder'}\n`;
+      if (referenceRepoData) {
+        metadata += `> - **Reference Repository:** ${referenceUrl || 'Local Folder'}\n`;
+      }
+      
+      if (useRag) {
+        if (finalUsedRagQuery) {
+          metadata += `> - **Original RAG Query:** "${finalUsedRagQuery}"\n`;
+          if (finalUsedOptimizedQuery && finalUsedOptimizedQuery !== finalUsedRagQuery) {
+            metadata += `> - **Optimized RAG Query:** "${finalUsedOptimizedQuery}"\n`;
+          }
+        } else {
+          metadata += `> - **Auto-generated RAG Query:** "${finalUsedOptimizedQuery || 'Unknown'}"\n`;
+        }
+      }
+      if (usedOllama) metadata += `> - **Pre-processing:** Local LLM (Ollama)\n`;
+      
+      metadata += `> \n`;
+      metadata += `> <details><summary><b>Task Instructions</b></summary>\n> \n`;
+      metadata += '> \`\`\`text\n';
+      metadata += taskInstruction.split('\n').map(line => `> ${line}`).join('\n') + '\n';
+      metadata += '> \`\`\`\n';
+      metadata += '> </details>\n';
+
+      if (additionalContext) {
+        metadata += `>\n> <details><summary><b>Additional Context</b></summary>\n> \n`;
+        metadata += '> \`\`\`text\n';
+        metadata += additionalContext.split('\n').map(line => `> ${line}`).join('\n') + '\n';
+        metadata += '> \`\`\`\n';
+        metadata += '> </details>\n';
+      }
+
+      metadata += `\n---\n\n`;
+
+      generatedPrompt = metadata + generatedPrompt;
+
+      const safeModelName = finalModel.replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').toLowerCase();
+      setGeneratedFileName(`${projectName}_${templateName}_${safeModelName}_${timestamp}.md`);
+      
 
       setPrompt(generatedPrompt);
       setUsedModel(finalModel);
@@ -435,7 +910,7 @@ export default function App() {
 
           const path = await save({
             filters: [{ name: 'Markdown', extensions: ['md'] }],
-            defaultPath: 'gemini.md'
+            defaultPath: generatedFileName
           });
 
           if (path) {
@@ -454,7 +929,7 @@ export default function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'gemini.md';
+      a.download = generatedFileName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -542,20 +1017,49 @@ export default function App() {
                   )}
                 </div>
               )}
-              <button
-                type="submit"
-                disabled={loading || (inputMode === 'github' ? !url : !selectedLocalPath)}
-                className="inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                {loading ? (
-                  <>
-                    <Loader2 className="animate-spin -ml-1 mr-2 h-5 w-5" />
-                    Generating...
-                  </>
-                ) : (
-                  inputMode === 'github' && cachedRepoData && cacheKey === `${url}-${githubToken}-${maxFiles}` ? 'Regenerate Prompt (Cached)' : (inputMode === 'local' && !selectedLocalPath ? 'Select Folder & Generate' : 'Generate Prompt')
+
+              <div className="flex flex-col sm:flex-row gap-4">
+                <button
+                  type="submit"
+                  disabled={loading || (inputMode === 'github' ? !url : (!selectedLocalPath))}
+                  className="flex-1 inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 className="animate-spin -ml-1 mr-2 h-5 w-5" />
+                      Generating...
+                    </>
+                  ) : (
+                    inputMode === 'github' && cachedRepoData && cacheKey === `${url}-${githubToken}-${maxFiles}` ? 'Regenerate Prompt (Cached)' : 'Generate Prompt'
+                  )}
+                </button>
+                {loading && (
+                  <button
+                    type="button"
+                    onClick={cancelGeneration}
+                    className="inline-flex items-center justify-center px-6 py-3 border border-slate-300 text-base font-medium rounded-xl text-slate-700 bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+                  >
+                    <X className="-ml-1 mr-2 h-5 w-5" />
+                    Cancel
+                  </button>
+
                 )}
-              </button>
+              </div>
+              
+              {aiProvider === 'qwen' && qwenRateLimit && qwenRateLimit.remainingRequests && (
+                <div className="flex items-center justify-center gap-4 text-xs text-slate-500">
+                  <div className="flex items-center gap-1.5" title="Qwen Requests Quota">
+                    <div className={`w-2 h-2 rounded-full ${parseInt(qwenRateLimit.remainingRequests) > 10 ? 'bg-emerald-500' : 'bg-amber-500'}`}></div>
+                    <span>Reqs: {qwenRateLimit.remainingRequests}</span>
+                  </div>
+                  {qwenRateLimit.remainingTokens && (
+                    <div className="flex items-center gap-1.5" title="Qwen Tokens Quota">
+                      <div className={`w-2 h-2 rounded-full ${parseInt(qwenRateLimit.remainingTokens) > 50000 ? 'bg-emerald-500' : 'bg-amber-500'}`}></div>
+                      <span>Tokens: {qwenRateLimit.remainingTokens}</span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -633,141 +1137,319 @@ export default function App() {
               </div>
             </div>
 
-            <div className="mt-4 p-4 bg-indigo-50/50 rounded-xl border border-indigo-100">
-              <div className="flex items-center mb-3">
-                <Settings2 className="w-4 h-4 text-indigo-600 mr-2" />
-                <label htmlFor="templateMode" className="block text-sm font-medium text-slate-700">
-                  Task Template
-                </label>
+            {(templateMode === 'integration' || ((templateMode === 'custom' || templateMode.startsWith('user_')) && useReferenceRepo)) && (
+              <div className="mt-4 p-4 bg-slate-50 border border-slate-200 rounded-xl">
+                <h3 className="text-sm font-semibold text-slate-800 mb-3 flex items-center">
+                  <Database className="w-4 h-4 mr-2 text-indigo-500" />
+                  Reference Repository (Source of Truth)
+                </h3>
+                <div className="flex border-b border-slate-200 mb-4">
+                  <button
+                    type="button"
+                    className={`py-1.5 px-3 text-xs font-medium border-b-2 transition-colors ${referenceInputMode === 'github' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}
+                    onClick={() => setReferenceInputMode('github')}
+                  >
+                    <Github className="w-3 h-3 inline-block mr-1.5" />
+                    GitHub
+                  </button>
+                  <button
+                    type="button"
+                    className={`py-1.5 px-3 text-xs font-medium border-b-2 transition-colors ${referenceInputMode === 'local' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'}`}
+                    onClick={() => setReferenceInputMode('local')}
+                  >
+                    <Folder className="w-3 h-3 inline-block mr-1.5" />
+                    Local
+                  </button>
+                </div>
+                
+                <div className="flex flex-col sm:flex-row gap-4">
+                  {referenceInputMode === 'github' ? (
+                    <div className="relative flex-grow">
+                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <Github className="h-4 w-4 text-slate-400" />
+                      </div>
+                      <input
+                        type="url"
+                        placeholder="https://github.com/owner/reference-repo"
+                        className="block w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow"
+                        value={referenceUrl}
+                        onChange={(e) => setReferenceUrl(e.target.value)}
+                        disabled={loading}
+                      />
+                    </div>
+                  ) : (
+                    <div className="flex-grow">
+                      {window.hasOwnProperty('__TAURI_INTERNALS__') ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const { open } = await import('@tauri-apps/plugin-dialog');
+                                const selected = await open({ directory: true, multiple: false, title: 'Select Reference Repository Folder' }) as string | null;
+                                if (selected) setSelectedReferencePath(selected);
+                              } catch (e) { console.error(e); }
+                            }}
+                            className="inline-flex items-center px-3 py-2 border border-slate-300 rounded-lg text-sm font-medium text-slate-700 bg-white hover:bg-slate-50 transition-colors"
+                            disabled={loading}
+                          >
+                            <Folder className="w-4 h-4 mr-2" />
+                            {selectedReferencePath ? 'Change Folder' : 'Select Reference Folder'}
+                          </button>
+                          {selectedReferencePath && (
+                            <p className="mt-1 text-xs text-slate-600 truncate" title={selectedReferencePath}>
+                              Path: {selectedReferencePath}
+                            </p>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <input
+                            type="file"
+                            // @ts-ignore
+                            webkitdirectory=""
+                            directory=""
+                            multiple
+                            onChange={(e) => {
+                              e.preventDefault();
+                              setReferenceLocalFiles(e.target.files);
+                            }}
+                            className="block w-full text-sm text-slate-500 file:mr-4 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
+                            disabled={loading}
+                          />
+                          {referenceLocalFiles && referenceLocalFiles.length > 0 && (
+                            <p className="mt-1 text-xs text-slate-600">
+                              Selected {referenceLocalFiles.length} files
+                            </p>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                  <div className="w-full sm:w-40">
+                    <input
+                      type="number"
+                      placeholder="Max Files"
+                      className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                      value={referenceMaxFiles}
+                      onChange={(e) => setReferenceMaxFiles(Number(e.target.value))}
+                      min={1}
+                      max={referenceInputMode === 'local' ? 200 : (githubToken ? 200 : 10)}
+                      disabled={loading}
+                      title={referenceInputMode === 'local' ? 'Limit: 200 files' : (githubToken ? 'Limit: 200 files' : 'Limit: 10 files (Add token to increase)')}
+                    />
+                    <p className="mt-1 text-[10px] text-slate-500 leading-tight">
+                      {referenceInputMode === 'local' 
+                        ? 'Max: 200 (Local)' 
+                        : (githubToken ? 'Max: 200 (Token)' : 'Max: 10 (No Token)')}
+                    </p>
+                  </div>
+                </div>
               </div>
-              <select
-                id="templateMode"
-                value={templateMode}
-                onChange={(e) => handleTemplateChange(e.target.value)}
-                className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white mb-3"
-                disabled={loading}
-              >
-                <optgroup label="Built-in Templates">
-                  <option value="default">Default (gemini.md System Prompt)</option>
-                  <option value="security">Security Auditor (Vulnerability Scan)</option>
-                  <option value="docs">Documentation Writer (Wiki/README)</option>
-                </optgroup>
-                {savedTemplates.length > 0 && (
-                  <optgroup label="Your Saved Templates">
-                    {savedTemplates.map(t => (
-                      <option key={t.id} value={t.id}>{t.name}</option>
+            )}
+            <div className="mt-4 p-4 bg-indigo-50/50 rounded-xl border border-indigo-100">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center">
+                  <Settings2 className="w-4 h-4 text-indigo-600 mr-2" />
+                  <label htmlFor="templateMode" className="block text-sm font-medium text-slate-700">
+                    Task Template
+                  </label>
+                </div>
+                <div className="flex gap-3">
+                  <button type="button" onClick={handleExportTemplates} className="text-xs text-indigo-600 hover:text-indigo-800 font-medium">
+                    Export
+                  </button>
+                  <label className="text-xs text-indigo-600 hover:text-indigo-800 font-medium cursor-pointer">
+                    Import
+                    <input type="file" accept=".json" className="hidden" onChange={handleImportTemplates} />
+                  </label>
+                </div>
+              </div>
+              <div className="mb-4">
+                <select
+                  id="templateMode"
+                  value={templateMode}
+                  onChange={(e) => handleTemplateChange(e.target.value)}
+                  className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow"
+                  disabled={loading}
+                >
+                  <optgroup label="Built-in Templates">
+                    {getAllTemplates().map((template) => (
+                      <option key={template.metadata.id} value={template.metadata.id}>
+                        {template.metadata.name} - {template.metadata.description}
+                      </option>
                     ))}
                   </optgroup>
-                )}
-                <optgroup label="Custom">
-                  <option value="custom">Write new custom instruction...</option>
-                </optgroup>
-              </select>
+                  {savedTemplates.length > 0 && (
+                    <optgroup label="Saved Templates">
+                      {savedTemplates.map(t => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  <optgroup label="Custom">
+                    <option value="custom">Custom Prompt</option>
+                  </optgroup>
+                </select>
+              </div>
 
-              <div className="relative">
-                <textarea
-                  rows={6}
-                  placeholder="Enter your custom system instruction here. The repository context (Tree, README, Dependencies) will be automatically appended to your prompt."
-                  className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow resize-y"
-                  value={customInstruction}
-                  onChange={(e) => {
-                    setCustomInstruction(e.target.value);
-                    if (!templateMode.startsWith('user_') && templateMode !== 'custom') {
-                      setTemplateMode('custom');
-                    }
-                  }}
-                  disabled={loading}
-                />
-                <div className="flex justify-end gap-2 mt-3">
-                  {templateMode.startsWith('user_') && (
-                    <button
-                      type="button"
-                      onClick={handleDeleteTemplate}
-                      disabled={loading}
-                      className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-50"
-                    >
-                      <Trash2 className="w-4 h-4 mr-1.5" />
-                      Delete
-                    </button>
-                  )}
-                  {templateMode.startsWith('user_') && customInstruction.trim() !== '' && (
-                    <button
-                      type="button"
-                      onClick={handleSaveTemplate}
-                      disabled={loading}
-                      className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors disabled:opacity-50"
-                    >
-                      <Save className="w-4 h-4 mr-1.5" />
-                      Save Changes
-                    </button>
-                  )}
-                  {!templateMode.startsWith('user_') && customInstruction.trim() !== '' && (
-                    isSavingNew ? (
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="text"
-                          value={newTemplateName}
-                          onChange={(e) => setNewTemplateName(e.target.value)}
-                          placeholder="Template name..."
-                          className="px-3 py-1.5 text-sm border border-slate-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                          autoFocus
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              confirmSaveTemplate(e);
-                            } else if (e.key === 'Escape') {
-                              setIsSavingNew(false);
-                            }
-                          }}
-                        />
-                        <button
-                          type="button"
-                          onClick={confirmSaveTemplate}
-                          disabled={!newTemplateName.trim() || loading}
-                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors disabled:opacity-50"
-                        >
-                          Save
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setIsSavingNew(false)}
-                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
+              {getTemplate(templateMode) ? (
+                <div className="relative">
+                  <label className="block text-xs font-medium text-slate-500 mb-1">Template Content (Read-only)</label>
+                  <pre className="block w-full px-3 py-3 border border-slate-200 rounded-xl leading-5 bg-slate-50 text-slate-600 sm:text-sm whitespace-pre-wrap max-h-48 overflow-y-auto font-mono text-xs">
+                    {getSystemPrompt(templateMode, customInstruction)}
+                  </pre>
+                </div>
+              ) : (
+                <div className="relative">
+                  <textarea
+                    rows={6}
+                    placeholder="Enter your custom system instruction here. The repository context (Tree, README, Dependencies) will be automatically appended to your prompt."
+                    className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow resize-y"
+                    value={customInstruction}
+                    onChange={(e) => {
+                      setCustomInstruction(e.target.value);
+                      if (!templateMode.startsWith('user_') && templateMode !== 'custom') {
+                        setTemplateMode('custom');
+                      }
+                    }}
+                    disabled={loading}
+                  />
+                  <div className="flex justify-between items-center mt-3">
+                    <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer hover:text-indigo-600 transition-colors">
+                      <input
+                        type="checkbox"
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
+                        checked={useReferenceRepo}
+                        onChange={(e) => setUseReferenceRepo(e.target.checked)}
+                        disabled={loading}
+                      />
+                      <Database className="w-4 h-4" />
+                      <span>Add Reference Repository (for comparison, porting, etc.)</span>
+                    </label>
+                    <div className="flex justify-end gap-2">
+                      {templateMode.startsWith('user_') && (
                       <button
                         type="button"
-                        onClick={() => setIsSavingNew(true)}
+                        onClick={handleDeleteTemplate}
+                        disabled={loading}
+                        className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        <Trash2 className="w-4 h-4 mr-1.5" />
+                        Delete
+                      </button>
+                    )}
+                    {templateMode.startsWith('user_') && customInstruction.trim() !== '' && (
+                      <button
+                        type="button"
+                        onClick={handleSaveTemplate}
                         disabled={loading}
                         className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors disabled:opacity-50"
                       >
                         <Save className="w-4 h-4 mr-1.5" />
-                        Save as Template
+                        Save Changes
                       </button>
-                    )
-                  )}
+                    )}
+                    {!templateMode.startsWith('user_') && customInstruction.trim() !== '' && (
+                      isSavingNew ? (
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={newTemplateName}
+                            onChange={(e) => setNewTemplateName(e.target.value)}
+                            placeholder="Template name..."
+                            className="px-3 py-1.5 text-sm border border-slate-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                            autoFocus
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                confirmSaveTemplate(e);
+                              } else if (e.key === 'Escape') {
+                                setIsSavingNew(false);
+                              }
+                            }}
+                          />
+                          <button
+                            type="button"
+                            onClick={confirmSaveTemplate}
+                            disabled={!newTemplateName.trim() || loading}
+                            className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors disabled:opacity-50"
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsSavingNew(false)}
+                            className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setIsSavingNew(true)}
+                          disabled={loading}
+                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors disabled:opacity-50"
+                        >
+                          <Save className="w-4 h-4 mr-1.5" />
+                          Save as Template
+                        </button>
+                      )
+                    )}
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
 
             <div className="mt-2">
               <label htmlFor="additionalContext" className="block text-sm font-medium text-slate-700 mb-2">
-                Additional Context (Optional)
+                Task Instructions & External Context
               </label>
               <textarea
                 id="additionalContext"
                 rows={3}
-                placeholder="e.g., I'm planning to add GPU acceleration support for Nvidia RTX 4xxx series..."
-                className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow resize-y"
+                placeholder={templateMode === 'integration' ? "What do you want to integrate? (Leave empty to let AI discover the best architectural patterns to borrow from the Reference Repo)" : "e.g., I'm planning to add GPU acceleration support for Nvidia RTX 4xxx series..."}
+                className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow resize-y mb-2"
                 value={additionalContext}
                 onChange={(e) => setAdditionalContext(e.target.value)}
                 disabled={loading}
               />
-              <p className="mt-2 text-xs text-slate-500">
-                Provide any specific goals, future directions, or constraints you want the AI to know about.
-              </p>
+              
+              {attachedDocs.length > 0 && (
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {attachedDocs.map((doc, i) => (
+                    <div key={i} className="flex items-center gap-1 bg-indigo-50 text-indigo-700 px-2 py-1 rounded-md text-sm border border-indigo-100">
+                      <Paperclip className="w-3 h-3" />
+                      <span className="truncate max-w-[150px]">{doc.name}</span>
+                      <button type="button" onClick={() => removeAttachedDoc(i)} className="hover:text-indigo-900 ml-1">
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-slate-500">
+                  {templateMode === 'integration' ? 'Describe what exactly you want to integrate or migrate from the Reference Repo.' : 'Provide any specific goals, future directions, or constraints you want the AI to know about.'}
+                </p>
+                <label className="cursor-pointer inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-200">
+                  <Paperclip className="w-3 h-3" />
+                  Attach Documents (.md, .txt)
+                  <input 
+                    type="file" 
+                    multiple 
+                    accept=".md,.txt,.json,.csv,.log" 
+                    className="hidden" 
+                    onChange={handleAttachDocs}
+                    disabled={loading}
+                  />
+                </label>
+              </div>
             </div>
 
             <div className="mt-2 flex items-center">
@@ -782,6 +1464,237 @@ export default function App() {
               <label htmlFor="analyzeIssues" className="ml-2 block text-sm text-slate-700 cursor-pointer">
                 Analyze repository for obvious errors, bugs, and outdated dependencies
               </label>
+            </div>
+
+            {/* AI Provider Settings */}
+            <div className="mt-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
+              <label className="block text-sm font-medium text-slate-700 mb-2">
+                AI Provider
+              </label>
+              <select
+                value={aiProvider}
+                onChange={(e) => setAiProvider(e.target.value as AIProvider)}
+                className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm mb-2"
+                disabled={loading}
+              >
+                <option value="gemini">✨ Gemini (default)</option>
+                <option value="qwen">🔥 Qwen (via OAuth)</option>
+                <option value="ollama">🏠 Ollama (local, private)</option>
+                <option value="custom">🌐 Custom (OpenAI Compatible)</option>
+              </select>
+              
+              {aiProvider === 'custom' && (
+                <div className="mt-4 p-4 bg-white border border-slate-200 rounded-lg shadow-sm space-y-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-sm font-medium text-slate-700">
+                      Custom Provider Settings
+                    </label>
+                    <select
+                      className="text-xs border border-slate-300 rounded px-2 py-1 bg-slate-50"
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          setCustomBaseUrl(e.target.value);
+                          setCustomProviderConnected(null);
+                        }
+                      }}
+                      defaultValue=""
+                    >
+                      <option value="" disabled>Load Preset...</option>
+                      <option value="https://openrouter.ai/api/v1">OpenRouter</option>
+                      <option value="https://api.groq.com/openai/v1">Groq</option>
+                      <option value="https://api.x.ai/v1">xAI (Grok)</option>
+                      <option value="https://models.inference.ai.azure.com">GitHub Models</option>
+                      <option value="https://api.mistral.ai/v1">Mistral</option>
+                      <option value="https://api.cerebras.ai/v1">Cerebras</option>
+                      <option value="https://api.moonshot.cn/v1">Kimi (Moonshot)</option>
+                    </select>
+                  </div>
+                  
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">Base URL (OpenAI Compatible)</label>
+                    <input
+                      type="text"
+                      value={customBaseUrl}
+                      onChange={(e) => { setCustomBaseUrl(e.target.value); setCustomProviderConnected(null); }}
+                      placeholder="e.g., https://api.groq.com/openai/v1"
+                      className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                      disabled={loading}
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">API Key</label>
+                    <input
+                      type="password"
+                      value={customApiKey}
+                      onChange={(e) => { setCustomApiKey(e.target.value); setCustomProviderConnected(null); }}
+                      placeholder="sk-..."
+                      className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                      disabled={loading}
+                    />
+                  </div>
+                  
+                  <div className="flex items-end gap-3">
+                    <div className="flex-1">
+                      <label className="block text-xs font-medium text-slate-500 mb-1">Model Name</label>
+                      <input
+                        type="text"
+                        list="custom-models-list"
+                        value={customModel}
+                        onChange={(e) => setCustomModel(e.target.value)}
+                        placeholder="e.g., llama3-8b-8192"
+                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
+                        disabled={loading}
+                      />
+                      {availableCustomModels.length > 0 && (
+                        <datalist id="custom-models-list">
+                          {availableCustomModels.map(m => (
+                            <option key={m} value={m} />
+                          ))}
+                        </datalist>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleTestCustomProvider}
+                      disabled={testingCustomProvider || loading}
+                      className="text-xs px-3 py-2 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50 h-[38px]"
+                    >
+                      {testingCustomProvider ? 'Fetching...' : 'Fetch Models'}
+                    </button>
+                  </div>
+                  
+                  {customProviderConnected === true && (
+                    <p className="text-xs text-emerald-600 flex items-center mt-2">
+                      <Check className="w-3 h-3 mr-1" /> Successfully connected to provider
+                    </p>
+                  )}
+                  {customProviderConnected === false && (
+                    <div className="p-3 bg-red-50 border border-red-100 rounded-lg text-xs text-red-600 flex items-start mt-2">
+                      <AlertTriangle className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />
+                      <div>
+                        <strong>Connection failed:</strong> {customProviderError || "Check URL and API Key."}
+                      </div>
+                    </div>
+                  )}
+                  
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 flex items-start mt-2">
+                    <AlertTriangle className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />
+                    <p>
+                      <strong>Warning:</strong> Free API providers often have strict context limits (e.g., 8k or 32k tokens). 
+                      It is highly recommended to keep <strong>RAG enabled</strong> with a small Top-K to avoid "Context length exceeded" errors.
+                    </p>
+                  </div>
+                </div>
+              )}
+              
+              {aiProvider === 'qwen' && (
+                <div className="mt-3">
+                  <label className="block text-xs font-medium text-slate-500 mb-2">
+                    Qwen Account Authentication
+                  </label>
+                  
+                  {qwenOAuthToken ? (
+                    <div>
+                      <div className="flex items-center justify-between p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
+                        <div className="flex items-center text-emerald-700 text-sm font-medium">
+                          <Check className="w-4 h-4 mr-2" />
+                          Authenticated with Qwen
+                        </div>
+                        <button
+                          onClick={() => {
+                            setQwenOAuthToken('');
+                            setQwenAuthStatus('idle');
+                            setQwenAuthMessage('');
+                            setQwenRateLimit(null);
+                          }}
+                          className="text-xs text-slate-500 hover:text-slate-700 underline"
+                        >
+                          Sign Out
+                        </button>
+                      </div>
+                      {qwenRateLimit && (
+                        <div className="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs">
+                          {qwenRateLimit.remainingRequests ? (
+                            <>
+                              <div className="flex justify-between items-center mb-1">
+                                <span className="font-medium text-slate-700">Qwen Quota (Reqs)</span>
+                                <span className="text-slate-500">{qwenRateLimit.remainingRequests} remaining</span>
+                              </div>
+                              <div className="w-full bg-slate-200 rounded-full h-1.5 mb-2">
+                                <div 
+                                  className={`h-1.5 rounded-full ${parseInt(qwenRateLimit.remainingRequests) > 10 ? 'bg-emerald-500' : parseInt(qwenRateLimit.remainingRequests) > 2 ? 'bg-amber-500' : 'bg-red-500'}`} 
+                                  style={{ width: `${Math.min(100, Math.max(0, (parseInt(qwenRateLimit.remainingRequests) / 30) * 100))}%` }}
+                                ></div>
+                              </div>
+                            </>
+                          ) : (
+                            <div className="text-slate-500 italic mb-2">Rate limit headers not provided by Qwen API</div>
+                          )}
+                          
+                          {qwenRateLimit.remainingTokens && (
+                            <>
+                              <div className="flex justify-between items-center mb-1">
+                                <span className="font-medium text-slate-700">Qwen Quota (Tokens)</span>
+                                <span className="text-slate-500">{qwenRateLimit.remainingTokens} remaining</span>
+                              </div>
+                              <div className="w-full bg-slate-200 rounded-full h-1.5 mb-1">
+                                <div 
+                                  className={`h-1.5 rounded-full ${parseInt(qwenRateLimit.remainingTokens) > 50000 ? 'bg-emerald-500' : parseInt(qwenRateLimit.remainingTokens) > 10000 ? 'bg-amber-500' : 'bg-red-500'}`} 
+                                  style={{ width: `${Math.min(100, Math.max(0, (parseInt(qwenRateLimit.remainingTokens) / 100000) * 100))}%` }}
+                                ></div>
+                              </div>
+                            </>
+                          )}
+                          
+                          {qwenRateLimit.resetRequests && (
+                            <p className="text-slate-500 text-[10px] text-right mt-1">
+                              Resets in: {Math.ceil(parseInt(qwenRateLimit.resetRequests) / 1000)}s
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <button
+                        onClick={handleQwenLogin}
+                        disabled={qwenAuthStatus === 'polling'}
+                        className="w-full flex items-center justify-center px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                      >
+                        {qwenAuthStatus === 'polling' ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            Waiting for Authorization...
+                          </>
+                        ) : (
+                          'Login via Qwen'
+                        )}
+                      </button>
+                      
+                      {qwenAuthStatus === 'polling' && qwenAuthUrl && (
+                        <div className="p-3 bg-indigo-50 border border-indigo-100 rounded-lg text-sm text-indigo-800">
+                          <p className="mb-2">A new tab should have opened. If not, click the link below to authorize:</p>
+                          <a href={qwenAuthUrl} target="_blank" rel="noreferrer" className="font-mono text-xs break-all underline">
+                            {qwenAuthUrl}
+                          </a>
+                        </div>
+                      )}
+                      
+                      {qwenAuthStatus === 'error' && (
+                        <div className="p-3 bg-red-50 border border-red-100 rounded-lg text-sm text-red-600 flex items-start">
+                          <AlertTriangle className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />
+                          <span>{qwenAuthMessage}</span>
+                        </div>
+                      )}
+                      
+                      <p className="text-xs text-slate-500">
+                        This uses the official Qwen OAuth Device Flow. Your token is securely proxied through the backend and never exposed to third parties.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Ollama Settings */}
@@ -894,16 +1807,30 @@ export default function App() {
                   </div>
 
                   {useRag && (
-                    <div className="flex flex-col sm:flex-row gap-4 p-3 bg-indigo-50/50 rounded-lg border border-indigo-100">
-                      <div className="flex-1">
-                        <label className="block text-xs font-medium text-indigo-700 mb-1">Embedding Model (RAG)</label>
-                        {availableModels.length > 0 ? (
-                          <select
-                            value={ragModel}
+                    <div className="flex flex-col gap-4 p-3 bg-indigo-50/50 rounded-lg border border-indigo-100">
+                      <div className="w-full">
+                        <label className="block text-xs font-medium text-indigo-700 mb-1">Target Components (RAG Search Query)</label>
+                        <input
+                          type="text"
+                          value={ragQuery}
+                          onChange={(e) => setRagQuery(e.target.value)}
+                          placeholder="e.g., authentication flow, database models, payment gateway..."
+                          className="block w-full px-3 py-2 border border-indigo-200 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
+                          disabled={loading}
+                        />
+                        <p className="mt-1 text-[10px] text-indigo-500">Leave empty to auto-generate based on the selected template.</p>
+                      </div>
+                      <div className="flex flex-col sm:flex-row gap-4">
+                        <div className="flex-1">
+                          <label className="block text-xs font-medium text-indigo-700 mb-1">Embedding Model (RAG)</label>
+                          {availableModels.length > 0 ? (
+                            <select
+                              value={ragModel}
                             onChange={(e) => setRagModel(e.target.value)}
                             className="block w-full px-3 py-2 border border-indigo-200 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
                             disabled={loading}
                           >
+                            <option value="" disabled>Select an embedding model...</option>
                             {availableModels.map(m => (
                               <option key={m} value={m}>{m}</option>
                             ))}
@@ -932,6 +1859,44 @@ export default function App() {
                           max={50}
                         />
                       </div>
+                    </div>
+                  </div>
+                )}
+
+                  {useRag && (
+                    <div className="pt-2 border-t border-slate-100">
+                      <button
+                        type="button"
+                        onClick={() => setShowAdvancedRag(!showAdvancedRag)}
+                        className="flex items-center text-xs font-medium text-slate-500 hover:text-slate-700 transition-colors"
+                      >
+                        <Settings2 className="w-3 h-3 mr-1" />
+                        Advanced RAG Settings
+                        <ChevronDown className={`w-3 h-3 ml-1 transition-transform ${showAdvancedRag ? 'rotate-180' : ''}`} />
+                      </button>
+                      
+                      {showAdvancedRag && (
+                        <div className="mt-3 space-y-2 pl-1">
+                          <label className="flex items-center space-x-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={useQueryExpansion}
+                              onChange={(e) => setUseQueryExpansion(e.target.checked)}
+                              className="w-3.5 h-3.5 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span className="text-xs text-slate-600">AI Query Expansion (Expands query with synonyms)</span>
+                          </label>
+                          <label className="flex items-center space-x-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={useIntentReranking}
+                              onChange={(e) => setUseIntentReranking(e.target.checked)}
+                              className="w-3.5 h-3.5 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                            />
+                            <span className="text-xs text-slate-600">Intent-Aware Reranking (Boosts files based on context)</span>
+                          </label>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -1009,7 +1974,7 @@ export default function App() {
                   {ollamaConnected === false && (
                     <div className="text-xs text-slate-500 bg-slate-100 p-3 rounded-lg">
                       <p className="font-medium text-slate-700 mb-1">How to enable CORS for Ollama:</p>
-                      <p>Ollama blocks cross-origin requests by default. If the "Start Ollama" button doesn't resolve this, ensure Ollama is not already running in the background and try again.</p>
+                      <p>Ollama blocks cross-origin requests by default. If the "Start Ollama" button does not resolve this, ensure Ollama is not already running in the background and try again.</p>
                     </div>
                   )}
                 </div>
@@ -1046,13 +2011,23 @@ export default function App() {
         {prompt && (
           <div className="bg-white shadow-sm ring-1 ring-slate-200 rounded-2xl overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50/50">
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-2 flex-wrap gap-y-2">
                 <FileText className="w-5 h-5 text-slate-500" />
-                <h3 className="text-sm font-medium text-slate-900">gemini.md</h3>
+                <h3 className="text-sm font-medium text-slate-900">{generatedFileName}</h3>
                 {usedModel && (
                   <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 text-indigo-800">
                     Model: {usedModel}
                   </span>
+                )}
+                {lastOptimizedQuery && (
+                  <div className="ml-2 flex items-center space-x-1">
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-100 text-emerald-800" title="Detected Intent">
+                      {lastOptimizedQuery.intent}
+                    </span>
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600 truncate max-w-[200px]" title={`Optimized Query: ${lastOptimizedQuery.query}`}>
+                      RAG: {lastOptimizedQuery.query}
+                    </span>
+                  </div>
                 )}
               </div>
               <div className="flex items-center space-x-2">
