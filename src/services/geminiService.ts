@@ -78,6 +78,7 @@ Your task is to:
 
 STRICT KEYWORD RULES:
 - MUST: Use concrete technical nouns, API names, function signatures, or file paths.
+- MUST: If the user query is in another language, translate the search keywords to English to match the codebase.
 - MUST: Separate the 3 queries using the pipe character (|).
 - MUST NOT: Use abstract themes (e.g., "cleaner code", "better performance").
 

@@ -1,4 +1,10 @@
+import { RepoData } from './githubService';
+
 export async function checkOllamaConnection(url: string): Promise<boolean> {
+  if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke('ollama_check_connection', { url });
+  }
   try {
     const res = await fetch(`${url}/api/tags`);
     return res.ok;
@@ -8,6 +14,10 @@ export async function checkOllamaConnection(url: string): Promise<boolean> {
 }
 
 export async function fetchOllamaModels(url: string): Promise<string[]> {
+  if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke('ollama_fetch_models', { url });
+  }
   try {
     const res = await fetch(`${url}/api/tags`);
     if (!res.ok) return [];
@@ -19,16 +29,33 @@ export async function fetchOllamaModels(url: string): Promise<string[]> {
 }
 
 export async function summarize_with_ollama(
-  text: string, 
-  url: string, 
-  model: string, 
-  numCtx: number = 8192, 
-  numPredict: number = 250, 
+  text: string,
+  url: string,
+  model: string,
+  numCtx: number = 8192,
+  numPredict: number = 250,
   temperature: number = 0.3
 ): Promise<string> {
   if (!text || text.trim() === '') return '';
   const prompt = `Please summarize the following file content in a few sentences, extracting only the most important information relevant for understanding the architecture, purpose, and key logic of the code. Ignore boilerplate.\n\nContent:\n${text.substring(0, 8000)}`;
-  
+
+  if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    try {
+      return await invoke('ollama_generate', {
+        url,
+        model,
+        prompt,
+        numCtx,
+        numPredict,
+        temperature
+      });
+    } catch (e) {
+      console.error("Ollama summarization error:", e);
+      return `[Ollama Summarization Failed] ${text.substring(0, 500)}...`;
+    }
+  }
+
   try {
     const res = await fetch(`${url}/api/generate`, {
       method: 'POST',
@@ -44,7 +71,7 @@ export async function summarize_with_ollama(
         }
       })
     });
-    
+
     if (!res.ok) throw new Error('Ollama request failed');
     const data = await res.json();
     return data.response;
@@ -65,21 +92,45 @@ export async function rewriteQueryWithOllama(
 The user's original query is: "${query}"
 
 Your task is to:
-1. Extract MULTIPLE concrete technical search queries that would find relevant code.
-2. Generate exactly 3 distinct queries covering different aspects of the request (e.g., one for architecture, one for dependencies, one for specific APIs).
-3. Classify the intent (BUG_HUNT, ARCHITECTURE, UI_UX, DATA, GENERAL).
+1. Expand this query into 10-15 specific retrieval keywords.
+2. Classify the intent (BUG_HUNT, ARCHITECTURE, UI_UX, DATA, GENERAL).
 
 STRICT KEYWORD RULES:
 - MUST: Use concrete technical nouns, API names, function signatures, or file paths.
-- MUST: If the user query is in another language, translate the search keywords to English to match the codebase.
-- MUST: Separate the 3 queries using the pipe character (|).
+- MUST: Each keyword = ONE technical concept only.
 - MUST NOT: Use abstract themes (e.g., "cleaner code", "better performance").
+- MUST NOT: Use narrative/summary style keywords.
 
 Return ONLY a valid JSON object with the following structure, nothing else. Do not use markdown formatting blocks like \`\`\`json.
 {
-  "optimizedQuery": "query 1 keywords | query 2 keywords | query 3 keywords",
+  "optimizedQuery": "keyword1, keyword2, keyword3...",
   "intent": "CATEGORY_NAME"
 }`;
+
+  if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    try {
+      const response = await invoke<string>('ollama_generate', {
+        url,
+        model,
+        prompt,
+        format: 'json',
+        numCtx: 4096,
+        numPredict: 200,
+        temperature: 0.3
+      });
+      
+      const text = response?.trim() || '{}';
+      const parsed = JSON.parse(text);
+      return {
+        optimizedQuery: parsed.optimizedQuery || query,
+        intent: parsed.intent || 'GENERAL'
+      };
+    } catch (e) {
+      console.error("Ollama query rewrite error:", e);
+      return { optimizedQuery: query, intent: 'GENERAL' };
+    }
+  }
 
   try {
     const res = await fetch(`${url}/api/generate`, {
@@ -119,6 +170,18 @@ export async function generate_final_prompt_with_ollama(
   numPredict: number = 2048,
   temperature: number = 0.5
 ): Promise<string> {
+  if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke('ollama_generate', {
+      url,
+      model,
+      prompt,
+      numCtx,
+      numPredict,
+      temperature
+    });
+  }
+
   try {
     const res = await fetch(`${url}/api/generate`, {
       method: 'POST',
@@ -134,7 +197,7 @@ export async function generate_final_prompt_with_ollama(
         }
       })
     });
-    
+
     if (!res.ok) throw new Error('Ollama request failed');
     const data = await res.json();
     return data.response;
@@ -142,4 +205,28 @@ export async function generate_final_prompt_with_ollama(
     console.error("Ollama generation error:", e);
     throw new Error(`Ollama generation failed: ${e.message || 'Unknown error'}`);
   }
+}
+
+export async function isOllamaRunningNative(): Promise<boolean> {
+  if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke('is_ollama_running');
+  }
+  return false;
+}
+
+export async function startOllamaNative(): Promise<string> {
+  if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke('start_ollama');
+  }
+  return "Not in Tauri mode";
+}
+
+export async function stopOllamaNative(): Promise<string> {
+  if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke('stop_ollama');
+  }
+  return "Not in Tauri mode";
 }

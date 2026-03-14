@@ -1,32 +1,40 @@
 import { RepoData } from "./githubService";
 import { buildPromptText } from "./geminiService";
 
-let lastQwenRequestTime = 0;
-const QWEN_MIN_DELAY_MS = 2500; // 2.5 seconds minimum delay between requests
-
-async function enforceQwenRateLimit() {
-  const now = Date.now();
-  const timeSinceLastRequest = now - lastQwenRequestTime;
-  if (timeSinceLastRequest < QWEN_MIN_DELAY_MS) {
-    const delay = QWEN_MIN_DELAY_MS - timeSinceLastRequest;
-    console.log(`Enforcing Qwen rate limit: pausing for ${delay}ms`);
-    await new Promise(resolve => setTimeout(resolve, delay));
-  }
-}
-
-function updateQwenRequestTime() {
-  lastQwenRequestTime = Date.now();
-}
-
 export async function rewriteQueryWithQwen(query: string, token: string, resourceUrl?: string): Promise<{optimizedQuery: string, intent: string, rateLimit?: { remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string }}> {
   if (!query?.trim()) return { optimizedQuery: query, intent: 'GENERAL' };
 
-  const prompt = `Optimize the search query for RAG over a code repository. Extract 3 distinct technical queries separated by |. If the query is not in English, translate keywords to English. Return ONLY JSON:
-{"optimizedQuery":"query 1 | query 2 | query 3", "intent":"CATEGORY"}
+  const prompt = `Optimize the search query for RAG over a code repository. Return ONLY JSON:
+{"optimizedQuery":"key1,key2...", "intent":"CATEGORY"}
 Query: "${query}"`;
 
   try {
-    await enforceQwenRateLimit();
+    if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const data: any = await invoke('qwen_ai_proxy', {
+        token,
+        prompt,
+        model: "coder-model",
+        isJson: true,
+        resourceUrl
+      });
+
+      if (data.status !== 200) {
+        const err: any = new Error(data.output?.error || "Qwen request failed");
+        err.rateLimit = data.rateLimit;
+        err.status = data.status;
+        throw err;
+      }
+
+      const text = data.output?.output?.text || '{}';
+      const parsed = JSON.parse(text);
+      return {
+        optimizedQuery: parsed.optimizedQuery || query,
+        intent: parsed.intent || 'GENERAL',
+        rateLimit: data.rateLimit
+      };
+    }
+
     const response = await fetch("/api/qwen", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -38,7 +46,6 @@ Query: "${query}"`;
         isJson: true
       })
     });
-    updateQwenRequestTime();
 
     const data = await response.json();
     if (!response.ok) {
@@ -70,13 +77,37 @@ export async function generateSystemPromptWithQwen(
   usedOllama?: boolean,
   referenceRepoData?: RepoData,
   attachedDocs?: {name: string, content: string}[],
-  resourceUrl?: string,
-  fileTruncationLimit?: number
+  resourceUrl?: string
 ): Promise<{ text: string, modelVersion: string, rateLimit?: { remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string } }> {
 
-  const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs, fileTruncationLimit);
+  const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs);
 
-  await enforceQwenRateLimit();
+  if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const data: any = await invoke('qwen_ai_proxy', {
+      token,
+      prompt,
+      model: "coder-model",
+      isJson: false,
+      resourceUrl
+    });
+
+    if (data.status !== 200) {
+      const err: any = new Error(data.output?.error || "Qwen request failed");
+      err.rateLimit = data.rateLimit;
+      err.status = data.status;
+      throw err;
+    }
+
+    let finalPrompt = data.output?.output?.text || "Failed to generate prompt.";
+
+    return { 
+      text: finalPrompt, 
+      modelVersion: data.output?.model || "coder-model",
+      rateLimit: data.rateLimit
+    };
+  }
+
   const response = await fetch("/api/qwen", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -88,7 +119,6 @@ export async function generateSystemPromptWithQwen(
       isJson: false
     })
   });
-  updateQwenRequestTime();
 
   const data = await response.json();
   if (!response.ok) {

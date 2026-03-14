@@ -1,14 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { Github, FileText, Loader2, Copy, Check, Download, Settings2, AlertTriangle, Save, Trash2, Folder, ChevronDown, Database, Paperclip, X } from 'lucide-react';
 import { fetchRepoData } from './services/githubService';
-import { processLocalFolder } from './services/localFileService';
+import { selectLocalFolderWithTauri, processLocalFolder } from './services/localFileService';
 import { generateSystemPrompt, buildPromptText, rewriteQueryWithGemini } from './services/geminiService';
-import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama, rewriteQueryWithOllama } from './services/ollamaService';
+import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama, startOllamaNative, stopOllamaNative, isOllamaRunningNative, rewriteQueryWithOllama } from './services/ollamaService';
 import { fetchOpenAICompatibleModels } from './services/openaiCompatibleService';
 import { generatePrompt, rewriteQuery, AIProvider } from './services/aiAdapter';
 import { performRAG } from './services/ragService';
 import { startDeviceAuth, pollDeviceToken } from './services/qwenAuthService';
 import { getTemplate, getAllTemplates } from './templates';
+import { ask } from '@tauri-apps/plugin-dialog';
 
 interface SavedTemplate {
   id: string;
@@ -18,7 +19,7 @@ interface SavedTemplate {
 
 export default function App() {
   const [url, setUrl] = useState('');
-  
+
   // Load settings from localStorage
   const initialSettings = (() => {
     try {
@@ -30,19 +31,21 @@ export default function App() {
   })();
 
   const [githubToken, setGithubToken] = useState(initialSettings.githubToken || '');
+  const [geminiApiKey, setGeminiApiKey] = useState(initialSettings.geminiApiKey || '');
   const [maxFiles, setMaxFiles] = useState(initialSettings.maxFiles || 5);
   const [inputMode, setInputMode] = useState<'github' | 'local'>(initialSettings.inputMode || 'github');
   const [localFiles, setLocalFiles] = useState<FileList | null>(null);
+  const [selectedLocalPath, setSelectedLocalPath] = useState(initialSettings.selectedLocalPath || '');
   
   // Reference Repository State
   const [referenceInputMode, setReferenceInputMode] = useState<'github' | 'local'>('github');
   const [referenceUrl, setReferenceUrl] = useState('');
   const [referenceLocalFiles, setReferenceLocalFiles] = useState<FileList | null>(null);
+  const [selectedReferencePath, setSelectedReferencePath] = useState('');
   const [referenceMaxFiles, setReferenceMaxFiles] = useState(initialSettings.maxFiles || 5);
   const [cachedReferenceRepoData, setCachedReferenceRepoData] = useState<any>(null);
   const [referenceCacheKey, setReferenceCacheKey] = useState<string>('');
   const [useReferenceRepo, setUseReferenceRepo] = useState(false);
-
   const [templateMode, setTemplateMode] = useState<string>('default');
   const [savedTemplates, setSavedTemplates] = useState<SavedTemplate[]>(() => {
     try {
@@ -74,7 +77,6 @@ export default function App() {
   const [ollamaNumCtx, setOllamaNumCtx] = useState(initialSettings.ollamaNumCtx || 8192);
   const [ollamaSummaryPredict, setOllamaSummaryPredict] = useState(initialSettings.ollamaSummaryPredict || 500);
   const [ollamaFinalPredict, setOllamaFinalPredict] = useState(initialSettings.ollamaFinalPredict || 2000);
-  const [fileTruncationLimit, setFileTruncationLimit] = useState(initialSettings.fileTruncationLimit !== undefined ? initialSettings.fileTruncationLimit : 0);
   const [ollamaTemperature, setOllamaTemperature] = useState(initialSettings.ollamaTemperature !== undefined ? initialSettings.ollamaTemperature : 0.3);
   const [useQueryExpansion, setUseQueryExpansion] = useState(initialSettings.useQueryExpansion !== undefined ? initialSettings.useQueryExpansion : true);
   const [useIntentReranking, setUseIntentReranking] = useState(initialSettings.useIntentReranking !== undefined ? initialSettings.useIntentReranking : true);
@@ -89,7 +91,6 @@ export default function App() {
   const [customProviderError, setCustomProviderError] = useState<string | null>(null);
 
   const [showAdvancedRag, setShowAdvancedRag] = useState(false);
-  
   const [ollamaConnected, setOllamaConnected] = useState<boolean | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [testingOllama, setTestingOllama] = useState(false);
@@ -103,32 +104,28 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [status, setStatus] = useState('');
   const [isTruncated, setIsTruncated] = useState(false);
+  const [ollamaRunning, setOllamaRunning] = useState(false);
+  const [isOllamaLoading, setIsOllamaLoading] = useState(false);
+  const [ollamaStatus, setOllamaStatus] = useState<'running' | 'stopped' | 'checking'>('checking');
   const [newTemplateName, setNewTemplateName] = useState('');
   const [isSavingNew, setIsSavingNew] = useState(false);
+  const [envKeyInfo, setEnvKeyInfo] = useState<string>('');
+  const [proxyAddress, setProxyAddress] = useState(initialSettings.proxyAddress || '');
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  
-  const [tokenWarningResolver, setTokenWarningResolver] = useState<((proceed: boolean) => void) | null>(null);
-  const [tokenWarning, setTokenWarning] = useState<{
-    inputTokens: number;
-    availableTokens: number;
-    requestedTokens: number;
-    promptText: string;
-  } | null>(null);
-  
+
   // Cache state
   const [cachedRepoData, setCachedRepoData] = useState<any>(null);
   const [cacheKey, setCacheKey] = useState<string>('');
 
   useEffect(() => {
     const settings = {
-      inputMode,
       githubToken,
+      geminiApiKey,
+      proxyAddress,
       maxFiles,
       useOllama,
       useOllamaForFinal,
       aiProvider,
-      qwenOAuthToken,
-      qwenResourceUrl,
       useRag,
       ragModel,
       ragTopK,
@@ -137,8 +134,10 @@ export default function App() {
       ollamaNumCtx,
       ollamaSummaryPredict,
       ollamaFinalPredict,
-      fileTruncationLimit,
       ollamaTemperature,
+      qwenOAuthToken,
+      qwenResourceUrl,
+      selectedLocalPath,
       useQueryExpansion,
       useIntentReranking,
       customBaseUrl,
@@ -146,7 +145,41 @@ export default function App() {
       customModel
     };
     localStorage.setItem('gemini_app_settings', JSON.stringify(settings));
-  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, aiProvider, qwenOAuthToken, qwenResourceUrl, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, fileTruncationLimit, ollamaTemperature, useQueryExpansion, useIntentReranking, customBaseUrl, customApiKey, customModel]);
+  }, [inputMode, githubToken, geminiApiKey, proxyAddress, maxFiles, useOllama, useOllamaForFinal, aiProvider, qwenOAuthToken, qwenResourceUrl, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature, selectedLocalPath, useQueryExpansion, useIntentReranking, customBaseUrl, customApiKey, customModel]);
+
+  // Check if env var key exists on mount
+  useEffect(() => {
+    const checkEnvKey = async () => {
+      if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core');
+          const source: string = await invoke('get_gemini_key_source');
+          setEnvKeyInfo(source);
+        } catch (e) {
+          console.error('Failed to check env key', e);
+        }
+      }
+    };
+    checkEnvKey();
+  }, []);
+
+  useEffect(() => {
+    const checkOllamaStatus = async () => {
+      if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+        try {
+          const running = await isOllamaRunningNative();
+          setOllamaRunning(running);
+          setOllamaStatus(running ? 'running' : 'stopped');
+        } catch (e) {
+          console.error("Failed to check Ollama status", e);
+        }
+      } else {
+        setOllamaStatus('stopped');
+      }
+    };
+    checkOllamaStatus();
+  }, []);
+
 
   const handleTemplateChange = (mode: string) => {
     setTemplateMode(mode);
@@ -161,7 +194,7 @@ export default function App() {
   const handleSaveTemplate = (e: React.MouseEvent) => {
     e.preventDefault();
     if (templateMode.startsWith('user_')) {
-      const updated = savedTemplates.map(t => 
+      const updated = savedTemplates.map(t =>
         t.id === templateMode ? { ...t, content: customInstruction } : t
       );
       setSavedTemplates(updated);
@@ -183,10 +216,17 @@ export default function App() {
     setNewTemplateName('');
   };
 
-  const handleDeleteTemplate = (e: React.MouseEvent) => {
+  const handleDeleteTemplate = async (e: React.MouseEvent) => {
     e.preventDefault();
     if (!templateMode.startsWith('user_')) return;
-    if (!window.confirm('Are you sure you want to delete this template?')) return;
+
+    const yes = await ask('Are you sure you want to delete this template?', {
+      title: 'Delete Template',
+      kind: 'warning',
+    });
+
+    if (!yes) return;
+
     const updated = savedTemplates.filter(t => t.id !== templateMode);
     setSavedTemplates(updated);
     localStorage.setItem('gemini_custom_templates', JSON.stringify(updated));
@@ -252,6 +292,51 @@ export default function App() {
       setAvailableModels([]);
     }
     setTestingOllama(false);
+  };
+
+
+
+  const handleOllamaControl = async (action: 'start' | 'stop') => {
+    setIsOllamaLoading(true);
+    setError(null);
+    try {
+      if (action === 'start') {
+        setStatus('Starting Ollama...');
+        const msg = await startOllamaNative();
+        setStatus(msg);
+      } else {
+        setStatus('Stopping Ollama...');
+        const msg = await stopOllamaNative();
+        setStatus(msg);
+      }
+      // Re-verify after a small delay
+      setTimeout(async () => {
+        const running = await isOllamaRunningNative();
+        setOllamaRunning(running);
+        setOllamaStatus(running ? 'running' : 'stopped');
+        setStatus('');
+      }, 2000);
+    } catch (e: any) {
+      setError(`Ollama ${action} failed: ${e.message}`);
+    } finally {
+      setIsOllamaLoading(false);
+    }
+  };
+
+  const handleSelectLocalFolder = async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select Repository Folder"
+      });
+      if (selected && typeof selected === 'string') {
+        setSelectedLocalPath(selected);
+      }
+    } catch (e: any) {
+      setError(`Folder selection failed: ${e.message}`);
+    }
   };
 
   const handleTestCustomProvider = async () => {
@@ -355,6 +440,7 @@ pause`;
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+
   };
 
   const handleAttachDocs = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -436,12 +522,20 @@ pause`;
   const handleGenerate = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (inputMode === 'github' && !url) return;
-    if (inputMode === 'local' && (!localFiles || localFiles.length === 0)) return;
+    if (inputMode === 'local' && (!localFiles || localFiles.length === 0) && !selectedLocalPath) {
+      if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+        await handleSelectLocalFolder();
+      }
+      return;
+    }
     
     if (useRag && !ragModel) {
       setError('Please select an Embedding Model for RAG. It is required to process the repository files.');
       return;
     }
+
+
+
     
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -462,7 +556,7 @@ pause`;
 
       if (inputMode === 'github') {
         const currentCacheKey = `${url}-${githubToken}-${maxFiles}`;
-        
+
         if (cachedRepoData && cacheKey === currentCacheKey) {
           setStatus('Using cached repository data...');
           repoData = cachedRepoData;
@@ -474,20 +568,26 @@ pause`;
         }
       } else {
         setStatus('Processing local files...');
-        repoData = await processLocalFolder(localFiles!, maxFiles);
-        // Do not cache local files in state to save memory, they are fast to read anyway
+        if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+          repoData = await selectLocalFolderWithTauri(maxFiles, selectedLocalPath || undefined);
+          // Updating the path if it was selected through the generate button
+          if (repoData.info.description.startsWith('Local folder: ')) {
+            const newPath = repoData.info.description.replace('Local folder: ', '');
+            if (newPath !== selectedLocalPath) {
+              setSelectedLocalPath(newPath);
+            }
+          }
+        } else {
+          // @ts-ignore
+          repoData = await selectLocalFolderWithTauri(maxFiles);
+        }
+
+        // Free up memory
+        setLocalFiles(null);
         setCachedRepoData(null);
         setCacheKey('');
-        
-        // Free up memory by clearing the file selection if it's very large
-        if (localFiles && localFiles.length > 1000) {
-          setLocalFiles(null);
-          if (fileInputRef.current) {
-            fileInputRef.current.value = '';
-          }
-        }
       }
-      
+
       if (repoData.isTruncated) {
         setIsTruncated(true);
       }
@@ -517,9 +617,18 @@ pause`;
             setCachedReferenceRepoData(referenceRepoData);
             setReferenceCacheKey(currentRefCacheKey);
           }
-        } else if (referenceInputMode === 'local' && referenceLocalFiles && referenceLocalFiles.length > 0) {
-          setStatus('Processing local reference files...');
-          referenceRepoData = await processLocalFolder(referenceLocalFiles, referenceMaxFiles);
+        } else if (referenceInputMode === 'local') {
+          if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+            setStatus('Scanning local reference folder...');
+            referenceRepoData = await selectLocalFolderWithTauri(referenceMaxFiles, selectedReferencePath || undefined);
+            if (!selectedReferencePath && referenceRepoData?.info?.description) {
+              const pathMatch = referenceRepoData.info.description.match(/Local folder: (.+)/);
+              if (pathMatch) setSelectedReferencePath(pathMatch[1]);
+            }
+          } else if (referenceLocalFiles && referenceLocalFiles.length > 0) {
+            setStatus('Processing local reference files...');
+            referenceRepoData = await processLocalFolder(referenceLocalFiles, referenceMaxFiles);
+          }
           setCachedReferenceRepoData(null);
           setReferenceCacheKey('');
         }
@@ -532,81 +641,88 @@ pause`;
       let currentQwenRateLimit: any = null;
       let finalUsedRagQuery = '';
       let finalUsedOptimizedQuery = '';
-
-      if (useRag && repoData.sourceFiles && repoData.sourceFiles.length > 0) {
+      
+      const hasPrimaryFiles = repoData.sourceFiles && repoData.sourceFiles.length > 0;
+      const hasReferenceFiles = referenceRepoData && referenceRepoData.sourceFiles && referenceRepoData.sourceFiles.length > 0;
+      
+      if (useRag && (hasPrimaryFiles || hasReferenceFiles)) {
         try {
+          let optimizedQuery = ragQuery;
+          let queryIntent = 'GENERAL';
+          if (ragQuery.trim() !== '') {
+            if (useQueryExpansion || useIntentReranking) {
+              setStatus('Optimizing RAG query with LLM...');
+              try {
+                let result;
+                if (useOllamaForFinal) {
+                  result = await rewriteQueryWithOllama(ragQuery, ollamaUrl, ollamaModel);
+                } else {
+                  result = await rewriteQuery(aiProvider, ragQuery, { 
+                    qwenToken: qwenOAuthToken, 
+                    qwenResourceUrl: qwenResourceUrl || undefined,
+                    customBaseUrl,
+                    customApiKey,
+                    customModel
+                  });
+                  if (aiProvider === 'qwen' && result.rateLimit) {
+                    setQwenRateLimit(result.rateLimit);
+                    currentQwenRateLimit = result.rateLimit;
+                  }
+                }
+                
+                if (useQueryExpansion) {
+                  optimizedQuery = result.optimizedQuery;
+                  setStatus(`RAG query optimized: ${optimizedQuery}`);
+                }
+                if (useIntentReranking) {
+                  queryIntent = result.intent;
+                }
+                
+                setLastOptimizedQuery({ query: optimizedQuery, intent: queryIntent });
+                console.log("Original RAG query:", ragQuery);
+                console.log("Optimized RAG query:", optimizedQuery);
+                console.log("Detected Intent:", queryIntent);
+              } catch (e) {
+                console.warn("Query optimization failed, using original query", e);
+                setLastOptimizedQuery(null);
+              }
+            } else {
+              setLastOptimizedQuery({ query: optimizedQuery, intent: 'GENERAL' });
+            }
+          } else {
+             setLastOptimizedQuery(null);
+          }
+
           const getFallbackQuery = () => {
             const template = getTemplate(templateMode);
             if (template) return template.defaultSearchQuery;
             return customInstruction.substring(0, 500);
           };
           
-          let baseQuery = ragQuery.trim() !== '' ? ragQuery : getFallbackQuery();
-          let optimizedQuery = baseQuery;
-          let queryIntent = 'GENERAL';
-          
-          if (useQueryExpansion || useIntentReranking) {
-            setStatus('Optimizing RAG query with LLM...');
-            try {
-              let result;
-              if (useOllamaForFinal) {
-                result = await rewriteQueryWithOllama(baseQuery, ollamaUrl, ollamaModel);
-              } else {
-                result = await rewriteQuery(aiProvider, baseQuery, { 
-                  qwenToken: qwenOAuthToken, 
-                  qwenResourceUrl: qwenResourceUrl || undefined,
-                  customBaseUrl,
-                  customApiKey,
-                  customModel
-                });
-                if (aiProvider === 'qwen' && result.rateLimit) {
-                  setQwenRateLimit(result.rateLimit);
-                  currentQwenRateLimit = result.rateLimit;
-                }
-              }
-              
-              if (useQueryExpansion) {
-                optimizedQuery = result.optimizedQuery;
-                setStatus(`RAG query optimized: ${optimizedQuery}`);
-              }
-              if (useIntentReranking) {
-                queryIntent = result.intent;
-              }
-              
-              setLastOptimizedQuery({ query: optimizedQuery, intent: queryIntent });
-              console.log("Original RAG query:", baseQuery);
-              console.log("Optimized RAG query:", optimizedQuery);
-              console.log("Detected Intent:", queryIntent);
-            } catch (e) {
-              console.warn("Query optimization failed, using original query", e);
-              setLastOptimizedQuery(null);
-            }
-          } else {
-            setLastOptimizedQuery({ query: optimizedQuery, intent: 'GENERAL' });
-          }
-
-          const finalRagQuery = optimizedQuery.substring(0, 1000);
+          const finalRagQuery = (optimizedQuery || getFallbackQuery()).substring(0, 1000);
           finalUsedRagQuery = ragQuery;
-          finalUsedOptimizedQuery = finalRagQuery;
+          finalUsedOptimizedQuery = optimizedQuery || finalRagQuery;
 
           // Update the UI state so the user can see what was actually used for the search
           if (!lastOptimizedQuery || lastOptimizedQuery.query.trim() === '') {
             setLastOptimizedQuery({ query: finalRagQuery, intent: queryIntent || 'AUTO_FALLBACK' });
           }
 
-          setStatus('Running RAG: Filtering codebase...');
-          const ragFiles = await performRAG(
-            repoData.sourceFiles,
-            finalRagQuery,
-            queryIntent,
-            ollamaUrl,
-            ragModel,
-            ragTopK,
-            (msg) => setStatus(msg)
-          );
-          repoData = { ...repoData, sourceFiles: ragFiles };
+          if (hasPrimaryFiles) {
+            setStatus('Running RAG: Filtering codebase...');
+            const ragFiles = await performRAG(
+              repoData.sourceFiles,
+              finalRagQuery,
+              queryIntent,
+              ollamaUrl,
+              ragModel,
+              ragTopK,
+              (msg) => setStatus(msg)
+            );
+            repoData = { ...repoData, sourceFiles: ragFiles };
+          }
           
-          if (referenceRepoData && referenceRepoData.sourceFiles && referenceRepoData.sourceFiles.length > 0) {
+          if (hasReferenceFiles) {
             setStatus('Running RAG: Filtering reference codebase...');
             const refRagFiles = await performRAG(
               referenceRepoData.sourceFiles,
@@ -625,14 +741,14 @@ pause`;
           return;
         }
       }
-      
+
       let usedOllama = false;
       if (useOllama && ollamaConnected !== false) {
         setStatus('Summarizing with local Ollama...');
         usedOllama = true;
-        
+
         const summarize = async (text: string) => {
-           return text ? await summarize_with_ollama(text, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaTemperature) : '';
+          return text ? await summarize_with_ollama(text, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaTemperature) : '';
         };
 
         const summarizedSourceFiles = [];
@@ -668,41 +784,16 @@ pause`;
           };
         }
       }
-      
+
       let generatedPrompt = '';
       let finalModel = '';
       const taskInstruction = getSystemPrompt(templateMode, customInstruction);
       
       if (useOllamaForFinal && ollamaConnected !== false) {
         setStatus('Generating final prompt with local Ollama...');
-        const promptText = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs, fileTruncationLimit);
-        
-        const inputTokens = Math.ceil(promptText.length / 4);
-        const availableTokens = ollamaNumCtx - inputTokens;
-        
-        if (availableTokens < ollamaFinalPredict) {
-          const proceed = await new Promise<boolean>((resolve) => {
-            setTokenWarning({
-              inputTokens,
-              availableTokens,
-              requestedTokens: ollamaFinalPredict,
-              promptText
-            });
-            setTokenWarningResolver(() => resolve);
-          });
-          
-          setTokenWarning(null);
-          setTokenWarningResolver(null);
-          
-          if (!proceed) {
-            setLoading(false);
-            setStatus('');
-            return;
-          }
-        }
-        
+        const promptText = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs);
         generatedPrompt = await generate_final_prompt_with_ollama(promptText, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaFinalPredict, ollamaTemperature);
-        
+
         finalModel = `Ollama (${ollamaModel})`;
       } else {
         if (aiProvider === 'qwen' && currentQwenRateLimit) {
@@ -734,10 +825,11 @@ pause`;
           { 
             qwenToken: qwenOAuthToken, 
             qwenResourceUrl: qwenResourceUrl || undefined,
+            geminiApiKey,
+            proxyAddress,
             customBaseUrl,
             customApiKey,
-            customModel,
-            fileTruncationLimit
+            customModel
           }
         );
         generatedPrompt = result.text;
@@ -746,16 +838,13 @@ pause`;
           setQwenRateLimit(result.rateLimit);
         }
       }
+
       
       let metadata = `> **🤖 Prompt Generation Metadata**\n`;
       metadata += `> - **Model:** ${finalModel}\n`;
       metadata += `> - **Target Repository:** ${url || 'Local Folder'}\n`;
       if (referenceRepoData) {
-        if (referenceInputMode === 'local') {
-          metadata += `> - **Reference Repository:** Local Folder\n`;
-        } else if (referenceUrl) {
-          metadata += `> - **Reference Repository:** ${referenceUrl}\n`;
-        }
+        metadata += `> - **Reference Repository:** ${referenceUrl || 'Local Folder'}\n`;
       }
       
       if (useRag) {
@@ -772,17 +861,17 @@ pause`;
       
       metadata += `> \n`;
       metadata += `> <details><summary><b>Task Instructions</b></summary>\n> \n`;
-      metadata += `> \`\`\`text\n`;
+      metadata += '> \`\`\`text\n';
       metadata += taskInstruction.split('\n').map(line => `> ${line}`).join('\n') + '\n';
-      metadata += `> \`\`\`\n`;
-      metadata += `> </details>\n`;
+      metadata += '> \`\`\`\n';
+      metadata += '> </details>\n';
 
       if (additionalContext) {
         metadata += `>\n> <details><summary><b>Additional Context</b></summary>\n> \n`;
-        metadata += `> \`\`\`text\n`;
+        metadata += '> \`\`\`text\n';
         metadata += additionalContext.split('\n').map(line => `> ${line}`).join('\n') + '\n';
-        metadata += `> \`\`\`\n`;
-        metadata += `> </details>\n`;
+        metadata += '> \`\`\`\n';
+        metadata += '> </details>\n';
       }
 
       metadata += `\n---\n\n`;
@@ -792,10 +881,12 @@ pause`;
       const safeModelName = finalModel.replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').toLowerCase();
       setGeneratedFileName(`${projectName}_${templateName}_${safeModelName}_${timestamp}.md`);
       
+
       setPrompt(generatedPrompt);
       setUsedModel(finalModel);
     } catch (err: any) {
-      setError(err.message || 'An unexpected error occurred.');
+      const errorMessage = typeof err === 'string' ? err : (err.message || JSON.stringify(err) || 'An unexpected error occurred.');
+      setError(errorMessage);
     } finally {
       setLoading(false);
       setStatus('');
@@ -810,8 +901,30 @@ pause`;
     }
   };
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (prompt) {
+      if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+        try {
+          const { save } = await import('@tauri-apps/plugin-dialog');
+          const { invoke } = await import('@tauri-apps/api/core');
+
+          const path = await save({
+            filters: [{ name: 'Markdown', extensions: ['md'] }],
+            defaultPath: generatedFileName
+          });
+
+          if (path) {
+            setStatus('Saving file...');
+            const result = await invoke('save_text_file', { path, content: prompt });
+            setStatus(result as string);
+            setTimeout(() => setStatus(''), 3000);
+          }
+        } catch (e: any) {
+          setError(`Failed to save file: ${e.message}`);
+        }
+        return;
+      }
+
       const blob = new Blob([prompt], { type: 'text/markdown' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -825,9 +938,9 @@ pause`;
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-indigo-100 selection:text-indigo-900 pb-24">
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-indigo-100 selection:text-indigo-900">
       <div className="max-w-4xl mx-auto px-4 py-12 sm:px-6 lg:px-8">
-        
+
         {/* Header */}
         <div className="text-center mb-12">
           <div className="inline-flex items-center justify-center p-3 bg-indigo-100 rounded-2xl mb-4">
@@ -881,27 +994,57 @@ pause`;
                 </div>
               ) : (
                 <div className="flex-grow">
-                  <input
-                    type="file"
-                    ref={fileInputRef}
-                    // @ts-ignore - webkitdirectory is non-standard but widely supported
-                    webkitdirectory=""
-                    directory=""
-                    multiple
-                    onChange={(e) => {
-                      e.preventDefault(); // Prevent any default behavior
-                      setLocalFiles(e.target.files);
-                    }}
-                    className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
-                    disabled={loading}
-                  />
-                  {localFiles && localFiles.length > 0 && (
-                    <p className="mt-2 text-sm text-slate-600">
-                      Selected {localFiles.length} files from {localFiles[0].webkitRelativePath.split('/')[0]}
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={handleSelectLocalFolder}
+                      className="inline-flex items-center px-4 py-2 border border-slate-300 rounded-xl shadow-sm text-sm font-medium text-slate-700 bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+                      disabled={loading}
+                    >
+                      <Folder className="w-4 h-4 mr-2 text-indigo-500" />
+                      {selectedLocalPath ? 'Change Folder' : 'Select Repository Folder'}
+                    </button>
+                    {selectedLocalPath && (
+                      <span className="text-sm text-slate-600 truncate max-w-[250px]" title={selectedLocalPath}>
+                        {selectedLocalPath.split(/[\\/]/).pop()}
+                      </span>
+                    )}
+                  </div>
+                  {selectedLocalPath && (
+                    <p className="mt-2 text-[10px] text-slate-500 truncate" title={selectedLocalPath}>
+                      Path: {selectedLocalPath}
                     </p>
                   )}
                 </div>
               )}
+
+              <div className="flex flex-col sm:flex-row gap-4">
+                <button
+                  type="submit"
+                  disabled={loading || (inputMode === 'github' ? !url : (!selectedLocalPath))}
+                  className="flex-1 inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 className="animate-spin -ml-1 mr-2 h-5 w-5" />
+                      Generating...
+                    </>
+                  ) : (
+                    inputMode === 'github' && cachedRepoData && cacheKey === `${url}-${githubToken}-${maxFiles}` ? 'Regenerate Prompt (Cached)' : 'Generate Prompt'
+                  )}
+                </button>
+                {loading && (
+                  <button
+                    type="button"
+                    onClick={cancelGeneration}
+                    className="inline-flex items-center justify-center px-6 py-3 border border-slate-300 text-base font-medium rounded-xl text-slate-700 bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+                  >
+                    <X className="-ml-1 mr-2 h-5 w-5" />
+                    Cancel
+                  </button>
+
+                )}
+              </div>
               
               {aiProvider === 'qwen' && qwenRateLimit && qwenRateLimit.remainingRequests && (
                 <div className="flex items-center justify-center gap-4 text-xs text-slate-500">
@@ -936,6 +1079,42 @@ pause`;
                   />
                 </div>
               )}
+              <div>
+                <label htmlFor="geminiApiKey" className="block text-xs font-medium text-slate-500 mb-1">
+                  Gemini API Key {geminiApiKey ? '(Manual)' : envKeyInfo && envKeyInfo !== 'none' ? `(Env: ${envKeyInfo.replace('env:', '')})` : '(Not set)'}
+                </label>
+                <input
+                  type="password"
+                  id="geminiApiKey"
+                  className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                  placeholder={envKeyInfo && envKeyInfo !== 'none' ? `Using env: ${envKeyInfo.replace('env:', '')}` : 'AIza...'}
+                  value={geminiApiKey}
+                  onChange={(e) => setGeminiApiKey(e.target.value)}
+                  disabled={loading}
+                />
+                <p className="mt-1 text-xs text-slate-400">
+                  {geminiApiKey
+                    ? 'Using manually entered key (priority over env).'
+                    : envKeyInfo && envKeyInfo !== 'none'
+                      ? 'Using GEMINI_API_KEY from system environment. Enter a key above to override.'
+                      : 'No key found. Enter your API key or set GEMINI_API_KEY env var.'}
+                </p>
+              </div>
+              <div>
+                <label htmlFor="proxyAddress" className="block text-xs font-medium text-slate-500 mb-1">
+                  HTTP Proxy (Optional)
+                </label>
+                <input
+                  type="text"
+                  id="proxyAddress"
+                  className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                  placeholder="http://127.0.0.1:40000"
+                  value={proxyAddress}
+                  onChange={(e) => setProxyAddress(e.target.value)}
+                  disabled={loading}
+                />
+                <p className="mt-1 text-xs text-slate-400">For VPN/WARP: enter address:port. Leave empty for direct connection.</p>
+              </div>
               <div className={inputMode === 'local' ? 'col-span-1 sm:col-span-2' : ''}>
                 <label htmlFor="maxFiles" className="block text-xs font-medium text-slate-500 mb-1">
                   Max Source Files to Fetch
@@ -951,8 +1130,8 @@ pause`;
                   max={inputMode === 'local' ? 200 : (githubToken ? 200 : 10)}
                 />
                 <p className="mt-1 text-xs text-slate-500">
-                  {inputMode === 'local' 
-                    ? 'Limit: 200 files (Local processing is fast).' 
+                  {inputMode === 'local'
+                    ? 'Limit: 200 files (Local processing is fast).'
                     : (githubToken ? 'Limit: 200 files (Token provided).' : 'Limit: 10 files (Add token to increase up to 200).')}
                 </p>
               </div>
@@ -1000,23 +1179,50 @@ pause`;
                     </div>
                   ) : (
                     <div className="flex-grow">
-                      <input
-                        type="file"
-                        // @ts-ignore
-                        webkitdirectory=""
-                        directory=""
-                        multiple
-                        onChange={(e) => {
-                          e.preventDefault();
-                          setReferenceLocalFiles(e.target.files);
-                        }}
-                        className="block w-full text-sm text-slate-500 file:mr-4 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
-                        disabled={loading}
-                      />
-                      {referenceLocalFiles && referenceLocalFiles.length > 0 && (
-                        <p className="mt-1 text-xs text-slate-600">
-                          Selected {referenceLocalFiles.length} files
-                        </p>
+                      {window.hasOwnProperty('__TAURI_INTERNALS__') ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const { open } = await import('@tauri-apps/plugin-dialog');
+                                const selected = await open({ directory: true, multiple: false, title: 'Select Reference Repository Folder' }) as string | null;
+                                if (selected) setSelectedReferencePath(selected);
+                              } catch (e) { console.error(e); }
+                            }}
+                            className="inline-flex items-center px-3 py-2 border border-slate-300 rounded-lg text-sm font-medium text-slate-700 bg-white hover:bg-slate-50 transition-colors"
+                            disabled={loading}
+                          >
+                            <Folder className="w-4 h-4 mr-2" />
+                            {selectedReferencePath ? 'Change Folder' : 'Select Reference Folder'}
+                          </button>
+                          {selectedReferencePath && (
+                            <p className="mt-1 text-xs text-slate-600 truncate" title={selectedReferencePath}>
+                              Path: {selectedReferencePath}
+                            </p>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <input
+                            type="file"
+                            // @ts-ignore
+                            webkitdirectory=""
+                            directory=""
+                            multiple
+                            onChange={(e) => {
+                              e.preventDefault();
+                              setReferenceLocalFiles(e.target.files);
+                            }}
+                            className="block w-full text-sm text-slate-500 file:mr-4 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
+                            disabled={loading}
+                          />
+                          {referenceLocalFiles && referenceLocalFiles.length > 0 && (
+                            <p className="mt-1 text-xs text-slate-600">
+                              Selected {referenceLocalFiles.length} files
+                            </p>
+                          )}
+                        </>
                       )}
                     </div>
                   )}
@@ -1041,7 +1247,6 @@ pause`;
                 </div>
               </div>
             )}
-            
             <div className="mt-4 p-4 bg-indigo-50/50 rounded-xl border border-indigo-100">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center">
@@ -1494,6 +1699,30 @@ pause`;
 
             {/* Ollama Settings */}
             <div className="mt-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-sm font-semibold text-slate-800">Ollama Local LLM</h3>
+                <div className="flex items-center gap-2">
+                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${ollamaStatus === 'running' ? 'bg-green-100 text-green-700' :
+                    ollamaStatus === 'stopped' ? 'bg-slate-200 text-slate-600' : 'bg-amber-100 text-amber-700'
+                    }`}>
+                    {ollamaStatus.toUpperCase()}
+                  </span>
+                  {window.hasOwnProperty('__TAURI_INTERNALS__') && (
+                    <button
+                      type="button"
+                      onClick={() => handleOllamaControl(ollamaStatus === 'running' ? 'stop' : 'start')}
+                      disabled={isOllamaLoading || loading}
+                      className={`inline-flex items-center px-3 py-1 text-xs font-medium rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 transition-all ${ollamaStatus === 'running'
+                        ? 'text-white bg-red-500 hover:bg-red-600 focus:ring-red-400'
+                        : 'text-white bg-green-600 hover:bg-green-700 focus:ring-green-500'
+                        }`}
+                    >
+                      {isOllamaLoading ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
+                      {ollamaStatus === 'running' ? 'Stop Ollama' : 'Start Ollama'}
+                    </button>
+                  )}
+                </div>
+              </div>
               <div className="flex flex-col gap-3 mb-4">
                 <div className="flex items-center">
                   <input
@@ -1576,7 +1805,7 @@ pause`;
                       </div>
                     )}
                   </div>
-                  
+
                   {useRag && (
                     <div className="flex flex-col gap-4 p-3 bg-indigo-50/50 rounded-lg border border-indigo-100">
                       <div className="w-full">
@@ -1632,7 +1861,7 @@ pause`;
                       </div>
                     </div>
                   </div>
-                  )}
+                )}
 
                   {useRag && (
                     <div className="pt-2 border-t border-slate-100">
@@ -1677,72 +1906,57 @@ pause`;
                         <label className="block text-xs font-medium text-slate-500 mb-1" title="1 token ≈ 4 characters. Increase this if the model complains about missing code.">
                           Context Window (Tokens)
                         </label>
-                      <input
-                        type="number"
-                        value={ollamaNumCtx}
-                        onChange={(e) => setOllamaNumCtx(Number(e.target.value))}
-                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                        disabled={loading}
-                        min={1024}
-                        step={1024}
-                      />
-                      <p className="mt-1 text-[10px] text-slate-400 leading-tight">
-                        Increase if model complains about missing code. Requires more RAM/VRAM.
-                      </p>
+                        <input
+                          type="number"
+                          value={ollamaNumCtx}
+                          onChange={(e) => setOllamaNumCtx(Number(e.target.value))}
+                          className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                          disabled={loading}
+                          min={1024}
+                          step={1024}
+                        />
+                        <p className="mt-1 text-[10px] text-slate-400 leading-tight">
+                          Increase if model complains about missing code. Requires more RAM/VRAM.
+                        </p>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-500 mb-1">Max Tokens (Summary)</label>
+                        <input
+                          type="number"
+                          value={ollamaSummaryPredict}
+                          onChange={(e) => setOllamaSummaryPredict(Number(e.target.value))}
+                          className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                          disabled={loading}
+                          min={50}
+                          step={50}
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-500 mb-1">Max Tokens (Final)</label>
+                        <input
+                          type="number"
+                          value={ollamaFinalPredict}
+                          onChange={(e) => setOllamaFinalPredict(Number(e.target.value))}
+                          className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                          disabled={loading}
+                          min={250}
+                          step={50}
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-500 mb-1">Temperature ({ollamaTemperature})</label>
+                        <input
+                          type="range"
+                          value={ollamaTemperature}
+                          onChange={(e) => setOllamaTemperature(Number(e.target.value))}
+                          className="block w-full mt-2"
+                          disabled={loading}
+                          min={0}
+                          max={1}
+                          step={0.1}
+                        />
+                      </div>
                     </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-500 mb-1">Max Tokens (Summary)</label>
-                      <input
-                        type="number"
-                        value={ollamaSummaryPredict}
-                        onChange={(e) => setOllamaSummaryPredict(Number(e.target.value))}
-                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                        disabled={loading}
-                        min={50}
-                        step={50}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-500 mb-1">Max Tokens (Final)</label>
-                      <input
-                        type="number"
-                        value={ollamaFinalPredict}
-                        onChange={(e) => setOllamaFinalPredict(Number(e.target.value))}
-                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                        disabled={loading}
-                        min={250}
-                        step={50}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-500 mb-1" title="0 = No limit (Full files). Use 2000-4000 for faster generation when deep code analysis isn't needed.">
-                        File Truncation (Chars)
-                      </label>
-                      <input
-                        type="number"
-                        value={fileTruncationLimit}
-                        onChange={(e) => setFileTruncationLimit(Number(e.target.value))}
-                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                        disabled={loading}
-                        min={0}
-                        step={1000}
-                        title="0 = No limit. 2000 = Fast mode (only reads top of files)."
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-500 mb-1">Temperature ({ollamaTemperature})</label>
-                      <input
-                        type="range"
-                        value={ollamaTemperature}
-                        onChange={(e) => setOllamaTemperature(Number(e.target.value))}
-                        className="block w-full mt-2"
-                        disabled={loading}
-                        min={0}
-                        max={1}
-                        step={0.1}
-                      />
-                    </div>
-                  </div>
                   )}
 
                   <div className="flex items-center gap-3">
@@ -1754,23 +1968,15 @@ pause`;
                     >
                       {testingOllama ? 'Testing...' : 'Test Connection'}
                     </button>
-                    {ollamaConnected === true && <span className="text-xs text-emerald-600 flex items-center"><Check className="w-3 h-3 mr-1"/> Connected</span>}
+                    {ollamaConnected === true && <span className="text-xs text-emerald-600 flex items-center"><Check className="w-3 h-3 mr-1" /> Connected</span>}
                     {ollamaConnected === false && <span className="text-xs text-red-600">Connection failed (Check CORS)</span>}
                   </div>
-                  <div className="text-xs text-slate-500 bg-slate-100 p-3 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <div>
+                  {ollamaConnected === false && (
+                    <div className="text-xs text-slate-500 bg-slate-100 p-3 rounded-lg">
                       <p className="font-medium text-slate-700 mb-1">How to enable CORS for Ollama:</p>
-                      <p>Ollama blocks cross-origin requests by default. To use it here, you must start it with <code className="bg-slate-200 px-1 py-0.5 rounded">OLLAMA_ORIGINS="{window.location.origin}"</code></p>
+                      <p>Ollama blocks cross-origin requests by default. If the "Start Ollama" button does not resolve this, ensure Ollama is not already running in the background and try again.</p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleDownloadBat}
-                      className="inline-flex items-center px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors whitespace-nowrap"
-                    >
-                      <Download className="w-3 h-3 mr-1.5" />
-                      Download Windows .bat
-                    </button>
-                  </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1787,7 +1993,13 @@ pause`;
               </div>
             </div>
           )}
-          
+
+          {status && loading && (
+            <p className="mt-4 text-sm text-indigo-600 animate-pulse text-center sm:text-left">
+              {status}
+            </p>
+          )}
+
           {error && (
             <div className="mt-4 p-4 bg-red-50 rounded-xl border border-red-100">
               <p className="text-sm text-red-700">{error}</p>
@@ -1846,8 +2058,8 @@ pause`;
             </div>
             <div className="p-6 overflow-x-auto">
               <pre className="text-sm font-mono text-slate-800 whitespace-pre-wrap break-words">
-                {prompt.length > 50000 
-                  ? prompt.substring(0, 50000) + '\n\n... [⚠️ PREVIEW TRUNCATED FOR PERFORMANCE ⚠️]\n... [The full prompt is too large to display in the browser without lagging.]\n... [Please use the "Copy" or "Download" buttons above to get the full text.]' 
+                {prompt.length > 50000
+                  ? prompt.substring(0, 50000) + '\n\n... [⚠️ PREVIEW TRUNCATED FOR PERFORMANCE ⚠️]\n... [The full prompt is too large to display in the browser without lagging.]\n... [Please use the "Copy" or "Download" buttons above to get the full text.]'
                   : prompt}
               </pre>
             </div>
@@ -1855,94 +2067,6 @@ pause`;
         )}
 
       </div>
-
-      {/* Sticky Bottom Action Bar */}
-      <div className="fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-md border-t border-slate-200 p-4 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] z-40">
-        <div className="max-w-4xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex-1 min-w-0">
-            {status && loading && (
-              <p className="text-sm font-medium text-indigo-600 animate-pulse truncate">
-                {status}
-              </p>
-            )}
-          </div>
-          <div className="flex items-center gap-3 shrink-0">
-            {loading && (
-              <button
-                type="button"
-                onClick={cancelGeneration}
-                className="inline-flex items-center justify-center px-4 py-2 border border-slate-300 text-sm font-medium rounded-xl text-slate-700 bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
-              >
-                <X className="-ml-1 mr-2 h-4 w-4" />
-                Cancel
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={handleGenerate}
-              disabled={loading || (inputMode === 'github' ? !url : (!localFiles || localFiles.length === 0))}
-              className="inline-flex items-center justify-center px-6 py-2 border border-transparent text-sm font-medium rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="animate-spin -ml-1 mr-2 h-4 w-4" />
-                  Generating...
-                </>
-              ) : (
-                inputMode === 'github' && cachedRepoData && cacheKey === `${url}-${githubToken}-${maxFiles}` ? 'Regenerate (Cached)' : 'Generate Prompt'
-              )}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Token Warning Modal */}
-      {tokenWarningResolver && tokenWarning && (
-        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full p-6">
-            <div className="flex items-center gap-3 text-amber-600 mb-4">
-              <AlertTriangle className="w-6 h-6" />
-              <h3 className="text-lg font-semibold text-slate-900">Context Limits Conflict</h3>
-            </div>
-            <div className="text-sm text-slate-600 space-y-3 mb-6">
-              <p>
-                Your input prompt (code + instructions) is approximately <strong>~{tokenWarning.inputTokens} tokens</strong>.
-              </p>
-              <p>
-                With your current <code>Context Window</code> ({ollamaNumCtx}), only <strong>~{tokenWarning.availableTokens} tokens</strong> remain for the model's response.
-              </p>
-              <p>
-                However, you requested <code>Max Tokens (Final)</code> = {tokenWarning.requestedTokens}.
-              </p>
-              <div className="bg-amber-50 border border-amber-200 p-3 rounded-lg text-amber-800">
-                If you proceed, Ollama will <strong>truncate the beginning of your prompt</strong> (the system instructions) to fit the limits, which may cause the model to ignore your formatting rules or task description.
-              </div>
-              <p className="font-medium text-slate-900 mt-4">Recommendations:</p>
-              <ul className="list-disc pl-5 space-y-1">
-                <li>Increase <code>Context Window</code> to {tokenWarning.inputTokens + tokenWarning.requestedTokens + 500} (if your RAM allows).</li>
-                <li>Or decrease <code>Max Tokens (Final)</code> to {Math.max(500, tokenWarning.availableTokens - 200)}.</li>
-              </ul>
-              <div className="mt-4 bg-red-50 border border-red-200 p-3 rounded-lg text-red-800 text-xs">
-                <strong>⚠️ Hardware Warning:</strong> The <code>Context Window</code> is passed directly to Ollama, overriding its default. Setting it to 20,000+ tokens requires massive amounts of RAM/VRAM (especially for 24B+ models). If your system (e.g., 16GB/32GB RAM) cannot allocate the KV cache, Ollama may crash, freeze your system, or return an Out Of Memory error.
-              </div>
-            </div>
-            <div className="flex flex-col-reverse sm:flex-row gap-3 justify-end">
-              <button
-                onClick={() => tokenWarningResolver(false)}
-                className="px-4 py-2 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
-              >
-                Cancel (Change Settings)
-              </button>
-              <button
-                onClick={() => tokenWarningResolver(true)}
-                className="px-4 py-2 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-lg transition-colors"
-              >
-                Proceed with Truncation
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -1,5 +1,26 @@
 export async function fetchOpenAICompatibleModels(baseURL: string, apiKey: string): Promise<string[]> {
   try {
+    if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const response: any = await invoke('ai_network_request', {
+        method: 'GET',
+        url: `${baseURL.replace(/\/$/, '')}/models`,
+        headers: {
+          'Authorization': `Bearer ${apiKey}`
+        }
+      });
+
+      if (response.status !== 200) {
+        throw new Error(`Failed to fetch models: ${response.status} ${response.text}`);
+      }
+
+      const data = JSON.parse(response.text);
+      if (data && data.data && Array.isArray(data.data)) {
+        return data.data.map((model: any) => model.id);
+      }
+      return [];
+    }
+
     const response = await fetch(`${baseURL.replace(/\/$/, '')}/models`, {
       method: 'GET',
       headers: {
@@ -43,6 +64,32 @@ export async function generate_final_prompt_with_openai_compatible(
   modelName: string,
   temperature: number = 0.3
 ): Promise<string> {
+  if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const response: any = await invoke('ai_network_request', {
+      method: 'POST',
+      url: `${baseURL.replace(/\/$/, '')}/chat/completions`,
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: modelName,
+        messages: [
+          { role: 'user', content: promptText }
+        ],
+        temperature: temperature
+      })
+    });
+
+    if (response.status !== 200) {
+      throw new Error(`OpenAI API Error: ${response.status} ${response.text}`);
+    }
+
+    const data = JSON.parse(response.text);
+    return data.choices?.[0]?.message?.content || '';
+  }
+
   const response = await fetch(`${baseURL.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -87,10 +134,8 @@ export async function rewriteQueryWithOpenAICompatible(
   modelName: string
 ): Promise<{optimizedQuery: string, intent: string}> {
   const systemPrompt = `You are a search query optimizer for a codebase RAG system.
-Given a user's task description, extract MULTIPLE concrete technical search queries that would find relevant code.
-Generate exactly 3 distinct queries covering different aspects of the request (e.g., one for architecture, one for dependencies, one for specific APIs).
-If the user query is in another language, translate the search keywords to English to match the codebase.
-Separate the 3 queries using the pipe character (|).
+Given a user's task description, extract the core technical keywords, function names, and concepts that are most likely to be found in the source code.
+Output ONLY the optimized search query, nothing else. No explanations.
 
 Also, determine the intent of the query. Is it:
 - ARCHITECTURE: asking about high-level structure, patterns, or how things connect.
@@ -101,9 +146,49 @@ Also, determine the intent of the query. Is it:
 
 Return your response in the following JSON format:
 {
-  "optimizedQuery": "query 1 keywords | query 2 keywords | query 3 keywords",
+  "optimizedQuery": "keyword1 keyword2 functionName",
   "intent": "ARCHITECTURE"
 }`;
+
+  if (window.hasOwnProperty('__TAURI_INTERNALS__')) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const response: any = await invoke('ai_network_request', {
+      method: 'POST',
+      url: `${baseURL.replace(/\/$/, '')}/chat/completions`,
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: modelName,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: query }
+        ],
+        temperature: 0.1
+      })
+    });
+
+    if (response.status !== 200) {
+      throw new Error(`OpenAI API Error: ${response.status} ${response.text}`);
+    }
+
+    const data = JSON.parse(response.text);
+    const content = data.choices?.[0]?.message?.content || '';
+    
+    try {
+      const parsed = JSON.parse(content);
+      return {
+        optimizedQuery: parsed.optimizedQuery || query,
+        intent: parsed.intent || 'GENERAL'
+      };
+    } catch (e) {
+      return {
+        optimizedQuery: content.trim() || query,
+        intent: 'GENERAL'
+      };
+    }
+  }
 
   const response = await fetch(`${baseURL.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
