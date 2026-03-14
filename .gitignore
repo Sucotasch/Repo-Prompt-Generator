@@ -6,3 +6,4 @@ coverage/
 *.log
 .env*
 !.env.example
+tauri_branch_temp/
