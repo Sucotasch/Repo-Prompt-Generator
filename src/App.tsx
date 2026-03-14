@@ -74,6 +74,7 @@ export default function App() {
   const [ollamaNumCtx, setOllamaNumCtx] = useState(initialSettings.ollamaNumCtx || 8192);
   const [ollamaSummaryPredict, setOllamaSummaryPredict] = useState(initialSettings.ollamaSummaryPredict || 500);
   const [ollamaFinalPredict, setOllamaFinalPredict] = useState(initialSettings.ollamaFinalPredict || 2000);
+  const [fileTruncationLimit, setFileTruncationLimit] = useState(initialSettings.fileTruncationLimit !== undefined ? initialSettings.fileTruncationLimit : 0);
   const [ollamaTemperature, setOllamaTemperature] = useState(initialSettings.ollamaTemperature !== undefined ? initialSettings.ollamaTemperature : 0.3);
   const [useQueryExpansion, setUseQueryExpansion] = useState(initialSettings.useQueryExpansion !== undefined ? initialSettings.useQueryExpansion : true);
   const [useIntentReranking, setUseIntentReranking] = useState(initialSettings.useIntentReranking !== undefined ? initialSettings.useIntentReranking : true);
@@ -106,6 +107,14 @@ export default function App() {
   const [isSavingNew, setIsSavingNew] = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   
+  const [tokenWarningResolver, setTokenWarningResolver] = useState<((proceed: boolean) => void) | null>(null);
+  const [tokenWarning, setTokenWarning] = useState<{
+    inputTokens: number;
+    availableTokens: number;
+    requestedTokens: number;
+    promptText: string;
+  } | null>(null);
+  
   // Cache state
   const [cachedRepoData, setCachedRepoData] = useState<any>(null);
   const [cacheKey, setCacheKey] = useState<string>('');
@@ -128,6 +137,7 @@ export default function App() {
       ollamaNumCtx,
       ollamaSummaryPredict,
       ollamaFinalPredict,
+      fileTruncationLimit,
       ollamaTemperature,
       useQueryExpansion,
       useIntentReranking,
@@ -136,7 +146,7 @@ export default function App() {
       customModel
     };
     localStorage.setItem('gemini_app_settings', JSON.stringify(settings));
-  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, aiProvider, qwenOAuthToken, qwenResourceUrl, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, ollamaTemperature, useQueryExpansion, useIntentReranking, customBaseUrl, customApiKey, customModel]);
+  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, aiProvider, qwenOAuthToken, qwenResourceUrl, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, fileTruncationLimit, ollamaTemperature, useQueryExpansion, useIntentReranking, customBaseUrl, customApiKey, customModel]);
 
   const handleTemplateChange = (mode: string) => {
     setTemplateMode(mode);
@@ -667,7 +677,32 @@ pause`;
       
       if (useOllamaForFinal && ollamaConnected !== false) {
         setStatus('Generating final prompt with local Ollama...');
-        const promptText = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs);
+        const promptText = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs, fileTruncationLimit);
+        
+        const inputTokens = Math.ceil(promptText.length / 4);
+        const availableTokens = ollamaNumCtx - inputTokens;
+        
+        if (availableTokens < ollamaFinalPredict) {
+          const proceed = await new Promise<boolean>((resolve) => {
+            setTokenWarning({
+              inputTokens,
+              availableTokens,
+              requestedTokens: ollamaFinalPredict,
+              promptText
+            });
+            setTokenWarningResolver(() => resolve);
+          });
+          
+          setTokenWarning(null);
+          setTokenWarningResolver(null);
+          
+          if (!proceed) {
+            setLoading(false);
+            setStatus('');
+            return;
+          }
+        }
+        
         generatedPrompt = await generate_final_prompt_with_ollama(promptText, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaFinalPredict, ollamaTemperature);
         
         finalModel = `Ollama (${ollamaModel})`;
@@ -703,7 +738,8 @@ pause`;
             qwenResourceUrl: qwenResourceUrl || undefined,
             customBaseUrl,
             customApiKey,
-            customModel
+            customModel,
+            fileTruncationLimit
           }
         );
         generatedPrompt = result.text;
@@ -716,7 +752,13 @@ pause`;
       let metadata = `> **🤖 Prompt Generation Metadata**\n`;
       metadata += `> - **Model:** ${finalModel}\n`;
       metadata += `> - **Target Repository:** ${url || 'Local Folder'}\n`;
-      if (referenceUrl) metadata += `> - **Reference Repository:** ${referenceUrl}\n`;
+      if (referenceRepoData) {
+        if (referenceInputMode === 'local') {
+          metadata += `> - **Reference Repository:** Local Folder\n`;
+        } else if (referenceUrl) {
+          metadata += `> - **Reference Repository:** ${referenceUrl}\n`;
+        }
+      }
       
       if (useRag) {
         if (finalUsedRagQuery) {
@@ -785,7 +827,7 @@ pause`;
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-indigo-100 selection:text-indigo-900">
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-indigo-100 selection:text-indigo-900 pb-24">
       <div className="max-w-4xl mx-auto px-4 py-12 sm:px-6 lg:px-8">
         
         {/* Header */}
@@ -862,32 +904,6 @@ pause`;
                   )}
                 </div>
               )}
-              <div className="flex flex-col sm:flex-row gap-4">
-                <button
-                  type="submit"
-                  disabled={loading || (inputMode === 'github' ? !url : (!localFiles || localFiles.length === 0))}
-                  className="flex-1 inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  {loading ? (
-                    <>
-                      <Loader2 className="animate-spin -ml-1 mr-2 h-5 w-5" />
-                      Generating...
-                    </>
-                  ) : (
-                    inputMode === 'github' && cachedRepoData && cacheKey === `${url}-${githubToken}-${maxFiles}` ? 'Regenerate Prompt (Cached)' : 'Generate Prompt'
-                  )}
-                </button>
-                {loading && (
-                  <button
-                    type="button"
-                    onClick={cancelGeneration}
-                    className="inline-flex items-center justify-center px-6 py-3 border border-slate-300 text-base font-medium rounded-xl text-slate-700 bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
-                  >
-                    <X className="-ml-1 mr-2 h-5 w-5" />
-                    Cancel
-                  </button>
-                )}
-              </div>
               
               {aiProvider === 'qwen' && qwenRateLimit && qwenRateLimit.remainingRequests && (
                 <div className="flex items-center justify-center gap-4 text-xs text-slate-500">
@@ -1701,6 +1717,21 @@ pause`;
                       />
                     </div>
                     <div>
+                      <label className="block text-xs font-medium text-slate-500 mb-1" title="0 = No limit (Full files). Use 2000-4000 for faster generation when deep code analysis isn't needed.">
+                        File Truncation (Chars)
+                      </label>
+                      <input
+                        type="number"
+                        value={fileTruncationLimit}
+                        onChange={(e) => setFileTruncationLimit(Number(e.target.value))}
+                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                        disabled={loading}
+                        min={0}
+                        step={1000}
+                        title="0 = No limit. 2000 = Fast mode (only reads top of files)."
+                      />
+                    </div>
+                    <div>
                       <label className="block text-xs font-medium text-slate-500 mb-1">Temperature ({ollamaTemperature})</label>
                       <input
                         type="range"
@@ -1757,12 +1788,6 @@ pause`;
                 </p>
               </div>
             </div>
-          )}
-          
-          {status && loading && (
-            <p className="mt-4 text-sm text-indigo-600 animate-pulse text-center sm:text-left">
-              {status}
-            </p>
           )}
           
           {error && (
@@ -1832,6 +1857,94 @@ pause`;
         )}
 
       </div>
+
+      {/* Sticky Bottom Action Bar */}
+      <div className="fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-md border-t border-slate-200 p-4 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] z-40">
+        <div className="max-w-4xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="flex-1 min-w-0">
+            {status && loading && (
+              <p className="text-sm font-medium text-indigo-600 animate-pulse truncate">
+                {status}
+              </p>
+            )}
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            {loading && (
+              <button
+                type="button"
+                onClick={cancelGeneration}
+                className="inline-flex items-center justify-center px-4 py-2 border border-slate-300 text-sm font-medium rounded-xl text-slate-700 bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+              >
+                <X className="-ml-1 mr-2 h-4 w-4" />
+                Cancel
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleGenerate}
+              disabled={loading || (inputMode === 'github' ? !url : (!localFiles || localFiles.length === 0))}
+              className="inline-flex items-center justify-center px-6 py-2 border border-transparent text-sm font-medium rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
+            >
+              {loading ? (
+                <>
+                  <Loader2 className="animate-spin -ml-1 mr-2 h-4 w-4" />
+                  Generating...
+                </>
+              ) : (
+                inputMode === 'github' && cachedRepoData && cacheKey === `${url}-${githubToken}-${maxFiles}` ? 'Regenerate (Cached)' : 'Generate Prompt'
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Token Warning Modal */}
+      {tokenWarningResolver && tokenWarning && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full p-6">
+            <div className="flex items-center gap-3 text-amber-600 mb-4">
+              <AlertTriangle className="w-6 h-6" />
+              <h3 className="text-lg font-semibold text-slate-900">Context Limits Conflict</h3>
+            </div>
+            <div className="text-sm text-slate-600 space-y-3 mb-6">
+              <p>
+                Your input prompt (code + instructions) is approximately <strong>~{tokenWarning.inputTokens} tokens</strong>.
+              </p>
+              <p>
+                With your current <code>Context Window</code> ({ollamaNumCtx}), only <strong>~{tokenWarning.availableTokens} tokens</strong> remain for the model's response.
+              </p>
+              <p>
+                However, you requested <code>Max Tokens (Final)</code> = {tokenWarning.requestedTokens}.
+              </p>
+              <div className="bg-amber-50 border border-amber-200 p-3 rounded-lg text-amber-800">
+                If you proceed, Ollama will <strong>truncate the beginning of your prompt</strong> (the system instructions) to fit the limits, which may cause the model to ignore your formatting rules or task description.
+              </div>
+              <p className="font-medium text-slate-900 mt-4">Recommendations:</p>
+              <ul className="list-disc pl-5 space-y-1">
+                <li>Increase <code>Context Window</code> to {tokenWarning.inputTokens + tokenWarning.requestedTokens + 500} (if your RAM allows).</li>
+                <li>Or decrease <code>Max Tokens (Final)</code> to {Math.max(500, tokenWarning.availableTokens - 200)}.</li>
+              </ul>
+              <div className="mt-4 bg-red-50 border border-red-200 p-3 rounded-lg text-red-800 text-xs">
+                <strong>⚠️ Hardware Warning:</strong> The <code>Context Window</code> is passed directly to Ollama, overriding its default. Setting it to 20,000+ tokens requires massive amounts of RAM/VRAM (especially for 24B+ models). If your system (e.g., 16GB/32GB RAM) cannot allocate the KV cache, Ollama may crash, freeze your system, or return an Out Of Memory error.
+              </div>
+            </div>
+            <div className="flex flex-col-reverse sm:flex-row gap-3 justify-end">
+              <button
+                onClick={() => tokenWarningResolver(false)}
+                className="px-4 py-2 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+              >
+                Cancel (Change Settings)
+              </button>
+              <button
+                onClick={() => tokenWarningResolver(true)}
+                className="px-4 py-2 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-lg transition-colors"
+              >
+                Proceed with Truncation
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -4,8 +4,8 @@ import { buildPromptText } from "./geminiService";
 export async function rewriteQueryWithQwen(query: string, token: string, resourceUrl?: string): Promise<{optimizedQuery: string, intent: string, rateLimit?: { remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string }}> {
   if (!query?.trim()) return { optimizedQuery: query, intent: 'GENERAL' };
 
-  const prompt = `Optimize the search query for RAG over a code repository. Return ONLY JSON:
-{"optimizedQuery":"key1,key2...", "intent":"CATEGORY"}
+  const prompt = `Optimize the search query for RAG over a code repository. Extract 3 distinct technical queries separated by |. Return ONLY JSON:
+{"optimizedQuery":"query 1 | query 2 | query 3", "intent":"CATEGORY"}
 Query: "${query}"`;
 
   try {
@@ -51,10 +51,11 @@ export async function generateSystemPromptWithQwen(
   usedOllama?: boolean,
   referenceRepoData?: RepoData,
   attachedDocs?: {name: string, content: string}[],
-  resourceUrl?: string
+  resourceUrl?: string,
+  fileTruncationLimit?: number
 ): Promise<{ text: string, modelVersion: string, rateLimit?: { remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string } }> {
 
-  const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs);
+  const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs, fileTruncationLimit);
 
   const response = await fetch("/api/qwen", {
     method: "POST",

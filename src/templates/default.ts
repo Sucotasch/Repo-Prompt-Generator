@@ -14,7 +14,9 @@ Generate a system prompt that includes:
 1. The project's purpose and tech stack.
 2. The architectural patterns and conventions used.
 3. Instructions for the AI on how to assist with this specific codebase.
-4. Any specific rules or guidelines for contributing to this project.`,
+4. Any specific rules or guidelines for contributing to this project.
+
+RECOMMENDATION: When explaining architecture or data flows, feel free to use Mermaid.js diagrams (e.g., \`\`\`mermaid graph TD...\`\`\`) to make it more visual. Always support your explanations with actual file paths and code snippets from the provided context.`,
   deliverables: [],
   successMetrics: [],
   evidenceRequirements: [],

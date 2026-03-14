@@ -49,24 +49,25 @@ export async function generatePrompt(
     customBaseUrl?: string;
     customApiKey?: string;
     customModel?: string;
+    fileTruncationLimit?: number;
   }
 ): Promise<{ text: string, modelVersion: string, rateLimit?: { remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string } }> {
   if (provider === 'qwen' && options?.qwenToken) {
     return await generateSystemPromptWithQwen(
-      repoData, taskInstruction, options.qwenToken, additionalContext, analyzeIssues, usedOllama, referenceRepoData, attachedDocs, options.qwenResourceUrl
+      repoData, taskInstruction, options.qwenToken, additionalContext, analyzeIssues, usedOllama, referenceRepoData, attachedDocs, options.qwenResourceUrl, options.fileTruncationLimit
     );
   } else if (provider === 'ollama' && options?.ollamaUrl && options?.ollamaModel) {
-    const promptText = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs);
+    const promptText = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs, options.fileTruncationLimit);
     const text = await generate_final_prompt_with_ollama(promptText, options.ollamaUrl, options.ollamaModel);
     return { text, modelVersion: `ollama/${options.ollamaModel}` };
   } else if (provider === 'custom' && options?.customBaseUrl && options?.customApiKey && options?.customModel) {
-    const promptText = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs);
+    const promptText = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs, options.fileTruncationLimit);
     const text = await generate_final_prompt_with_openai_compatible(promptText, options.customBaseUrl, options.customApiKey, options.customModel);
     return { text, modelVersion: `custom/${options.customModel}` };
   } else {
     // Default to Gemini
     return await geminiGenerate(
-      repoData, taskInstruction, additionalContext, analyzeIssues, usedOllama, referenceRepoData, attachedDocs
+      repoData, taskInstruction, additionalContext, analyzeIssues, usedOllama, referenceRepoData, attachedDocs, options?.fileTruncationLimit
     );
   }
 }

@@ -14,7 +14,9 @@ Include:
 1. Real capabilities of the program.
 2. Algorithm of operation and architecture.
 3. Installation and configuration process.
-4. Examples of using the main functions.`,
+4. Examples of using the main functions.
+
+RECOMMENDATION: When explaining architecture or data flows, feel free to use Mermaid.js diagrams (e.g., \`\`\`mermaid graph TD...\`\`\`) to make it more visual. Always support your explanations with actual file paths and code snippets from the provided context.`,
   deliverables: [],
   successMetrics: [],
   evidenceRequirements: [],

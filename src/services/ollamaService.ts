@@ -65,18 +65,18 @@ export async function rewriteQueryWithOllama(
 The user's original query is: "${query}"
 
 Your task is to:
-1. Expand this query into 10-15 specific retrieval keywords.
-2. Classify the intent (BUG_HUNT, ARCHITECTURE, UI_UX, DATA, GENERAL).
+1. Extract MULTIPLE concrete technical search queries that would find relevant code.
+2. Generate exactly 3 distinct queries covering different aspects of the request (e.g., one for architecture, one for dependencies, one for specific APIs).
+3. Classify the intent (BUG_HUNT, ARCHITECTURE, UI_UX, DATA, GENERAL).
 
 STRICT KEYWORD RULES:
 - MUST: Use concrete technical nouns, API names, function signatures, or file paths.
-- MUST: Each keyword = ONE technical concept only.
+- MUST: Separate the 3 queries using the pipe character (|).
 - MUST NOT: Use abstract themes (e.g., "cleaner code", "better performance").
-- MUST NOT: Use narrative/summary style keywords.
 
 Return ONLY a valid JSON object with the following structure, nothing else. Do not use markdown formatting blocks like \`\`\`json.
 {
-  "optimizedQuery": "keyword1, keyword2, keyword3...",
+  "optimizedQuery": "query 1 keywords | query 2 keywords | query 3 keywords",
   "intent": "CATEGORY_NAME"
 }`;
 

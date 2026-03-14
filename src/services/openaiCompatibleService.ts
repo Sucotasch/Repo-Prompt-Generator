@@ -87,8 +87,9 @@ export async function rewriteQueryWithOpenAICompatible(
   modelName: string
 ): Promise<{optimizedQuery: string, intent: string}> {
   const systemPrompt = `You are a search query optimizer for a codebase RAG system.
-Given a user's task description, extract the core technical keywords, function names, and concepts that are most likely to be found in the source code.
-Output ONLY the optimized search query, nothing else. No explanations.
+Given a user's task description, extract MULTIPLE concrete technical search queries that would find relevant code.
+Generate exactly 3 distinct queries covering different aspects of the request (e.g., one for architecture, one for dependencies, one for specific APIs).
+Separate the 3 queries using the pipe character (|).
 
 Also, determine the intent of the query. Is it:
 - ARCHITECTURE: asking about high-level structure, patterns, or how things connect.
@@ -99,7 +100,7 @@ Also, determine the intent of the query. Is it:
 
 Return your response in the following JSON format:
 {
-  "optimizedQuery": "keyword1 keyword2 functionName",
+  "optimizedQuery": "query 1 keywords | query 2 keywords | query 3 keywords",
   "intent": "ARCHITECTURE"
 }`;
 

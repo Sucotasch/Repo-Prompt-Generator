@@ -5,6 +5,7 @@ import { securityTemplate } from './security';
 import { docsTemplate } from './docs';
 import { integrationTemplate } from './integration';
 import { eli5Template } from './eli5';
+import { architectureTemplate } from './architecture';
 
 export const templates: Record<string, TemplateDefinition> = {
   default: defaultTemplate,
@@ -13,6 +14,7 @@ export const templates: Record<string, TemplateDefinition> = {
   docs: docsTemplate,
   integration: integrationTemplate,
   eli5: eli5Template,
+  architecture: architectureTemplate,
 };
 
 export function getTemplate(id: string): TemplateDefinition | undefined {

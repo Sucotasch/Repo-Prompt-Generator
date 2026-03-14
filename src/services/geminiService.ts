@@ -7,7 +7,8 @@ export function buildPromptText(
   additionalContext?: string, 
   analyzeIssues?: boolean,
   referenceRepoData?: RepoData,
-  attachedDocs?: {name: string, content: string}[]
+  attachedDocs?: {name: string, content: string}[],
+  fileTruncationLimit?: number
 ): string {
   let prompt = `<SYSTEM_TEMPLATE>\n${taskInstruction}\n</SYSTEM_TEMPLATE>\n\n`;
 
@@ -27,10 +28,10 @@ export function buildPromptText(
   }
   prompt += `Description: ${repoData.info.description}\n\n`;
   prompt += `File Tree (partial):\n${repoData.tree.slice(0, 500).join('\n')}\n\n`;
-  prompt += `README:\n${repoData.readme.substring(0, 2000)}\n\n`;
-  prompt += `Dependencies:\n${repoData.dependencies.substring(0, 2000)}\n`;
+  prompt += `README:\n${fileTruncationLimit && fileTruncationLimit > 0 ? repoData.readme.substring(0, fileTruncationLimit) : repoData.readme}\n\n`;
+  prompt += `Dependencies:\n${fileTruncationLimit && fileTruncationLimit > 0 ? repoData.dependencies.substring(0, fileTruncationLimit) : repoData.dependencies}\n`;
   if (repoData.sourceFiles && repoData.sourceFiles.length > 0) {
-    prompt += `\nKey Source Files:\n${repoData.sourceFiles.map(f => `--- ${f.path} ---\n${f.content.substring(0, 2000)}\n`).join('\n')}`;
+    prompt += `\nKey Source Files:\n${repoData.sourceFiles.map(f => `--- ${f.path} ---\n${fileTruncationLimit && fileTruncationLimit > 0 ? f.content.substring(0, fileTruncationLimit) : f.content}\n`).join('\n')}`;
   }
 
   if (referenceRepoData) {
@@ -41,22 +42,24 @@ export function buildPromptText(
     }
     prompt += `Description: ${referenceRepoData.info.description}\n\n`;
     prompt += `File Tree (partial):\n${referenceRepoData.tree.slice(0, 500).join('\n')}\n\n`;
-    prompt += `README:\n${referenceRepoData.readme.substring(0, 2000)}\n\n`;
-    prompt += `Dependencies:\n${referenceRepoData.dependencies.substring(0, 2000)}\n`;
+    prompt += `README:\n${fileTruncationLimit && fileTruncationLimit > 0 ? referenceRepoData.readme.substring(0, fileTruncationLimit) : referenceRepoData.readme}\n\n`;
+    prompt += `Dependencies:\n${fileTruncationLimit && fileTruncationLimit > 0 ? referenceRepoData.dependencies.substring(0, fileTruncationLimit) : referenceRepoData.dependencies}\n`;
     if (referenceRepoData.sourceFiles && referenceRepoData.sourceFiles.length > 0) {
-      prompt += `\nKey Source Files:\n${referenceRepoData.sourceFiles.map(f => `--- ${f.path} ---\n${f.content.substring(0, 2000)}\n`).join('\n')}`;
+      prompt += `\nKey Source Files:\n${referenceRepoData.sourceFiles.map(f => `--- ${f.path} ---\n${fileTruncationLimit && fileTruncationLimit > 0 ? f.content.substring(0, fileTruncationLimit) : f.content}\n`).join('\n')}`;
     }
   }
   prompt += `\n</CODEBASE>\n\n`;
 
   prompt += `<FINAL_TASK>\n`;
+  prompt += `CRITICAL INSTRUCTION: You must now execute the following task based on the codebase provided above:\n`;
+  prompt += `--- TASK START ---\n${taskInstruction}\n--- TASK END ---\n\n`;
+  
   if (additionalContext && additionalContext.trim()) {
-    prompt += `${additionalContext.trim()}\n\n`;
+    prompt += `Additional Context/Instructions:\n${additionalContext.trim()}\n\n`;
   }
   if (analyzeIssues) {
     prompt += `CRITICAL INSTRUCTION: Perform a preliminary analysis of the provided repository data. Identify any obvious errors, bugs, architectural inconsistencies, or critically outdated dependencies. Include these findings directly in the generated output.\n\n`;
   }
-  prompt += `CRITICAL REMINDER: Execute the instructions defined in <SYSTEM_TEMPLATE> and <FINAL_TASK> using the provided codebase and external documents. Do not lose focus on the primary objective.\n`;
   prompt += `</FINAL_TASK>\n`;
 
   return prompt;
@@ -69,18 +72,18 @@ export async function rewriteQueryWithGemini(query: string): Promise<{optimizedQ
 The user's original query is: "${query}"
 
 Your task is to:
-1. Expand this query into 10-15 specific retrieval keywords.
-2. Classify the intent (BUG_HUNT, ARCHITECTURE, UI_UX, DATA, GENERAL).
+1. Extract MULTIPLE concrete technical search queries that would find relevant code.
+2. Generate exactly 3 distinct queries covering different aspects of the request (e.g., one for architecture, one for dependencies, one for specific APIs).
+3. Classify the intent (BUG_HUNT, ARCHITECTURE, UI_UX, DATA, GENERAL).
 
 STRICT KEYWORD RULES:
 - MUST: Use concrete technical nouns, API names, function signatures, or file paths.
-- MUST: Each keyword = ONE technical concept only.
+- MUST: Separate the 3 queries using the pipe character (|).
 - MUST NOT: Use abstract themes (e.g., "cleaner code", "better performance").
-- MUST NOT: Use narrative/summary style keywords.
 
 Return ONLY a valid JSON object with the following structure, nothing else. Do not use markdown formatting blocks like \`\`\`json.
 {
-  "optimizedQuery": "keyword1, keyword2, keyword3...",
+  "optimizedQuery": "query 1 keywords | query 2 keywords | query 3 keywords",
   "intent": "CATEGORY_NAME"
 }`;
 
@@ -113,9 +116,10 @@ export async function generateSystemPrompt(
   analyzeIssues?: boolean, 
   usedOllama?: boolean,
   referenceRepoData?: RepoData,
-  attachedDocs?: {name: string, content: string}[]
+  attachedDocs?: {name: string, content: string}[],
+  fileTruncationLimit?: number
 ): Promise<{ text: string, modelVersion: string }> {
-  const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs);
+  const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs, fileTruncationLimit);
 
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   const response = await ai.models.generateContent({
