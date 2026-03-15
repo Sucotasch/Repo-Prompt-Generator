@@ -1,6 +1,8 @@
+import { tauriFetch } from '../utils/tauriFetch';
+
 export async function checkOllamaConnection(url: string): Promise<boolean> {
   try {
-    const res = await fetch(`${url}/api/tags`);
+    const res = await tauriFetch(`${url}/api/tags`);
     return res.ok;
   } catch (e) {
     return false;
@@ -9,7 +11,7 @@ export async function checkOllamaConnection(url: string): Promise<boolean> {
 
 export async function fetchOllamaModels(url: string): Promise<string[]> {
   try {
-    const res = await fetch(`${url}/api/tags`);
+    const res = await tauriFetch(`${url}/api/tags`);
     if (!res.ok) return [];
     const data = await res.json();
     return data.models?.map((m: any) => m.name) || [];
@@ -30,7 +32,7 @@ export async function summarize_with_ollama(
   const prompt = `Please summarize the following file content in a few sentences, extracting only the most important information relevant for understanding the architecture, purpose, and key logic of the code. Ignore boilerplate.\n\nContent:\n${text.substring(0, 8000)}`;
   
   try {
-    const res = await fetch(`${url}/api/generate`, {
+    const res = await tauriFetch(`${url}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -82,7 +84,7 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
 }`;
 
   try {
-    const res = await fetch(`${url}/api/generate`, {
+    const res = await tauriFetch(`${url}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -120,7 +122,7 @@ export async function generate_final_prompt_with_ollama(
   temperature: number = 0.5
 ): Promise<string> {
   try {
-    const res = await fetch(`${url}/api/generate`, {
+    const res = await tauriFetch(`${url}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

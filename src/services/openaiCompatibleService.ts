@@ -1,6 +1,8 @@
+import { tauriFetch } from '../utils/tauriFetch';
+
 export async function fetchOpenAICompatibleModels(baseURL: string, apiKey: string): Promise<string[]> {
   try {
-    const response = await fetch(`${baseURL.replace(/\/$/, '')}/models`, {
+    const response = await tauriFetch(`${baseURL.replace(/\/$/, '')}/models`, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${apiKey}`
@@ -43,7 +45,7 @@ export async function generate_final_prompt_with_openai_compatible(
   modelName: string,
   temperature: number = 0.3
 ): Promise<string> {
-  const response = await fetch(`${baseURL.replace(/\/$/, '')}/chat/completions`, {
+  const response = await tauriFetch(`${baseURL.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
@@ -105,7 +107,7 @@ Return your response in the following JSON format:
   "intent": "ARCHITECTURE"
 }`;
 
-  const response = await fetch(`${baseURL.replace(/\/$/, '')}/chat/completions`, {
+  const response = await tauriFetch(`${baseURL.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,

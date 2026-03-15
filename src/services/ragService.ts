@@ -1,3 +1,5 @@
+import { tauriFetch } from '../utils/tauriFetch';
+
 export interface RagChunk {
   path: string;
   content: string;
@@ -5,7 +7,7 @@ export interface RagChunk {
 }
 
 export async function getEmbedding(text: string, ollamaUrl: string, model: string): Promise<number[]> {
-  const res = await fetch(`${ollamaUrl.replace(/\/$/, '')}/api/embeddings`, {
+  const res = await tauriFetch(`${ollamaUrl.replace(/\/$/, '')}/api/embeddings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ 

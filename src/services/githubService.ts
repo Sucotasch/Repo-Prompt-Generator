@@ -1,3 +1,6 @@
+import { isTauri } from '../utils/tauri';
+import { fetchRepoDataTauri } from './githubTauriService';
+
 export interface RepoInfo {
   owner: string;
   repo: string;
@@ -39,6 +42,10 @@ export async function fetchRepoData(url: string, token?: string, maxFiles: numbe
 
     if (pathParts.length >= 4 && pathParts[2] === 'tree') {
       branch = pathParts.slice(3).join('/');
+    }
+
+    if (isTauri()) {
+      return await fetchRepoDataTauri(owner, repo, branch, token, maxFiles);
     }
 
     const response = await fetch('/api/repo', {

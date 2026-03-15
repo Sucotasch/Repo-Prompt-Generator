@@ -9,6 +9,8 @@ import { generatePrompt, rewriteQuery, AIProvider } from './services/aiAdapter';
 import { performRAG } from './services/ragService';
 import { startDeviceAuth, pollDeviceToken } from './services/qwenAuthService';
 import { getTemplate, getAllTemplates } from './templates';
+import { saveMarkdownFile } from './utils/fileSystem';
+import { isTauri } from './utils/tauri';
 
 interface SavedTemplate {
   id: string;
@@ -33,11 +35,13 @@ export default function App() {
   const [maxFiles, setMaxFiles] = useState(initialSettings.maxFiles || 5);
   const [inputMode, setInputMode] = useState<'github' | 'local'>(initialSettings.inputMode || 'github');
   const [localFiles, setLocalFiles] = useState<FileList | null>(null);
+  const [selectedLocalPath, setSelectedLocalPath] = useState(initialSettings.selectedLocalPath || '');
   
   // Reference Repository State
   const [referenceInputMode, setReferenceInputMode] = useState<'github' | 'local'>('github');
   const [referenceUrl, setReferenceUrl] = useState('');
   const [referenceLocalFiles, setReferenceLocalFiles] = useState<FileList | null>(null);
+  const [selectedReferencePath, setSelectedReferencePath] = useState(initialSettings.selectedReferencePath || '');
   const [referenceMaxFiles, setReferenceMaxFiles] = useState(initialSettings.maxFiles || 5);
   const [cachedReferenceRepoData, setCachedReferenceRepoData] = useState<any>(null);
   const [referenceCacheKey, setReferenceCacheKey] = useState<string>('');
@@ -83,6 +87,9 @@ export default function App() {
   const [customBaseUrl, setCustomBaseUrl] = useState(initialSettings.customBaseUrl || '');
   const [customApiKey, setCustomApiKey] = useState(initialSettings.customApiKey || '');
   const [customModel, setCustomModel] = useState(initialSettings.customModel || '');
+  const [geminiApiKey, setGeminiApiKey] = useState(initialSettings.geminiApiKey || '');
+  const [proxyUrl, setProxyUrl] = useState(initialSettings.proxyUrl || '');
+  const [ollamaProcessRunning, setOllamaProcessRunning] = useState<boolean | null>(null);
   const [availableCustomModels, setAvailableCustomModels] = useState<string[]>([]);
   const [testingCustomProvider, setTestingCustomProvider] = useState(false);
   const [customProviderConnected, setCustomProviderConnected] = useState<boolean | null>(null);
@@ -120,6 +127,24 @@ export default function App() {
   const [cacheKey, setCacheKey] = useState<string>('');
 
   useEffect(() => {
+    const fetchEnvVars = async () => {
+      if (isTauri()) {
+        const { invokeTauri } = await import('./utils/tauri');
+        if (!geminiApiKey) {
+          const sysKey = await invokeTauri<string>('get_env_var', { name: 'GEMINI_API_KEY' });
+          if (sysKey) setGeminiApiKey(sysKey);
+        }
+        const sysProxy = await invokeTauri<string>('get_env_var', { name: 'HTTP_PROXY' });
+        if (sysProxy && !proxyUrl) setProxyUrl(sysProxy);
+        
+        const isOllamaRunning = await invokeTauri<boolean>('is_ollama_running');
+        setOllamaProcessRunning(isOllamaRunning);
+      }
+    };
+    fetchEnvVars();
+  }, []);
+
+  useEffect(() => {
     const settings = {
       inputMode,
       githubToken,
@@ -143,10 +168,14 @@ export default function App() {
       useIntentReranking,
       customBaseUrl,
       customApiKey,
-      customModel
+      customModel,
+      geminiApiKey,
+      proxyUrl,
+      selectedLocalPath,
+      selectedReferencePath
     };
     localStorage.setItem('gemini_app_settings', JSON.stringify(settings));
-  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, aiProvider, qwenOAuthToken, qwenResourceUrl, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, fileTruncationLimit, ollamaTemperature, useQueryExpansion, useIntentReranking, customBaseUrl, customApiKey, customModel]);
+  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, aiProvider, qwenOAuthToken, qwenResourceUrl, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, fileTruncationLimit, ollamaTemperature, useQueryExpansion, useIntentReranking, customBaseUrl, customApiKey, customModel, geminiApiKey, proxyUrl, selectedLocalPath, selectedReferencePath]);
 
   const handleTemplateChange = (mode: string) => {
     setTemplateMode(mode);
@@ -436,7 +465,12 @@ pause`;
   const handleGenerate = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (inputMode === 'github' && !url) return;
-    if (inputMode === 'local' && (!localFiles || localFiles.length === 0)) return;
+    if (inputMode === 'local' && (!localFiles || localFiles.length === 0) && !selectedLocalPath) {
+      if (isTauri()) {
+        await handleSelectLocalFolder();
+      }
+      return;
+    }
     
     if (useRag && !ragModel) {
       setError('Please select an Embedding Model for RAG. It is required to process the repository files.');
@@ -474,7 +508,18 @@ pause`;
         }
       } else {
         setStatus('Processing local files...');
-        repoData = await processLocalFolder(localFiles!, maxFiles);
+        if (isTauri()) {
+          const { selectLocalFolderWithTauri } = await import('./services/localFileService');
+          repoData = await selectLocalFolderWithTauri(maxFiles, selectedLocalPath || undefined);
+          if (repoData.info.description.startsWith('Local folder: ')) {
+            const newPath = repoData.info.description.replace('Local folder: ', '');
+            if (newPath !== selectedLocalPath) {
+              setSelectedLocalPath(newPath);
+            }
+          }
+        } else {
+          repoData = await processLocalFolder(localFiles!, maxFiles);
+        }
         // Do not cache local files in state to save memory, they are fast to read anyway
         setCachedRepoData(null);
         setCacheKey('');
@@ -517,9 +562,20 @@ pause`;
             setCachedReferenceRepoData(referenceRepoData);
             setReferenceCacheKey(currentRefCacheKey);
           }
-        } else if (referenceInputMode === 'local' && referenceLocalFiles && referenceLocalFiles.length > 0) {
+        } else if (referenceInputMode === 'local' && ((referenceLocalFiles && referenceLocalFiles.length > 0) || selectedReferencePath)) {
           setStatus('Processing local reference files...');
-          referenceRepoData = await processLocalFolder(referenceLocalFiles, referenceMaxFiles);
+          if (isTauri()) {
+            const { selectLocalFolderWithTauri } = await import('./services/localFileService');
+            referenceRepoData = await selectLocalFolderWithTauri(referenceMaxFiles, selectedReferencePath || undefined);
+            if (referenceRepoData.info.description.startsWith('Local folder: ')) {
+              const newPath = referenceRepoData.info.description.replace('Local folder: ', '');
+              if (newPath !== selectedReferencePath) {
+                setSelectedReferencePath(newPath);
+              }
+            }
+          } else {
+            referenceRepoData = await processLocalFolder(referenceLocalFiles!, referenceMaxFiles);
+          }
           setCachedReferenceRepoData(null);
           setReferenceCacheKey('');
         }
@@ -557,7 +613,8 @@ pause`;
                   qwenResourceUrl: qwenResourceUrl || undefined,
                   customBaseUrl,
                   customApiKey,
-                  customModel
+                  customModel,
+                  geminiApiKey
                 });
                 if (aiProvider === 'qwen' && result.rateLimit) {
                   setQwenRateLimit(result.rateLimit);
@@ -737,7 +794,8 @@ pause`;
             customBaseUrl,
             customApiKey,
             customModel,
-            fileTruncationLimit
+            fileTruncationLimit,
+            geminiApiKey
           }
         );
         generatedPrompt = result.text;
@@ -802,6 +860,38 @@ pause`;
     }
   };
 
+  const handleSelectLocalFolder = async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select Repository Folder"
+      });
+      if (selected && typeof selected === 'string') {
+        setSelectedLocalPath(selected);
+      }
+    } catch (e: any) {
+      setError(`Folder selection failed: ${e.message}`);
+    }
+  };
+
+  const handleSelectReferenceFolder = async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select Reference Repository Folder"
+      });
+      if (selected && typeof selected === 'string') {
+        setSelectedReferencePath(selected);
+      }
+    } catch (e: any) {
+      setError(`Folder selection failed: ${e.message}`);
+    }
+  };
+
   const handleCopy = () => {
     if (prompt) {
       navigator.clipboard.writeText(prompt);
@@ -810,17 +900,9 @@ pause`;
     }
   };
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (prompt) {
-      const blob = new Blob([prompt], { type: 'text/markdown' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = generatedFileName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      await saveMarkdownFile(prompt, generatedFileName);
     }
   };
 
@@ -881,24 +963,52 @@ pause`;
                 </div>
               ) : (
                 <div className="flex-grow">
-                  <input
-                    type="file"
-                    ref={fileInputRef}
-                    // @ts-ignore - webkitdirectory is non-standard but widely supported
-                    webkitdirectory=""
-                    directory=""
-                    multiple
-                    onChange={(e) => {
-                      e.preventDefault(); // Prevent any default behavior
-                      setLocalFiles(e.target.files);
-                    }}
-                    className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
-                    disabled={loading}
-                  />
-                  {localFiles && localFiles.length > 0 && (
-                    <p className="mt-2 text-sm text-slate-600">
-                      Selected {localFiles.length} files from {localFiles[0].webkitRelativePath.split('/')[0]}
-                    </p>
+                  {isTauri() ? (
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={handleSelectLocalFolder}
+                          className="inline-flex items-center px-4 py-2 border border-slate-300 rounded-xl shadow-sm text-sm font-medium text-slate-700 bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+                          disabled={loading}
+                        >
+                          <Folder className="w-4 h-4 mr-2 text-indigo-500" />
+                          {selectedLocalPath ? 'Change Folder' : 'Select Repository Folder'}
+                        </button>
+                        {selectedLocalPath && (
+                          <span className="text-sm text-slate-600 truncate max-w-[250px]" title={selectedLocalPath}>
+                            {selectedLocalPath.split(/[\\/]/).pop()}
+                          </span>
+                        )}
+                      </div>
+                      {selectedLocalPath && (
+                        <p className="text-[10px] text-slate-500 truncate" title={selectedLocalPath}>
+                          Path: {selectedLocalPath}
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      <input
+                        type="file"
+                        ref={fileInputRef}
+                        // @ts-ignore - webkitdirectory is non-standard but widely supported
+                        webkitdirectory=""
+                        directory=""
+                        multiple
+                        onChange={(e) => {
+                          e.preventDefault(); // Prevent any default behavior
+                          setLocalFiles(e.target.files);
+                        }}
+                        className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
+                        disabled={loading}
+                      />
+                      {localFiles && localFiles.length > 0 && (
+                        <p className="mt-2 text-sm text-slate-600">
+                          Selected {localFiles.length} files from {localFiles[0].webkitRelativePath.split('/')[0]}
+                        </p>
+                      )}
+                    </>
                   )}
                 </div>
               )}
@@ -1000,23 +1110,51 @@ pause`;
                     </div>
                   ) : (
                     <div className="flex-grow">
-                      <input
-                        type="file"
-                        // @ts-ignore
-                        webkitdirectory=""
-                        directory=""
-                        multiple
-                        onChange={(e) => {
-                          e.preventDefault();
-                          setReferenceLocalFiles(e.target.files);
-                        }}
-                        className="block w-full text-sm text-slate-500 file:mr-4 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
-                        disabled={loading}
-                      />
-                      {referenceLocalFiles && referenceLocalFiles.length > 0 && (
-                        <p className="mt-1 text-xs text-slate-600">
-                          Selected {referenceLocalFiles.length} files
-                        </p>
+                      {isTauri() ? (
+                        <div className="flex flex-col gap-2">
+                          <div className="flex items-center gap-3">
+                            <button
+                              type="button"
+                              onClick={handleSelectReferenceFolder}
+                              className="inline-flex items-center px-3 py-1.5 border border-slate-300 rounded-lg shadow-sm text-xs font-medium text-slate-700 bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+                              disabled={loading}
+                            >
+                              <Folder className="w-3.5 h-3.5 mr-1.5 text-indigo-500" />
+                              {selectedReferencePath ? 'Change Folder' : 'Select Reference Folder'}
+                            </button>
+                            {selectedReferencePath && (
+                              <span className="text-xs text-slate-600 truncate max-w-[200px]" title={selectedReferencePath}>
+                                {selectedReferencePath.split(/[\\/]/).pop()}
+                              </span>
+                            )}
+                          </div>
+                          {selectedReferencePath && (
+                            <p className="text-[10px] text-slate-500 truncate" title={selectedReferencePath}>
+                              Path: {selectedReferencePath}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <>
+                          <input
+                            type="file"
+                            // @ts-ignore
+                            webkitdirectory=""
+                            directory=""
+                            multiple
+                            onChange={(e) => {
+                              e.preventDefault();
+                              setReferenceLocalFiles(e.target.files);
+                            }}
+                            className="block w-full text-sm text-slate-500 file:mr-4 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
+                            disabled={loading}
+                          />
+                          {referenceLocalFiles && referenceLocalFiles.length > 0 && (
+                            <p className="mt-1 text-xs text-slate-600">
+                              Selected {referenceLocalFiles.length} files
+                            </p>
+                          )}
+                        </>
                       )}
                     </div>
                   )}
@@ -1277,6 +1415,24 @@ pause`;
                 <option value="ollama">🏠 Ollama (local, private)</option>
                 <option value="custom">🌐 Custom (OpenAI Compatible)</option>
               </select>
+              
+              {aiProvider === 'gemini' && (
+                <div className="mt-4 p-4 bg-white border border-slate-200 rounded-lg shadow-sm space-y-4">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">Gemini API Key</label>
+                    <input
+                      type="password"
+                      value={geminiApiKey}
+                      onChange={(e) => setGeminiApiKey(e.target.value)}
+                      placeholder="AIzaSy..."
+                      className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                      disabled={loading}
+                      title="Leave empty to use the default key from environment"
+                    />
+                    <p className="text-xs text-slate-400 mt-1">Leave empty to use the default key from environment.</p>
+                  </div>
+                </div>
+              )}
               
               {aiProvider === 'custom' && (
                 <div className="mt-4 p-4 bg-white border border-slate-200 rounded-lg shadow-sm space-y-4">
@@ -1754,6 +1910,36 @@ pause`;
                     >
                       {testingOllama ? 'Testing...' : 'Test Connection'}
                     </button>
+                    {isTauri() && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const { invokeTauri } = await import('./utils/tauri');
+                            await invokeTauri('start_ollama');
+                            setOllamaProcessRunning(true);
+                            setTimeout(handleTestOllama, 2000);
+                          }}
+                          disabled={loading}
+                          className="text-xs px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors disabled:opacity-50"
+                        >
+                          Start Ollama
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const { invokeTauri } = await import('./utils/tauri');
+                            await invokeTauri('stop_ollama');
+                            setOllamaProcessRunning(false);
+                            setOllamaConnected(false);
+                          }}
+                          disabled={loading}
+                          className="text-xs px-3 py-1.5 bg-red-50 text-red-700 border border-red-200 rounded-lg hover:bg-red-100 transition-colors disabled:opacity-50"
+                        >
+                          Stop Ollama
+                        </button>
+                      </>
+                    )}
                     {ollamaConnected === true && <span className="text-xs text-emerald-600 flex items-center"><Check className="w-3 h-3 mr-1"/> Connected</span>}
                     {ollamaConnected === false && <span className="text-xs text-red-600">Connection failed (Check CORS)</span>}
                   </div>
@@ -1770,6 +1956,41 @@ pause`;
                       <Download className="w-3 h-3 mr-1.5" />
                       Download Windows .bat
                     </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Network Settings (Tauri Only) */}
+              {isTauri() && (
+                <div className="mt-4 p-4 bg-white border border-slate-200 rounded-lg shadow-sm space-y-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-sm font-medium text-slate-700">
+                      Network Settings
+                    </label>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">HTTP/HTTPS Proxy (e.g., Cloudflare WARP)</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={proxyUrl}
+                        onChange={(e) => setProxyUrl(e.target.value)}
+                        placeholder="http://127.0.0.1:10809"
+                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                        disabled={loading}
+                      />
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const { invokeTauri } = await import('./utils/tauri');
+                          await invokeTauri('set_proxy_env', { proxyUrl });
+                          alert(proxyUrl ? 'Proxy set successfully' : 'Proxy cleared');
+                        }}
+                        className="px-3 py-2 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 text-sm whitespace-nowrap"
+                      >
+                        Apply Proxy
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -1880,7 +2101,7 @@ pause`;
             <button
               type="button"
               onClick={handleGenerate}
-              disabled={loading || (inputMode === 'github' ? !url : (!localFiles || localFiles.length === 0))}
+              disabled={loading || (inputMode === 'github' ? !url : (!localFiles || localFiles.length === 0) && !selectedLocalPath)}
               className="inline-flex items-center justify-center px-6 py-2 border border-transparent text-sm font-medium rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
             >
               {loading ? (

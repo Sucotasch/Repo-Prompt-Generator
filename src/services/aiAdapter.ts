@@ -18,6 +18,7 @@ export async function rewriteQuery(
     customBaseUrl?: string;
     customApiKey?: string;
     customModel?: string;
+    geminiApiKey?: string;
   }
 ): Promise<{optimizedQuery: string, intent: string, rateLimit?: { remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string }}> {
   if (provider === 'qwen' && options?.qwenToken) {
@@ -28,7 +29,7 @@ export async function rewriteQuery(
     return await rewriteQueryWithOpenAICompatible(query, options.customBaseUrl, options.customApiKey, options.customModel);
   } else {
     // Default to Gemini
-    return await rewriteQueryWithGemini(query);
+    return await rewriteQueryWithGemini(query, options?.geminiApiKey);
   }
 }
 
@@ -50,6 +51,7 @@ export async function generatePrompt(
     customApiKey?: string;
     customModel?: string;
     fileTruncationLimit?: number;
+    geminiApiKey?: string;
   }
 ): Promise<{ text: string, modelVersion: string, rateLimit?: { remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string } }> {
   if (provider === 'qwen' && options?.qwenToken) {
@@ -67,7 +69,7 @@ export async function generatePrompt(
   } else {
     // Default to Gemini
     return await geminiGenerate(
-      repoData, taskInstruction, additionalContext, analyzeIssues, usedOllama, referenceRepoData, attachedDocs, options?.fileTruncationLimit
+      repoData, taskInstruction, additionalContext, analyzeIssues, usedOllama, referenceRepoData, attachedDocs, options?.fileTruncationLimit, options?.geminiApiKey
     );
   }
 }

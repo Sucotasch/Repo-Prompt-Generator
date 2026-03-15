@@ -1,3 +1,6 @@
+import { isTauri } from '../utils/tauri';
+import { tauriFetch } from '../utils/tauriFetch';
+
 export const QWEN_OAUTH_CLIENT_ID = 'f0304373b74a44d2b584a3fb70ca9e56';
 export const QWEN_OAUTH_SCOPE = 'openid profile email model.completion';
 export const QWEN_OAUTH_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
@@ -25,15 +28,30 @@ export async function startDeviceAuth() {
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = await generateCodeChallenge(codeVerifier);
 
-  const response = await fetch('/api/qwen/device/code', {
+  const url = isTauri() ? 'https://chat.qwen.ai/api/v1/oauth2/device/code' : '/api/qwen/device/code';
+  const body = isTauri() ? new URLSearchParams({
+    client_id: QWEN_OAUTH_CLIENT_ID,
+    scope: QWEN_OAUTH_SCOPE,
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256',
+  }).toString() : JSON.stringify({
+    client_id: QWEN_OAUTH_CLIENT_ID,
+    scope: QWEN_OAUTH_SCOPE,
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256',
+  });
+
+  const headers = isTauri() ? {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'Accept': 'application/json',
+  } : {
+    'Content-Type': 'application/json',
+  };
+
+  const response = await tauriFetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      client_id: QWEN_OAUTH_CLIENT_ID,
-      scope: QWEN_OAUTH_SCOPE,
-      code_challenge: codeChallenge,
-      code_challenge_method: 'S256',
-    }),
+    headers,
+    body,
   });
 
   if (!response.ok) {
@@ -45,15 +63,30 @@ export async function startDeviceAuth() {
 }
 
 export async function pollDeviceToken(deviceCode: string, codeVerifier: string) {
-  const response = await fetch('/api/qwen/device/token', {
+  const url = isTauri() ? 'https://chat.qwen.ai/api/v1/oauth2/token' : '/api/qwen/device/token';
+  const body = isTauri() ? new URLSearchParams({
+    grant_type: QWEN_OAUTH_GRANT_TYPE,
+    client_id: QWEN_OAUTH_CLIENT_ID,
+    device_code: deviceCode,
+    code_verifier: codeVerifier,
+  }).toString() : JSON.stringify({
+    grant_type: QWEN_OAUTH_GRANT_TYPE,
+    client_id: QWEN_OAUTH_CLIENT_ID,
+    device_code: deviceCode,
+    code_verifier: codeVerifier,
+  });
+
+  const headers = isTauri() ? {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'Accept': 'application/json',
+  } : {
+    'Content-Type': 'application/json',
+  };
+
+  const response = await tauriFetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      grant_type: QWEN_OAUTH_GRANT_TYPE,
-      client_id: QWEN_OAUTH_CLIENT_ID,
-      device_code: deviceCode,
-      code_verifier: codeVerifier,
-    }),
+    headers,
+    body,
   });
 
   const data = await response.json();

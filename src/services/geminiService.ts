@@ -65,7 +65,7 @@ export function buildPromptText(
   return prompt;
 }
 
-export async function rewriteQueryWithGemini(query: string): Promise<{optimizedQuery: string, intent: string}> {
+export async function rewriteQueryWithGemini(query: string, apiKey?: string): Promise<{optimizedQuery: string, intent: string}> {
   if (!query || query.trim() === '') return { optimizedQuery: query, intent: 'GENERAL' };
   
   const prompt = `You are an AI assistant optimizing a search query for a Retrieval-Augmented Generation (RAG) system operating on a code repository.
@@ -89,7 +89,9 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
 }`;
 
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const keyToUse = apiKey || process.env.GEMINI_API_KEY;
+    if (!keyToUse) throw new Error("Gemini API key is missing");
+    const ai = new GoogleGenAI({ apiKey: keyToUse });
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: prompt,
@@ -118,11 +120,14 @@ export async function generateSystemPrompt(
   usedOllama?: boolean,
   referenceRepoData?: RepoData,
   attachedDocs?: {name: string, content: string}[],
-  fileTruncationLimit?: number
+  fileTruncationLimit?: number,
+  apiKey?: string
 ): Promise<{ text: string, modelVersion: string }> {
   const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs, fileTruncationLimit);
 
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  const keyToUse = apiKey || process.env.GEMINI_API_KEY;
+  if (!keyToUse) throw new Error("Gemini API key is missing");
+  const ai = new GoogleGenAI({ apiKey: keyToUse });
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
     contents: prompt,

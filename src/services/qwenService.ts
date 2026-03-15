@@ -1,5 +1,7 @@
 import { RepoData } from "./githubService";
 import { buildPromptText } from "./geminiService";
+import { isTauri } from "../utils/tauri";
+import { tauriFetch } from "../utils/tauriFetch";
 
 let lastQwenRequestTime = 0;
 const QWEN_MIN_DELAY_MS = 2500; // 2.5 seconds minimum delay between requests
@@ -27,17 +29,59 @@ Query: "${query}"`;
 
   try {
     await enforceQwenRateLimit();
-    const response = await fetch("/api/qwen", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        token,
-        resourceUrl,
-        prompt,
+    
+    let response;
+    if (isTauri()) {
+      const payload: any = {
         model: "coder-model",
-        isJson: true
-      })
-    });
+        messages: [
+          { role: "system", content: "You are an expert software architect. Output clean markdown." },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.1,
+        response_format: { type: "json_object" }
+      };
+
+      let endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+      if (resourceUrl) {
+        let baseUrl = resourceUrl;
+        if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
+          baseUrl = "https://" + baseUrl;
+        }
+        try {
+          const urlObj = new URL(baseUrl);
+          if (urlObj.pathname === "/" || urlObj.pathname === "") {
+             endpoint = new URL("/v1/chat/completions", baseUrl).toString();
+          } else {
+             endpoint = baseUrl;
+          }
+        } catch (e) {
+          endpoint = baseUrl;
+        }
+      }
+
+      response = await tauriFetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+    } else {
+      response = await fetch("/api/qwen", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token,
+          resourceUrl,
+          prompt,
+          model: "coder-model",
+          isJson: true
+        })
+      });
+    }
+    
     updateQwenRequestTime();
 
     const data = await response.json();
@@ -48,7 +92,13 @@ Query: "${query}"`;
       throw err;
     }
 
-    const text = data.output?.text || '{}';
+    let text = '{}';
+    if (isTauri()) {
+      text = data.choices?.[0]?.message?.content || '{}';
+    } else {
+      text = data.output?.text || '{}';
+    }
+    
     const parsed = JSON.parse(text);
     return {
       optimizedQuery: parsed.optimizedQuery || query,
@@ -77,17 +127,58 @@ export async function generateSystemPromptWithQwen(
   const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs, fileTruncationLimit);
 
   await enforceQwenRateLimit();
-  const response = await fetch("/api/qwen", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      token,
-      resourceUrl,
-      prompt,
+  
+  let response;
+  if (isTauri()) {
+    const payload: any = {
       model: "coder-model",
-      isJson: false
-    })
-  });
+      messages: [
+        { role: "system", content: "You are an expert software architect. Output clean markdown." },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.3,
+    };
+
+    let endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+    if (resourceUrl) {
+      let baseUrl = resourceUrl;
+      if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
+        baseUrl = "https://" + baseUrl;
+      }
+      try {
+        const urlObj = new URL(baseUrl);
+        if (urlObj.pathname === "/" || urlObj.pathname === "") {
+           endpoint = new URL("/v1/chat/completions", baseUrl).toString();
+        } else {
+           endpoint = baseUrl;
+        }
+      } catch (e) {
+        endpoint = baseUrl;
+      }
+    }
+
+    response = await tauriFetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+  } else {
+    response = await fetch("/api/qwen", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        token,
+        resourceUrl,
+        prompt,
+        model: "coder-model",
+        isJson: false
+      })
+    });
+  }
+  
   updateQwenRequestTime();
 
   const data = await response.json();
@@ -98,7 +189,12 @@ export async function generateSystemPromptWithQwen(
     throw err;
   }
 
-  let finalPrompt = data.output?.text || "Failed to generate prompt.";
+  let finalPrompt = "Failed to generate prompt.";
+  if (isTauri()) {
+    finalPrompt = data.choices?.[0]?.message?.content || finalPrompt;
+  } else {
+    finalPrompt = data.output?.text || finalPrompt;
+  }
 
   return { 
     text: finalPrompt, 
