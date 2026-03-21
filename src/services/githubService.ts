@@ -52,6 +52,7 @@ export async function fetchRepoData(url: string, token?: string, maxFiles: numbe
       headers: {
         'Content-Type': 'application/json',
       },
+      signal: AbortSignal.timeout(60000), // 60s timeout for repo fetch
       body: JSON.stringify({ owner, repo, branch, token, maxFiles }),
     });
 

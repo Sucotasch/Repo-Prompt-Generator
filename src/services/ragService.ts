@@ -11,9 +11,9 @@ export interface RagChunk {
  * Fetches an embedding for a piece of text from Ollama.
  * Uses local caching to avoid redundant API calls.
  */
-export async function getEmbedding(text: string, ollamaUrl: string, model: string): Promise<number[]> {
+export async function getEmbedding(text: string, ollamaUrl: string, model: string, repoUrl: string): Promise<number[]> {
   // Try to get from cache first
-  const cached = await EmbeddingCacheService.getEmbedding(text, model);
+  const cached = await EmbeddingCacheService.getEmbedding(text, model, repoUrl);
   if (cached) return cached;
 
   const res = await fetch(`${ollamaUrl.replace(/\/$/, '')}/api/embeddings`, {
@@ -34,7 +34,7 @@ export async function getEmbedding(text: string, ollamaUrl: string, model: strin
   const embedding = data.embedding;
 
   // Save to cache
-  await EmbeddingCacheService.saveEmbedding(text, model, embedding);
+  await EmbeddingCacheService.saveEmbedding(text, model, embedding, repoUrl);
 
   return embedding;
 }
@@ -94,6 +94,7 @@ export async function performRAG(
   intent: string,
   ollamaUrl: string,
   model: string,
+  repoUrl: string,
   topK: number = 10,
   searchStrategy: number = 0.5, // 0 = Pure Vector, 1 = Pure BM25
   onProgress?: (msg: string) => void
@@ -110,7 +111,7 @@ Analyze the provided code snippets. When determining relevance:
   let queryEmbedding: number[];
   try {
     // We don't cache the query embedding as it's dynamic and small
-    queryEmbedding = await getEmbedding(query + "\n" + RAG_SYSTEM_INSTRUCTION, ollamaUrl, model);
+    queryEmbedding = await getEmbedding(query + "\n" + RAG_SYSTEM_INSTRUCTION, ollamaUrl, model, repoUrl);
   } catch (e: any) {
     throw new Error(`Failed to embed query. Details: ${e.message}`);
   }
@@ -142,7 +143,7 @@ Analyze the provided code snippets. When determining relevance:
       onProgress?.(`Embedding code chunks... (${processed}/${allChunks.length})`);
     }
     try {
-      chunk.embedding = await getEmbedding(chunk.content, ollamaUrl, model);
+      chunk.embedding = await getEmbedding(chunk.content, ollamaUrl, model, repoUrl);
     } catch (e) {
       console.warn(`Failed to embed chunk from ${chunk.path}`, e);
     }

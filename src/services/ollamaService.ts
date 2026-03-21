@@ -2,7 +2,9 @@ import { RepoData } from './githubService';
 
 export async function checkOllamaConnection(url: string): Promise<boolean> {
   try {
-    const res = await fetch(`${url}/api/tags`);
+    const res = await fetch(`${url}/api/tags`, {
+      signal: AbortSignal.timeout(3000) // 3s timeout for quick check
+    });
     return res.ok;
   } catch (e) {
     return false;
@@ -11,7 +13,9 @@ export async function checkOllamaConnection(url: string): Promise<boolean> {
 
 export async function fetchOllamaModels(url: string): Promise<string[]> {
   try {
-    const res = await fetch(`${url}/api/tags`);
+    const res = await fetch(`${url}/api/tags`, {
+      signal: AbortSignal.timeout(5000) // 5s timeout for model list
+    });
     if (!res.ok) return [];
     const data = await res.json();
     return data.models?.map((m: any) => m.name) || [];

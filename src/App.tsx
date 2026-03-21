@@ -122,6 +122,29 @@ export default function App() {
   const [cachedRepoData, setCachedRepoData] = useState<any>(null);
   const [cacheKey, setCacheKey] = useState<string>('');
 
+  // Auto-clear RAG query optimization cache when repo or template changes
+  // AND Prune unused embedding caches
+  useEffect(() => {
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('rag_opt_')) {
+        keysToRemove.push(key);
+      }
+    }
+    if (keysToRemove.length > 0) {
+      console.log(`[Auto-Clear] Repo/Template changed. Clearing ${keysToRemove.length} stale RAG query optimizations.`);
+      keysToRemove.forEach(key => localStorage.removeItem(key));
+    }
+
+    // Prune unused embedding caches (surgical cleanup)
+    const activeRepos = [url];
+    if (useReferenceRepo && referenceUrl) {
+      activeRepos.push(referenceUrl);
+    }
+    EmbeddingCacheService.pruneUnusedCaches(activeRepos);
+  }, [url, templateMode, referenceUrl, useReferenceRepo]);
+
   useEffect(() => {
     const settings = {
       inputMode,
@@ -567,7 +590,10 @@ pause`;
             setStatus('Optimizing RAG query with LLM...');
             try {
               // Simple caching to avoid repeated LLM calls for the same custom template
-              const cacheKey = `rag_opt_${aiProvider}_${baseQuery.length}_${baseQuery.substring(0, 50)}`;
+              // We include more context in the key to prevent stale results when instructions change
+              const queryHash = baseQuery.length + "_" + baseQuery.substring(0, 30) + "_" + baseQuery.substring(baseQuery.length - 30);
+              const contextHash = additionalContext.length + "_" + additionalContext.substring(0, 20);
+              const cacheKey = `rag_opt_${aiProvider}_${templateMode}_${queryHash}_${contextHash}`;
               const cached = localStorage.getItem(cacheKey);
               
               if (cached) {
@@ -645,6 +671,7 @@ pause`;
             queryIntent,
             ollamaUrl,
             ragModel,
+            url, // Target repo URL
             ragTopK,
             ragSearchStrategy,
             (msg) => setStatus(msg)
@@ -659,6 +686,7 @@ pause`;
               queryIntent,
               ollamaUrl,
               ragModel,
+              referenceUrl, // Reference repo URL
               ragTopK,
               ragSearchStrategy,
               (msg) => setStatus(msg)
