@@ -19,6 +19,7 @@ export async function rewriteQuery(
     customApiKey?: string;
     customModel?: string;
     geminiApiKey?: string;
+    proxyAddress?: string;
   }
 ): Promise<{optimizedQuery: string, intent: string, rateLimit?: { remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string }}> {
   if (provider === 'qwen' && options?.qwenToken) {
@@ -29,7 +30,7 @@ export async function rewriteQuery(
     return await rewriteQueryWithOpenAICompatible(query, options.customBaseUrl, options.customApiKey, options.customModel);
   } else {
     // Default to Gemini
-    return await rewriteQueryWithGemini(query, options?.geminiApiKey);
+    return await rewriteQueryWithGemini(query, options?.geminiApiKey, options?.proxyAddress);
   }
 }
 
@@ -50,26 +51,29 @@ export async function generatePrompt(
     customBaseUrl?: string;
     customApiKey?: string;
     customModel?: string;
-    fileTruncationLimit?: number;
     geminiApiKey?: string;
+    proxyAddress?: string;
+    fileTruncationLimit?: number;
   }
 ): Promise<{ text: string, modelVersion: string, rateLimit?: { remainingRequests: string, resetRequests: string, remainingTokens: string, resetTokens: string } }> {
+  const fileTruncationLimit = options?.fileTruncationLimit ?? 0;
+
   if (provider === 'qwen' && options?.qwenToken) {
     return await generateSystemPromptWithQwen(
-      repoData, taskInstruction, options.qwenToken, additionalContext, analyzeIssues, usedOllama, referenceRepoData, attachedDocs, options.qwenResourceUrl, options.fileTruncationLimit
+      repoData, taskInstruction, options.qwenToken, additionalContext, analyzeIssues, usedOllama, referenceRepoData, attachedDocs, options.qwenResourceUrl, 0
     );
   } else if (provider === 'ollama' && options?.ollamaUrl && options?.ollamaModel) {
-    const promptText = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs, options.fileTruncationLimit);
+    const promptText = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs, fileTruncationLimit);
     const text = await generate_final_prompt_with_ollama(promptText, options.ollamaUrl, options.ollamaModel);
     return { text, modelVersion: `ollama/${options.ollamaModel}` };
   } else if (provider === 'custom' && options?.customBaseUrl && options?.customApiKey && options?.customModel) {
-    const promptText = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs, options.fileTruncationLimit);
+    const promptText = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs, 0);
     const text = await generate_final_prompt_with_openai_compatible(promptText, options.customBaseUrl, options.customApiKey, options.customModel);
     return { text, modelVersion: `custom/${options.customModel}` };
   } else {
     // Default to Gemini
     return await geminiGenerate(
-      repoData, taskInstruction, additionalContext, analyzeIssues, usedOllama, referenceRepoData, attachedDocs, options?.fileTruncationLimit, options?.geminiApiKey
+      repoData, taskInstruction, options?.geminiApiKey || '', options?.proxyAddress || '', additionalContext, analyzeIssues, usedOllama, referenceRepoData, attachedDocs, 0
     );
   }
 }

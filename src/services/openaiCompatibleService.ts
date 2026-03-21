@@ -1,12 +1,14 @@
-import { tauriFetch } from '../utils/tauriFetch';
-
 export async function fetchOpenAICompatibleModels(baseURL: string, apiKey: string): Promise<string[]> {
   try {
-    const response = await tauriFetch(`${baseURL.replace(/\/$/, '')}/models`, {
-      method: 'GET',
+    const response = await fetch(`/api/openai-compatible/models`, {
+      method: 'POST',
       headers: {
-        'Authorization': `Bearer ${apiKey}`
-      }
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        baseUrl: baseURL,
+        apiKey: apiKey
+      })
     });
 
     if (!response.ok) {
@@ -16,6 +18,9 @@ export async function fetchOpenAICompatibleModels(baseURL: string, apiKey: strin
         const errorData = JSON.parse(text);
         if (errorData.error?.message) {
           errorMessage = errorData.error.message;
+          if (errorData.error.metadata) {
+            errorMessage += ` (Metadata: ${JSON.stringify(errorData.error.metadata)})`;
+          }
         } else if (errorData.message) {
           errorMessage = errorData.message;
         } else {
@@ -29,7 +34,9 @@ export async function fetchOpenAICompatibleModels(baseURL: string, apiKey: strin
 
     const data = await response.json();
     if (data && data.data && Array.isArray(data.data)) {
-      return data.data.map((model: any) => model.id);
+      const models = data.data.map((model: any) => model.id).filter(Boolean);
+      const uniqueModels = Array.from(new Set(models)) as string[];
+      return uniqueModels.sort((a, b) => a.localeCompare(b));
     }
     return [];
   } catch (error) {
@@ -45,18 +52,20 @@ export async function generate_final_prompt_with_openai_compatible(
   modelName: string,
   temperature: number = 0.3
 ): Promise<string> {
-  const response = await tauriFetch(`${baseURL.replace(/\/$/, '')}/chat/completions`, {
+  const response = await fetch(`/api/openai-compatible/chat`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      model: modelName,
-      messages: [
-        { role: 'user', content: promptText }
-      ],
-      temperature: temperature
+      baseUrl: baseURL,
+      apiKey: apiKey,
+      payload: {
+        model: modelName,
+        messages: [
+          { role: 'user', content: promptText }
+        ]
+      }
     })
   });
 
@@ -67,6 +76,9 @@ export async function generate_final_prompt_with_openai_compatible(
       const errorData = JSON.parse(text);
       if (errorData.error?.message) {
         errorMessage = errorData.error.message;
+        if (errorData.error?.metadata) {
+          errorMessage += ` (Metadata: ${JSON.stringify(errorData.error.metadata)})`;
+        }
       } else if (errorData.message) {
         errorMessage = errorData.message;
       } else {
@@ -89,10 +101,8 @@ export async function rewriteQueryWithOpenAICompatible(
   modelName: string
 ): Promise<{optimizedQuery: string, intent: string}> {
   const systemPrompt = `You are a search query optimizer for a codebase RAG system.
-Given a user's task description, extract MULTIPLE concrete technical search queries that would find relevant code.
-Generate exactly 3 distinct queries covering different aspects of the request (e.g., one for architecture, one for dependencies, one for specific APIs).
-If the user query is in another language, translate the search keywords to English to match the codebase.
-Separate the 3 queries using the pipe character (|).
+Given a user's task description, extract the core technical keywords, function names, and concepts that are most likely to be found in the source code.
+Output ONLY the optimized search query, nothing else. No explanations.
 
 Also, determine the intent of the query. Is it:
 - ARCHITECTURE: asking about high-level structure, patterns, or how things connect.
@@ -103,23 +113,25 @@ Also, determine the intent of the query. Is it:
 
 Return your response in the following JSON format:
 {
-  "optimizedQuery": "query 1 keywords | query 2 keywords | query 3 keywords",
+  "optimizedQuery": "keyword1 keyword2 functionName",
   "intent": "ARCHITECTURE"
 }`;
 
-  const response = await tauriFetch(`${baseURL.replace(/\/$/, '')}/chat/completions`, {
+  const response = await fetch(`/api/openai-compatible/chat`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      model: modelName,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: query }
-      ],
-      temperature: 0.1
+      baseUrl: baseURL,
+      apiKey: apiKey,
+      payload: {
+        model: modelName,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: query }
+        ]
+      }
     })
   });
 
@@ -130,6 +142,9 @@ Return your response in the following JSON format:
       const errorData = JSON.parse(text);
       if (errorData.error?.message) {
         errorMessage = errorData.error.message;
+        if (errorData.error?.metadata) {
+          errorMessage += ` (Metadata: ${JSON.stringify(errorData.error.metadata)})`;
+        }
       } else if (errorData.message) {
         errorMessage = errorData.message;
       } else {

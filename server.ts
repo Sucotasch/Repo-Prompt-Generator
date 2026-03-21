@@ -7,7 +7,8 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json());
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
   // API route to fetch GitHub data
   app.post("/api/repo", async (req, res) => {
@@ -328,6 +329,53 @@ async function startServer() {
       }
       
       res.status(response.status).json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Proxy for OpenAI-compatible /models
+  app.post("/api/openai-compatible/models", async (req, res) => {
+    try {
+      const { baseUrl, apiKey } = req.body;
+      if (!baseUrl || !apiKey) {
+        return res.status(400).json({ error: "baseUrl and apiKey are required" });
+      }
+      const response = await fetch(`${baseUrl.replace(/\/$/, '')}/models`, {
+        headers: { 
+          'Authorization': `Bearer ${apiKey}`,
+          'HTTP-Referer': 'https://ais-dev.run.app',
+          'X-Title': 'AI Studio Applet',
+          'User-Agent': 'AI-Studio-Applet/1.0'
+        }
+      });
+      const text = await response.text();
+      res.status(response.status).send(text);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Proxy for OpenAI-compatible /chat/completions
+  app.post("/api/openai-compatible/chat", async (req, res) => {
+    try {
+      const { baseUrl, apiKey, payload } = req.body;
+      if (!baseUrl || !apiKey || !payload) {
+        return res.status(400).json({ error: "baseUrl, apiKey, and payload are required" });
+      }
+      const response = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://ais-dev.run.app',
+          'X-Title': 'AI Studio Applet',
+          'User-Agent': 'AI-Studio-Applet/1.0'
+        },
+        body: JSON.stringify(payload)
+      });
+      const text = await response.text();
+      res.status(response.status).send(text);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

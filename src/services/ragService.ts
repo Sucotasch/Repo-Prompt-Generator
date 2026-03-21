@@ -1,5 +1,3 @@
-import { tauriFetch } from '../utils/tauriFetch';
-
 export interface RagChunk {
   path: string;
   content: string;
@@ -7,20 +5,20 @@ export interface RagChunk {
 }
 
 export async function getEmbedding(text: string, ollamaUrl: string, model: string): Promise<number[]> {
-  const res = await tauriFetch(`${ollamaUrl.replace(/\/$/, '')}/api/embeddings`, {
+  const res = await fetch(`${ollamaUrl.replace(/\/$/, '')}/api/embeddings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ 
-      model, 
+    body: JSON.stringify({
+      model,
       prompt: text
     })
   });
-  
+
   if (!res.ok) {
     const errText = await res.text();
     throw new Error(`Embedding failed (${res.status}): ${errText}`);
   }
-  
+
   const data = await res.json();
   return data.embedding;
 }
@@ -44,44 +42,37 @@ function chunkText(text: string, linesPerChunk: number = 30): string[] {
   // Overlapping chunks by 5 lines to preserve context across boundaries
   const overlap = 5;
   const step = linesPerChunk - overlap;
-  
+
   for (let i = 0; i < lines.length; i += step) {
     let chunk = lines.slice(i, i + linesPerChunk).join('\n');
-    
+
     // Fallback: If a chunk is insanely large (e.g., minified code or base64 on a single line),
-    // split it by spaces to avoid breaking words.
+    // force-split it by character length to prevent Ollama 500 errors.
+    // We use a very safe limit of 8000 characters (approx 2000 tokens) to accommodate 
+    // embedding models with smaller context windows (e.g. 2048 tokens).
     const MAX_CHARS = 8000;
     if (chunk.length > MAX_CHARS) {
-      let currentIdx = 0;
-      while (currentIdx < chunk.length) {
-        let endIdx = currentIdx + MAX_CHARS;
-        if (endIdx < chunk.length) {
-          const spaceIdx = chunk.lastIndexOf(' ', endIdx);
-          if (spaceIdx > currentIdx + (MAX_CHARS / 2)) {
-            endIdx = spaceIdx;
-          }
-        }
-        chunks.push(chunk.substring(currentIdx, endIdx));
-        currentIdx = endIdx + (chunk[endIdx] === ' ' ? 1 : 0);
+      for (let j = 0; j < chunk.length; j += MAX_CHARS) {
+        chunks.push(chunk.substring(j, j + MAX_CHARS));
       }
     } else {
       chunks.push(chunk);
     }
-    
+
     if (i + linesPerChunk >= lines.length) break;
   }
   return chunks;
 }
 
 export async function performRAG(
-  sourceFiles: {path: string, content: string}[],
+  sourceFiles: { path: string, content: string }[],
   query: string,
   intent: string,
   ollamaUrl: string,
   model: string,
   topK: number = 10,
   onProgress?: (msg: string) => void
-): Promise<{path: string, content: string}[]> {
+): Promise<{ path: string, content: string }[]> {
   
   const RAG_SYSTEM_INSTRUCTION = `
 Analyze the provided code snippets. When determining relevance:
@@ -90,24 +81,19 @@ Analyze the provided code snippets. When determining relevance:
 3. Prioritize files containing the specific "Retrieval Keywords" provided in the query.
 `;
 
-  const queries = query.split('|').map(q => q.trim()).filter(q => q.length > 0);
-  if (queries.length === 0) queries.push(query);
-
-  const queryEmbeddings: number[][] = [];
-  for (let i = 0; i < queries.length; i++) {
-    onProgress?.(`Generating embedding for query ${i + 1}/${queries.length}...`);
-    try {
-      queryEmbeddings.push(await getEmbedding(queries[i] + "\n" + RAG_SYSTEM_INSTRUCTION, ollamaUrl, model));
-    } catch (e: any) {
-      throw new Error(`Failed to embed query. Make sure you have pulled the model (e.g., 'ollama pull ${model}'). Details: ${e.message}`);
-    }
+  onProgress?.('Generating embedding for your query...');
+  let queryEmbedding: number[];
+  try {
+    queryEmbedding = await getEmbedding(query + "\n" + RAG_SYSTEM_INSTRUCTION, ollamaUrl, model);
+  } catch (e: any) {
+    throw new Error(`Failed to embed query. Make sure you have pulled the model (e.g., 'ollama pull ${model}'). Details: ${e.message}`);
   }
 
   const allChunks: { path: string, content: string, embedding?: number[] }[] = [];
-  
+
   for (const file of sourceFiles) {
     // 30 lines per chunk is safer for embedding models
-    const chunks = chunkText(file.content, 30); 
+    const chunks = chunkText(file.content, 30);
     for (let i = 0; i < chunks.length; i++) {
       allChunks.push({
         path: `${file.path} (Part ${i + 1})`,
@@ -132,36 +118,35 @@ Analyze the provided code snippets. When determining relevance:
 
   onProgress?.('Calculating semantic similarity with intent-aware reranking...');
   
-  // Extract keywords for lexical boost (hybrid search)
-  const keywords = query.toLowerCase().match(/\b\w{3,}\b/g) || [];
-  const uniqueKeywords = [...new Set(keywords)];
+  // Extract simple keywords from the original query to do hybrid lexical boosting
+  // We remove common stop words and keep words >= 3 chars
+  const stopWords = ['what', 'where', 'when', 'how', 'why', 'who', 'the', 'and', 'for', 'with', 'about', 'this', 'that'];
+  const rawKeywords = query.toLowerCase().split(/[\s,.;]+/).filter(w => w.length >= 3 && !stopWords.includes(w));
+  // Keep only up to 5 of the most unique/longest words to prevent over-boosting common terms
+  const keywords = rawKeywords.sort((a, b) => b.length - a.length).slice(0, 5);
 
   const scoredChunks = allChunks
     .filter(c => c.embedding)
     .map(c => {
-      let maxSemanticScore = 0;
-      for (const qe of queryEmbeddings) {
-        const score = cosineSimilarity(qe, c.embedding!);
-        if (score > maxSemanticScore) maxSemanticScore = score;
-      }
-      let score = maxSemanticScore;
+      let score = cosineSimilarity(queryEmbedding, c.embedding!);
       
-      // Lexical Boost (Hybrid Search)
-      let lexicalBoost = 0;
-      for (const kw of uniqueKeywords) {
-        // Use word boundary regex for exact matches
-        const regex = new RegExp(`\\b${kw}\\b`, 'gi');
-        const matches = c.content.match(regex);
-        if (matches) {
-          lexicalBoost += Math.min(matches.length * 0.02, 0.1);
-        }
-      }
-      score += lexicalBoost;
-      
-      // Intent-Aware Reranking Multipliers
       const pathLower = c.path.toLowerCase();
       const contentLower = c.content.toLowerCase();
-      
+
+      // Hybrid Lexical Boosting: Check for exact keyword matches
+      let keywordMatches = 0;
+      for (const kw of keywords) {
+        if (contentLower.includes(kw) || pathLower.includes(kw)) {
+          keywordMatches++;
+        }
+      }
+      // If a specific keyword is found, significantly boost the semantic score
+      // Adding 0.5 absolutely guarantees it outranks generic semantic matches
+      if (keywordMatches > 0) {
+        score += (0.50 * keywordMatches);
+      }
+
+      // Intent-Aware Reranking Multipliers
       if (intent === 'BUG_HUNT') {
         if (pathLower.includes('.test.') || pathLower.includes('.spec.')) score *= 1.1;
         if (contentLower.includes('error') || contentLower.includes('catch') || contentLower.includes('throw')) score *= 1.1;
@@ -181,44 +166,8 @@ Analyze the provided code snippets. When determining relevance:
     })
     .sort((a, b) => b.score - a.score);
 
-  const topChunks = scoredChunks.slice(0, topK);
-  
-  // Group by original file path
-  const groupedChunks = new Map<string, { content: string, partIndex: number, score: number }[]>();
-  
-  for (const c of topChunks) {
-    const match = c.path.match(/^(.*) \(Part (\d+)\)$/);
-    const originalPath = match ? match[1] : c.path;
-    const partIndex = match ? parseInt(match[2], 10) : 0;
-    
-    if (!groupedChunks.has(originalPath)) {
-      groupedChunks.set(originalPath, []);
-    }
-    groupedChunks.get(originalPath)!.push({ content: c.content, partIndex, score: c.score });
-  }
-  
-  const mergedFiles: {path: string, content: string}[] = [];
-  
-  for (const [path, chunks] of groupedChunks.entries()) {
-    // Sort chunks by their original order in the file
-    chunks.sort((a, b) => a.partIndex - b.partIndex);
-    
-    const maxScore = Math.max(...chunks.map(c => c.score));
-    let mergedContent = `// RAG Semantic Similarity Score: ${(maxScore * 100).toFixed(1)}% (Intent: ${intent})\n`;
-    
-    for (let i = 0; i < chunks.length; i++) {
-      mergedContent += chunks[i].content;
-      if (i < chunks.length - 1) {
-        if (chunks[i+1].partIndex > chunks[i].partIndex + 1) {
-          mergedContent += `\n\n... (code omitted) ...\n\n`;
-        } else {
-          mergedContent += `\n`;
-        }
-      }
-    }
-    
-    mergedFiles.push({ path, content: mergedContent });
-  }
-
-  return mergedFiles;
+  return scoredChunks.slice(0, topK).map(c => ({
+    path: c.path,
+    content: `// RAG Semantic Similarity Score: ${(c.score * 100).toFixed(1)}% (Intent: ${intent})\n${c.content}`
+  }));
 }

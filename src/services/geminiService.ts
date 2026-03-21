@@ -1,16 +1,19 @@
+/// <reference types="vite/client" />
 import { GoogleGenAI } from "@google/genai";
 import { RepoData } from "./githubService";
 
 export function buildPromptText(
-  repoData: RepoData, 
+  repoData: RepoData,
   taskInstruction: string,
   additionalContext?: string, 
   analyzeIssues?: boolean,
   referenceRepoData?: RepoData,
   attachedDocs?: {name: string, content: string}[],
-  fileTruncationLimit?: number
+  fileTruncationLimit: number = 0
 ): string {
-  let prompt = `<SYSTEM_TEMPLATE>\n${taskInstruction}\n</SYSTEM_TEMPLATE>\n\n`;
+  let prompt = ``;
+
+  const truncate = (text: string) => fileTruncationLimit === 0 ? text : text.substring(0, fileTruncationLimit);
 
   if (attachedDocs && attachedDocs.length > 0) {
     prompt += `<EXTERNAL_DOCUMENTS>\n`;
@@ -28,10 +31,10 @@ export function buildPromptText(
   }
   prompt += `Description: ${repoData.info.description}\n\n`;
   prompt += `File Tree (partial):\n${repoData.tree.slice(0, 500).join('\n')}\n\n`;
-  prompt += `README:\n${fileTruncationLimit && fileTruncationLimit > 0 ? repoData.readme.substring(0, fileTruncationLimit) : repoData.readme}\n\n`;
-  prompt += `Dependencies:\n${fileTruncationLimit && fileTruncationLimit > 0 ? repoData.dependencies.substring(0, fileTruncationLimit) : repoData.dependencies}\n`;
+  prompt += `README:\n${truncate(repoData.readme)}\n\n`;
+  prompt += `Dependencies:\n${truncate(repoData.dependencies)}\n`;
   if (repoData.sourceFiles && repoData.sourceFiles.length > 0) {
-    prompt += `\nKey Source Files:\n${repoData.sourceFiles.map(f => `--- ${f.path} ---\n${fileTruncationLimit && fileTruncationLimit > 0 ? f.content.substring(0, fileTruncationLimit) : f.content}\n`).join('\n')}`;
+    prompt += `\nKey Source Files:\n${repoData.sourceFiles.map(f => `--- ${f.path} ---\n${truncate(f.content)}\n`).join('\n')}`;
   }
 
   if (referenceRepoData) {
@@ -42,66 +45,64 @@ export function buildPromptText(
     }
     prompt += `Description: ${referenceRepoData.info.description}\n\n`;
     prompt += `File Tree (partial):\n${referenceRepoData.tree.slice(0, 500).join('\n')}\n\n`;
-    prompt += `README:\n${fileTruncationLimit && fileTruncationLimit > 0 ? referenceRepoData.readme.substring(0, fileTruncationLimit) : referenceRepoData.readme}\n\n`;
-    prompt += `Dependencies:\n${fileTruncationLimit && fileTruncationLimit > 0 ? referenceRepoData.dependencies.substring(0, fileTruncationLimit) : referenceRepoData.dependencies}\n`;
+    prompt += `README:\n${truncate(referenceRepoData.readme)}\n\n`;
+    prompt += `Dependencies:\n${truncate(referenceRepoData.dependencies)}\n`;
     if (referenceRepoData.sourceFiles && referenceRepoData.sourceFiles.length > 0) {
-      prompt += `\nKey Source Files:\n${referenceRepoData.sourceFiles.map(f => `--- ${f.path} ---\n${fileTruncationLimit && fileTruncationLimit > 0 ? f.content.substring(0, fileTruncationLimit) : f.content}\n`).join('\n')}`;
+      prompt += `\nKey Source Files:\n${referenceRepoData.sourceFiles.map(f => `--- ${f.path} ---\n${truncate(f.content)}\n`).join('\n')}`;
     }
   }
   prompt += `\n</CODEBASE>\n\n`;
 
   prompt += `<FINAL_TASK>\n`;
-  prompt += `CRITICAL INSTRUCTION: You must now execute the following task based on the codebase provided above:\n`;
-  prompt += `--- TASK START ---\n${taskInstruction}\n--- TASK END ---\n\n`;
-  
-  if (additionalContext && additionalContext.trim()) {
-    prompt += `Additional Context/Instructions:\n${additionalContext.trim()}\n\n`;
-  }
+  prompt += `PRIMARY DIRECTIVE:\n${taskInstruction}\n\n`;
   if (analyzeIssues) {
-    prompt += `CRITICAL INSTRUCTION: Perform a preliminary analysis of the provided repository data. Identify any obvious errors, bugs, architectural inconsistencies, or critically outdated dependencies. Include these findings directly in the generated output.\n\n`;
+    prompt += `SECONDARY REQUEST: After completing your main primary objective, perform a brief analysis of the repository data to identify any obvious errors, bugs, architectural inconsistencies, or critically outdated dependencies. Add these findings at the end of your response.\n\n`;
   }
+  if (additionalContext && additionalContext.trim()) {
+    prompt += `USER ADDITIONAL CONTEXT / CONSTRAINTS:\n${additionalContext.trim()}\n\n`;
+  }
+  prompt += `CRITICAL REMINDER: Your absolute highest priority is to comprehensively answer and execute the user's instructions defined in the PRIMARY DIRECTIVE above. Do not lose focus on the primary objective. Ensure your final output is primarily dedicated to fulfilling that specific request.\n`;
   prompt += `</FINAL_TASK>\n`;
 
   return prompt;
 }
 
-export async function rewriteQueryWithGemini(query: string, apiKey?: string): Promise<{optimizedQuery: string, intent: string}> {
+export async function rewriteQueryWithGemini(query: string, geminiApiKey?: string, proxyAddress?: string): Promise<{optimizedQuery: string, intent: string}> {
   if (!query || query.trim() === '') return { optimizedQuery: query, intent: 'GENERAL' };
   
   const prompt = `You are an AI assistant optimizing a search query for a Retrieval-Augmented Generation (RAG) system operating on a code repository.
 The user's original query is: "${query}"
 
 Your task is to:
-1. Extract MULTIPLE concrete technical search queries that would find relevant code.
-2. Generate exactly 3 distinct queries covering different aspects of the request (e.g., one for architecture, one for dependencies, one for specific APIs).
-3. Classify the intent (BUG_HUNT, ARCHITECTURE, UI_UX, DATA, GENERAL).
+1. Expand this query into 10-15 specific retrieval keywords.
+2. Classify the intent (BUG_HUNT, ARCHITECTURE, UI_UX, DATA, GENERAL).
 
 STRICT KEYWORD RULES:
 - MUST: Use concrete technical nouns, API names, function signatures, or file paths.
-- MUST: If the user query is in another language, translate the search keywords to English to match the codebase.
-- MUST: Separate the 3 queries using the pipe character (|).
+- MUST: Each keyword = ONE technical concept only.
 - MUST NOT: Use abstract themes (e.g., "cleaner code", "better performance").
+- MUST NOT: Use narrative/summary style keywords.
 
 Return ONLY a valid JSON object with the following structure, nothing else. Do not use markdown formatting blocks like \`\`\`json.
 {
-  "optimizedQuery": "query 1 keywords | query 2 keywords | query 3 keywords",
+  "optimizedQuery": "keyword1, keyword2, keyword3...",
   "intent": "CATEGORY_NAME"
 }`;
 
   try {
-    const keyToUse = apiKey || process.env.GEMINI_API_KEY;
-    if (!keyToUse) throw new Error("Gemini API key is missing");
-    const ai = new GoogleGenAI({ apiKey: keyToUse });
+    const ai = new GoogleGenAI({ apiKey: geminiApiKey || process.env.GEMINI_API_KEY || '' });
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: prompt,
       config: {
-        responseMimeType: "application/json"
+        responseMimeType: "application/json",
       }
     });
     
-    const text = response.text?.trim() || '{}';
-    const parsed = JSON.parse(text);
+    const text = response.text || '{}';
+    const cleanText = text.trim();
+    const parsed = JSON.parse(cleanText);
+    
     return {
       optimizedQuery: parsed.optimizedQuery || query,
       intent: parsed.intent || 'GENERAL'
@@ -113,30 +114,32 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
 }
 
 export async function generateSystemPrompt(
-  repoData: RepoData, 
+  repoData: RepoData,
   taskInstruction: string,
+  geminiApiKey: string,
+  proxyAddress: string,
   additionalContext?: string, 
   analyzeIssues?: boolean, 
   usedOllama?: boolean,
   referenceRepoData?: RepoData,
   attachedDocs?: {name: string, content: string}[],
-  fileTruncationLimit?: number,
-  apiKey?: string
+  fileTruncationLimit: number = 0
 ): Promise<{ text: string, modelVersion: string }> {
   const prompt = buildPromptText(repoData, taskInstruction, additionalContext, analyzeIssues, referenceRepoData, attachedDocs, fileTruncationLimit);
 
-  const keyToUse = apiKey || process.env.GEMINI_API_KEY;
-  if (!keyToUse) throw new Error("Gemini API key is missing");
-  const ai = new GoogleGenAI({ apiKey: keyToUse });
+  const ai = new GoogleGenAI({ apiKey: geminiApiKey || process.env.GEMINI_API_KEY || '' });
   const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
+    model: "gemini-3.1-pro-preview",
     contents: prompt,
   });
 
   let finalPrompt = response.text || "Failed to generate prompt.";
+  if (usedOllama) {
+    finalPrompt = `> **Note:** This context was pre-processed by local LLM.\n\n` + finalPrompt;
+  }
 
-  // Extract model version from response if available, otherwise fallback to the requested model
-  const modelVersion = (response as any).modelVersion || (response as any).model || "gemini-3-flash-preview";
+  // Extract model version or fallback
+  const modelVersion = "gemini-3.1-pro-preview";
 
   return { text: finalPrompt, modelVersion };
 }

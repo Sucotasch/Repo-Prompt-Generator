@@ -16,8 +16,6 @@ Your audit must include:
 3. **Performance Impact**: Analyze any adverse performance impacts caused by the identified deficiencies (e.g., memory leaks, O(n^2) loops).
 4. **Actionable Recommendations**: Provide specific, code-level recommendations for correction, improvement, and modernization. 
 
-RECOMMENDATION: When explaining complex algorithms or problematic data flows, feel free to use Mermaid.js diagrams (e.g., \`\`\`mermaid sequenceDiagram...\`\`\`) to make it more visual. Always support your explanations with actual file paths and code snippets from the provided context.
-
 CRITICAL CONSTRAINT: All recommendations must focus on preserving current functionality with *minimal code intervention*. Do not suggest complete rewrites unless absolutely necessary. Format the output as a structured Markdown report.`,
   deliverables: [],
   successMetrics: [],
