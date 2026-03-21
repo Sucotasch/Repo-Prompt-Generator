@@ -1,10 +1,21 @@
+import { EmbeddingCacheService } from './embeddingCacheService';
+import { BM25, reciprocalRankFusion } from '../utils/hybridSearch';
+
 export interface RagChunk {
   path: string;
   content: string;
   score?: number;
 }
 
+/**
+ * Fetches an embedding for a piece of text from Ollama.
+ * Uses local caching to avoid redundant API calls.
+ */
 export async function getEmbedding(text: string, ollamaUrl: string, model: string): Promise<number[]> {
+  // Try to get from cache first
+  const cached = await EmbeddingCacheService.getEmbedding(text, model);
+  if (cached) return cached;
+
   const res = await fetch(`${ollamaUrl.replace(/\/$/, '')}/api/embeddings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -20,9 +31,17 @@ export async function getEmbedding(text: string, ollamaUrl: string, model: strin
   }
 
   const data = await res.json();
-  return data.embedding;
+  const embedding = data.embedding;
+
+  // Save to cache
+  await EmbeddingCacheService.saveEmbedding(text, model, embedding);
+
+  return embedding;
 }
 
+/**
+ * Calculates cosine similarity between two vectors.
+ */
 function cosineSimilarity(a: number[], b: number[]): number {
   let dotProduct = 0;
   let normA = 0;
@@ -36,6 +55,9 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
+/**
+ * Splits text into chunks for RAG.
+ */
 function chunkText(text: string, linesPerChunk: number = 30): string[] {
   const lines = text.split('\n');
   const chunks: string[] = [];
@@ -48,8 +70,6 @@ function chunkText(text: string, linesPerChunk: number = 30): string[] {
 
     // Fallback: If a chunk is insanely large (e.g., minified code or base64 on a single line),
     // force-split it by character length to prevent Ollama 500 errors.
-    // We use a very safe limit of 8000 characters (approx 2000 tokens) to accommodate 
-    // embedding models with smaller context windows (e.g. 2048 tokens).
     const MAX_CHARS = 8000;
     if (chunk.length > MAX_CHARS) {
       for (let j = 0; j < chunk.length; j += MAX_CHARS) {
@@ -64,6 +84,10 @@ function chunkText(text: string, linesPerChunk: number = 30): string[] {
   return chunks;
 }
 
+/**
+ * Performs RAG on a set of source files.
+ * Uses Hybrid Search (BM25 + Vector) and Embedding Caching.
+ */
 export async function performRAG(
   sourceFiles: { path: string, content: string }[],
   query: string,
@@ -71,6 +95,7 @@ export async function performRAG(
   ollamaUrl: string,
   model: string,
   topK: number = 10,
+  searchStrategy: number = 0.5, // 0 = Pure Vector, 1 = Pure BM25
   onProgress?: (msg: string) => void
 ): Promise<{ path: string, content: string }[]> {
   
@@ -81,18 +106,18 @@ Analyze the provided code snippets. When determining relevance:
 3. Prioritize files containing the specific "Retrieval Keywords" provided in the query.
 `;
 
-  onProgress?.('Generating embedding for your query...');
+  onProgress?.('Generating query embedding...');
   let queryEmbedding: number[];
   try {
+    // We don't cache the query embedding as it's dynamic and small
     queryEmbedding = await getEmbedding(query + "\n" + RAG_SYSTEM_INSTRUCTION, ollamaUrl, model);
   } catch (e: any) {
-    throw new Error(`Failed to embed query. Make sure you have pulled the model (e.g., 'ollama pull ${model}'). Details: ${e.message}`);
+    throw new Error(`Failed to embed query. Details: ${e.message}`);
   }
 
   const allChunks: { path: string, content: string, embedding?: number[] }[] = [];
 
   for (const file of sourceFiles) {
-    // 30 lines per chunk is safer for embedding models
     const chunks = chunkText(file.content, 30);
     for (let i = 0; i < chunks.length; i++) {
       allChunks.push({
@@ -102,11 +127,18 @@ Analyze the provided code snippets. When determining relevance:
     }
   }
 
+  if (allChunks.length === 0) return [];
+
+  // 1. BM25 Lexical Search
+  onProgress?.('Indexing for keyword search...');
+  const bm25 = new BM25(allChunks.map(c => c.content));
+  const bm25Scores = bm25.score(query);
+
+  // 2. Vector Semantic Search
   let processed = 0;
-  // Process sequentially to avoid overloading local Ollama instance
   for (const chunk of allChunks) {
     processed++;
-    if (processed % 5 === 0 || processed === 1) {
+    if (processed % 10 === 0 || processed === 1) {
       onProgress?.(`Embedding code chunks... (${processed}/${allChunks.length})`);
     }
     try {
@@ -116,58 +148,62 @@ Analyze the provided code snippets. When determining relevance:
     }
   }
 
-  onProgress?.('Calculating semantic similarity with intent-aware reranking...');
+  onProgress?.('Calculating hybrid scores and reranking...');
   
-  // Extract simple keywords from the original query to do hybrid lexical boosting
-  // We remove common stop words and keep words >= 3 chars
-  const stopWords = ['what', 'where', 'when', 'how', 'why', 'who', 'the', 'and', 'for', 'with', 'about', 'this', 'that'];
-  const rawKeywords = query.toLowerCase().split(/[\s,.;]+/).filter(w => w.length >= 3 && !stopWords.includes(w));
-  // Keep only up to 5 of the most unique/longest words to prevent over-boosting common terms
-  const keywords = rawKeywords.sort((a, b) => b.length - a.length).slice(0, 5);
+  // Calculate raw scores for both methods
+  const chunkScores = allChunks.map((chunk, index) => {
+    let semanticScore = chunk.embedding ? cosineSimilarity(queryEmbedding, chunk.embedding) : 0;
+    
+    // Apply Intent-Aware Reranking Multipliers to Semantic Score
+    const pathLower = chunk.path.toLowerCase();
+    const contentLower = chunk.content.toLowerCase();
+    
+    if (intent === 'BUG_HUNT') {
+      if (pathLower.includes('.test.') || pathLower.includes('.spec.')) semanticScore *= 1.1;
+      if (contentLower.includes('error') || contentLower.includes('catch') || contentLower.includes('throw')) semanticScore *= 1.1;
+    } else if (intent === 'ARCHITECTURE') {
+      if (pathLower.endsWith('.md') || pathLower.includes('docs/')) semanticScore *= 1.2;
+      if (pathLower.includes('types') || pathLower.includes('interfaces')) semanticScore *= 1.1;
+      if (pathLower.includes('index.') || pathLower.includes('main.') || pathLower.includes('app.')) semanticScore *= 1.1;
+    } else if (intent === 'UI_UX') {
+      if (pathLower.endsWith('.tsx') || pathLower.endsWith('.jsx') || pathLower.endsWith('.css') || pathLower.endsWith('.scss')) semanticScore *= 1.2;
+      if (pathLower.includes('components/') || pathLower.includes('views/') || pathLower.includes('pages/')) semanticScore *= 1.1;
+    } else if (intent === 'DATA') {
+      if (pathLower.endsWith('.sql') || pathLower.includes('db/') || pathLower.includes('models/')) semanticScore *= 1.2;
+      if (pathLower.includes('services/') || pathLower.includes('store/') || pathLower.includes('api/')) semanticScore *= 1.1;
+    }
 
-  const scoredChunks = allChunks
-    .filter(c => c.embedding)
-    .map(c => {
-      let score = cosineSimilarity(queryEmbedding, c.embedding!);
-      
-      const pathLower = c.path.toLowerCase();
-      const contentLower = c.content.toLowerCase();
+    return {
+      chunk,
+      semanticScore,
+      lexicalScore: bm25Scores[index]
+    };
+  });
 
-      // Hybrid Lexical Boosting: Check for exact keyword matches
-      let keywordMatches = 0;
-      for (const kw of keywords) {
-        if (contentLower.includes(kw) || pathLower.includes(kw)) {
-          keywordMatches++;
-        }
-      }
-      // If a specific keyword is found, significantly boost the semantic score
-      // Adding 0.5 absolutely guarantees it outranks generic semantic matches
-      if (keywordMatches > 0) {
-        score += (0.50 * keywordMatches);
-      }
+  // 3. Rank results for both methods
+  const vectorRanked = [...chunkScores]
+    .sort((a, b) => b.semanticScore - a.semanticScore)
+    .map(s => s.chunk);
+    
+  const lexicalRanked = [...chunkScores]
+    .sort((a, b) => b.lexicalScore - a.lexicalScore)
+    .map(s => s.chunk);
 
-      // Intent-Aware Reranking Multipliers
-      if (intent === 'BUG_HUNT') {
-        if (pathLower.includes('.test.') || pathLower.includes('.spec.')) score *= 1.1;
-        if (contentLower.includes('error') || contentLower.includes('catch') || contentLower.includes('throw')) score *= 1.1;
-      } else if (intent === 'ARCHITECTURE') {
-        if (pathLower.endsWith('.md') || pathLower.includes('docs/')) score *= 1.2;
-        if (pathLower.includes('types') || pathLower.includes('interfaces')) score *= 1.1;
-        if (pathLower.includes('index.') || pathLower.includes('main.') || pathLower.includes('app.')) score *= 1.1;
-      } else if (intent === 'UI_UX') {
-        if (pathLower.endsWith('.tsx') || pathLower.endsWith('.jsx') || pathLower.endsWith('.css') || pathLower.endsWith('.scss')) score *= 1.2;
-        if (pathLower.includes('components/') || pathLower.includes('views/') || pathLower.includes('pages/')) score *= 1.1;
-      } else if (intent === 'DATA') {
-        if (pathLower.endsWith('.sql') || pathLower.includes('db/') || pathLower.includes('models/')) score *= 1.2;
-        if (pathLower.includes('services/') || pathLower.includes('store/') || pathLower.includes('api/')) score *= 1.1;
-      }
-      
-      return { ...c, score };
-    })
-    .sort((a, b) => b.score - a.score);
+  // 4. Reciprocal Rank Fusion
+  // searchStrategy: 0 = Pure Vector, 1 = Pure BM25
+  const vectorWeight = 1 - searchStrategy;
+  const lexicalWeight = searchStrategy;
+  
+  const fusedResults = reciprocalRankFusion(
+    vectorRanked, 
+    lexicalRanked, 
+    vectorWeight, 
+    lexicalWeight
+  );
 
-  return scoredChunks.slice(0, topK).map(c => ({
-    path: c.path,
-    content: `// RAG Semantic Similarity Score: ${(c.score * 100).toFixed(1)}% (Intent: ${intent})\n${c.content}`
+  // 5. Return top K
+  return fusedResults.slice(0, topK).map(r => ({
+    path: r.item.path,
+    content: `// RAG Hybrid Rank Score: ${(r.score * 100).toFixed(4)} (Strategy: ${searchStrategy}, Intent: ${intent})\n${r.item.content}`
   }));
 }

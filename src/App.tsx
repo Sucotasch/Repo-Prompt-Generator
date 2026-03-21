@@ -6,6 +6,7 @@ import { generateSystemPrompt, buildPromptText, rewriteQueryWithGemini } from '.
 import { checkOllamaConnection, summarize_with_ollama, fetchOllamaModels, generate_final_prompt_with_ollama, rewriteQueryWithOllama } from './services/ollamaService';
 import { fetchOpenAICompatibleModels } from './services/openaiCompatibleService';
 import { generatePrompt, rewriteQuery, AIProvider } from './services/aiAdapter';
+import { EmbeddingCacheService } from './services/embeddingCacheService';
 import { performRAG } from './services/ragService';
 import { startDeviceAuth, pollDeviceToken } from './services/qwenAuthService';
 import { getTemplate, getAllTemplates } from './templates';
@@ -70,6 +71,7 @@ export default function App() {
   const [useRag, setUseRag] = useState(initialSettings.useRag || false);
   const [ragModel, setRagModel] = useState(initialSettings.ragModel || '');
   const [ragTopK, setRagTopK] = useState(initialSettings.ragTopK || 10);
+  const [ragSearchStrategy, setRagSearchStrategy] = useState(initialSettings.ragSearchStrategy !== undefined ? initialSettings.ragSearchStrategy : 0.5);
   const [ollamaUrl, setOllamaUrl] = useState(initialSettings.ollamaUrl || 'http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState(initialSettings.ollamaModel || 'llama3');
   const [ollamaNumCtx, setOllamaNumCtx] = useState(initialSettings.ollamaNumCtx || 8192);
@@ -133,6 +135,7 @@ export default function App() {
       useRag,
       ragModel,
       ragTopK,
+      ragSearchStrategy,
       ollamaUrl,
       ollamaModel,
       ollamaNumCtx,
@@ -147,7 +150,7 @@ export default function App() {
       customModel
     };
     localStorage.setItem('gemini_app_settings', JSON.stringify(settings));
-  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, aiProvider, qwenOAuthToken, qwenResourceUrl, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, fileTruncationLimit, ollamaTemperature, useQueryExpansion, useIntentReranking, customBaseUrl, customApiKey, customModel]);
+  }, [inputMode, githubToken, maxFiles, useOllama, useOllamaForFinal, aiProvider, qwenOAuthToken, qwenResourceUrl, useRag, ragModel, ragTopK, ollamaUrl, ollamaModel, ollamaNumCtx, ollamaSummaryPredict, ollamaFinalPredict, fileTruncationLimit, ollamaTemperature, useQueryExpansion, useIntentReranking, customBaseUrl, customApiKey, customModel, ragSearchStrategy]);
 
   const handleTemplateChange = (mode: string) => {
     setTemplateMode(mode);
@@ -643,6 +646,7 @@ pause`;
             ollamaUrl,
             ragModel,
             ragTopK,
+            ragSearchStrategy,
             (msg) => setStatus(msg)
           );
           repoData = { ...repoData, sourceFiles: ragFiles };
@@ -656,6 +660,7 @@ pause`;
               ollamaUrl,
               ragModel,
               ragTopK,
+              ragSearchStrategy,
               (msg) => setStatus(msg)
             );
             referenceRepoData = { ...referenceRepoData, sourceFiles: refRagFiles };
@@ -1674,6 +1679,28 @@ pause`;
                           max={50}
                         />
                       </div>
+                      <div className="flex-1">
+                        <div className="flex justify-between items-center mb-1">
+                          <label className="block text-xs font-medium text-indigo-700">Search Strategy</label>
+                          <span className="text-[10px] font-mono text-indigo-500 bg-indigo-100 px-1.5 py-0.5 rounded">
+                            {ragSearchStrategy < 0.4 ? '🎨 Exploration' : ragSearchStrategy > 0.6 ? '🎯 Precision' : '⚖️ Balanced'}
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.1"
+                          value={ragSearchStrategy}
+                          onChange={(e) => setRagSearchStrategy(parseFloat(e.target.value))}
+                          className="w-full h-2 bg-indigo-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                          disabled={loading}
+                        />
+                        <div className="flex justify-between text-[9px] text-indigo-400 mt-1 uppercase tracking-wider font-semibold">
+                          <span>Ideas</span>
+                          <span>Exact</span>
+                        </div>
+                      </div>
                     </div>
                   </div>
                   )}
@@ -1734,6 +1761,19 @@ pause`;
                             >
                               <Trash2 className="w-3 h-3 mr-1" />
                               Clear RAG Query Cache
+                            </button>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                setStatus('Clearing embedding cache...');
+                                await EmbeddingCacheService.clearCache();
+                                setStatus('Embedding cache cleared.');
+                                setTimeout(() => setStatus(''), 3000);
+                              }}
+                              className="text-xs text-red-600 hover:text-red-800 font-medium flex items-center"
+                            >
+                              <Trash2 className="w-3 h-3 mr-1" />
+                              Clear Embedding Cache
                             </button>
                           </div>
                         </div>
