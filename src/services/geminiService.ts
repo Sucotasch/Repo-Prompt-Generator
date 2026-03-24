@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import { GoogleGenAI } from "@google/genai";
 import { RepoData } from "./githubService";
+import { buildCodeDependencyGraph } from "../utils/codeGraph";
 
 export function buildPromptText(
   repoData: RepoData,
@@ -31,6 +32,14 @@ export function buildPromptText(
   }
   prompt += `Description: ${repoData.info.description}\n\n`;
   prompt += `File Tree (partial):\n${repoData.tree.slice(0, 500).join('\n')}\n\n`;
+  
+  if (repoData.sourceFiles && repoData.sourceFiles.length > 0) {
+    const dependencyGraph = buildCodeDependencyGraph(repoData.sourceFiles);
+    if (dependencyGraph) {
+      prompt += `Dependency Graph (Architecture Topology):\n\`\`\`dot\n${dependencyGraph}\`\`\`\n\n`;
+    }
+  }
+
   prompt += `README:\n${truncate(repoData.readme)}\n\n`;
   prompt += `Dependencies:\n${truncate(repoData.dependencies)}\n`;
   if (repoData.sourceFiles && repoData.sourceFiles.length > 0) {
@@ -45,6 +54,14 @@ export function buildPromptText(
     }
     prompt += `Description: ${referenceRepoData.info.description}\n\n`;
     prompt += `File Tree (partial):\n${referenceRepoData.tree.slice(0, 500).join('\n')}\n\n`;
+    
+    if (referenceRepoData.sourceFiles && referenceRepoData.sourceFiles.length > 0) {
+      const refDependencyGraph = buildCodeDependencyGraph(referenceRepoData.sourceFiles);
+      if (refDependencyGraph) {
+        prompt += `Dependency Graph (Architecture Topology):\n\`\`\`dot\n${refDependencyGraph}\`\`\`\n\n`;
+      }
+    }
+
     prompt += `README:\n${truncate(referenceRepoData.readme)}\n\n`;
     prompt += `Dependencies:\n${truncate(referenceRepoData.dependencies)}\n`;
     if (referenceRepoData.sourceFiles && referenceRepoData.sourceFiles.length > 0) {
