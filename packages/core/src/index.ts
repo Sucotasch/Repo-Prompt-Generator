@@ -17,3 +17,4 @@ export * from "./utils/codeGraph.ts";
 export * from "./utils/fileSystem.ts";
 export * from "./utils/hybridSearch.ts";
 export * from "./utils/tauriFetch.ts";
+export * from "./utils/tauriAdapter.ts";

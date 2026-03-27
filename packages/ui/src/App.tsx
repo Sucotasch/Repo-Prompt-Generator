@@ -38,7 +38,12 @@ import {
   getTemplate,
   getAllTemplates,
   saveMarkdownFile,
+  isTauri,
+  isOllamaRunningNative,
+  startOllamaNative,
+  stopOllamaNative,
 } from "@repo-prompt-generator/core";
+import { open } from "@tauri-apps/plugin-shell";
 
 interface SavedTemplate {
   id: string;
@@ -145,6 +150,8 @@ export default function App() {
   const [ollamaNumCtx, setOllamaNumCtx] = useState(
     initialSettings.ollamaNumCtx || 8192,
   );
+  const [ollamaNativeRunning, setOllamaNativeRunning] = useState(false);
+  const [ollamaNativeLoading, setOllamaNativeLoading] = useState(false);
   const [ollamaSummaryPredict, setOllamaSummaryPredict] = useState(
     initialSettings.ollamaSummaryPredict || 500,
   );
@@ -229,6 +236,14 @@ export default function App() {
   // Cache state
   const [cachedRepoData, setCachedRepoData] = useState<any>(null);
   const [cacheKey, setCacheKey] = useState<string>("");
+
+  useEffect(() => {
+    if (isTauri()) {
+      isOllamaRunningNative().then((running) => {
+        setOllamaNativeRunning(running);
+      });
+    }
+  }, []);
 
   // Auto-clear RAG query optimization cache when repo or template changes
   // AND Prune unused embedding caches
@@ -471,8 +486,12 @@ export default function App() {
       setQwenAuthUrl(authData.verification_uri_complete);
       setQwenAuthMessage("Please open the URL in your browser to authorize.");
 
-      // Open the URL in a new tab
-      window.open(authData.verification_uri_complete, "_blank");
+      // Open the URL in a new tab or default browser
+      if (isTauri()) {
+        await open(authData.verification_uri_complete);
+      } else {
+        window.open(authData.verification_uri_complete, "_blank");
+      }
 
       let pollInterval = 2000;
       const maxAttempts = Math.ceil(
@@ -515,6 +534,34 @@ export default function App() {
       setQwenAuthStatus("error");
       setQwenAuthMessage(error.message || "Failed to authenticate with Qwen.");
       setQwenAuthUrl(null);
+    }
+  };
+
+  const handleStartOllama = async () => {
+    setOllamaNativeLoading(true);
+    try {
+      const msg = await startOllamaNative();
+      console.log(msg);
+      setOllamaNativeRunning(true);
+      setTimeout(() => handleTestOllama(), 2000); // Test connection after starting
+    } catch (e) {
+      console.error("Failed to start Ollama", e);
+    } finally {
+      setOllamaNativeLoading(false);
+    }
+  };
+
+  const handleStopOllama = async () => {
+    setOllamaNativeLoading(true);
+    try {
+      const msg = await stopOllamaNative();
+      console.log(msg);
+      setOllamaNativeRunning(false);
+      setOllamaConnected(false);
+    } catch (e) {
+      console.error("Failed to stop Ollama", e);
+    } finally {
+      setOllamaNativeLoading(false);
     }
   };
 
@@ -2474,26 +2521,62 @@ pause`;
                     )}
                   </div>
                   <div className="text-xs text-slate-500 bg-slate-100 p-3 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <div>
-                      <p className="font-medium text-slate-700 mb-1">
-                        How to enable CORS for Ollama:
-                      </p>
-                      <p>
-                        Ollama blocks cross-origin requests by default. To use
-                        it here, you must start it with{" "}
-                        <code className="bg-slate-200 px-1 py-0.5 rounded">
-                          OLLAMA_ORIGINS="{window.location.origin}"
-                        </code>
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleDownloadBat}
-                      className="inline-flex items-center px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors whitespace-nowrap"
-                    >
-                      <Download className="w-3 h-3 mr-1.5" />
-                      Download Windows .bat
-                    </button>
+                    {isTauri() ? (
+                      <>
+                        <div>
+                          <p className="font-medium text-slate-700 mb-1">
+                            Ollama Native Control:
+                          </p>
+                          <p>
+                            Start or stop the local Ollama instance directly from the app.
+                          </p>
+                        </div>
+                        <div className="flex gap-2">
+                          {!ollamaNativeRunning ? (
+                            <button
+                              type="button"
+                              onClick={handleStartOllama}
+                              disabled={ollamaNativeLoading}
+                              className="inline-flex items-center px-3 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg hover:bg-emerald-100 transition-colors whitespace-nowrap disabled:opacity-50"
+                            >
+                              {ollamaNativeLoading ? "Starting..." : "Start Ollama"}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={handleStopOllama}
+                              disabled={ollamaNativeLoading}
+                              className="inline-flex items-center px-3 py-1.5 bg-red-50 text-red-700 border border-red-200 rounded-lg hover:bg-red-100 transition-colors whitespace-nowrap disabled:opacity-50"
+                            >
+                              {ollamaNativeLoading ? "Stopping..." : "Stop Ollama"}
+                            </button>
+                          )}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div>
+                          <p className="font-medium text-slate-700 mb-1">
+                            How to enable CORS for Ollama:
+                          </p>
+                          <p>
+                            Ollama blocks cross-origin requests by default. To use
+                            it here, you must start it with{" "}
+                            <code className="bg-slate-200 px-1 py-0.5 rounded">
+                              OLLAMA_ORIGINS="{window.location.origin}"
+                            </code>
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleDownloadBat}
+                          className="inline-flex items-center px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors whitespace-nowrap"
+                        >
+                          <Download className="w-3 h-3 mr-1.5" />
+                          Download Windows .bat
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               )}

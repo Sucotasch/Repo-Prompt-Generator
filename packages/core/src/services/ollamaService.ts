@@ -1,7 +1,11 @@
 import { RepoData } from "./githubService";
+import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
 
 export async function checkOllamaConnection(url: string): Promise<boolean> {
   try {
+    if (isTauri()) {
+      return await tauriInvoke<boolean>("check_ollama_connection", { url });
+    }
     const res = await fetch(`${url}/api/tags`, {
       signal: AbortSignal.timeout(3000), // 3s timeout for quick check
     });
@@ -13,6 +17,9 @@ export async function checkOllamaConnection(url: string): Promise<boolean> {
 
 export async function fetchOllamaModels(url: string): Promise<string[]> {
   try {
+    if (isTauri()) {
+      return await tauriInvoke<string[]>("fetch_ollama_models", { url });
+    }
     const res = await fetch(`${url}/api/tags`, {
       signal: AbortSignal.timeout(5000), // 5s timeout for model list
     });
@@ -36,6 +43,17 @@ export async function summarize_with_ollama(
   const prompt = `Please summarize the following file content in a few sentences, extracting only the most important information relevant for understanding the architecture, purpose, and key logic of the code. Ignore boilerplate.\n\nContent:\n${text.substring(0, 8000)}`;
 
   try {
+    if (isTauri()) {
+      return await tauriInvoke<string>("ollama_generate", {
+        url,
+        model,
+        prompt,
+        numCtx,
+        numPredict,
+        temperature,
+      });
+    }
+
     const res = await fetch(`${url}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -88,6 +106,22 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
 }`;
 
   try {
+    if (isTauri()) {
+      const text = await tauriInvoke<string>("ollama_generate", {
+        url,
+        model,
+        prompt,
+        numPredict: 200,
+        temperature: 0.3,
+        format: "json",
+      });
+      const parsed = JSON.parse(text.trim() || "{}");
+      return {
+        optimizedQuery: parsed.optimizedQuery || query,
+        intent: parsed.intent || "GENERAL",
+      };
+    }
+
     const res = await fetch(`${url}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -126,6 +160,17 @@ export async function generate_final_prompt_with_ollama(
   temperature: number = 0.5,
 ): Promise<string> {
   try {
+    if (isTauri()) {
+      return await tauriInvoke<string>("ollama_generate", {
+        url,
+        model,
+        prompt,
+        numCtx,
+        numPredict,
+        temperature,
+      });
+    }
+
     const res = await fetch(`${url}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -153,13 +198,22 @@ export async function generate_final_prompt_with_ollama(
 }
 
 export async function isOllamaRunningNative(): Promise<boolean> {
+  if (isTauri()) {
+    return await tauriInvoke<boolean>("is_ollama_running");
+  }
   return false;
 }
 
 export async function startOllamaNative(): Promise<string> {
+  if (isTauri()) {
+    return await tauriInvoke<string>("start_ollama");
+  }
   return "Not in Tauri mode";
 }
 
 export async function stopOllamaNative(): Promise<string> {
+  if (isTauri()) {
+    return await tauriInvoke<string>("stop_ollama");
+  }
   return "Not in Tauri mode";
 }

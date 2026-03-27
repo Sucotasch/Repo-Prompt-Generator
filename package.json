@@ -12,5 +12,8 @@
     "build": "npm run build --workspaces",
     "start": "cd apps/web && npm run start",
     "lint": "npm run lint --workspaces"
+  },
+  "dependencies": {
+    "@tauri-apps/plugin-shell": "^2.3.5"
   }
 }

@@ -1,5 +1,6 @@
 import { EmbeddingCacheService } from "./embeddingCacheService";
 import { BM25, reciprocalRankFusion } from "../utils/hybridSearch";
+import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
 
 export interface RagChunk {
   path: string;
@@ -21,22 +22,32 @@ export async function getEmbedding(
   const cached = await EmbeddingCacheService.getEmbedding(text, model, repoUrl);
   if (cached) return cached;
 
-  const res = await fetch(`${ollamaUrl.replace(/\/$/, "")}/api/embeddings`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  let embedding: number[];
+
+  if (isTauri()) {
+    embedding = await tauriInvoke<number[]>("ollama_embed", {
+      url: ollamaUrl,
       model,
       prompt: text,
-    }),
-  });
+    });
+  } else {
+    const res = await fetch(`${ollamaUrl.replace(/\/$/, "")}/api/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        prompt: text,
+      }),
+    });
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Embedding failed (${res.status}): ${errText}`);
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Embedding failed (${res.status}): ${errText}`);
+    }
+
+    const data = await res.json();
+    embedding = data.embedding;
   }
-
-  const data = await res.json();
-  const embedding = data.embedding;
 
   // Save to cache
   await EmbeddingCacheService.saveEmbedding(text, model, embedding, repoUrl);

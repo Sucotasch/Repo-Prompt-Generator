@@ -8,6 +8,7 @@
     "lint": "echo 'No lint step required'"
   },
   "dependencies": {
-    "@google/genai": "^1.29.0"
+    "@google/genai": "^1.29.0",
+    "@tauri-apps/api": "^2.10.1"
   }
 }

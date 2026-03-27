@@ -1,5 +1,7 @@
 import { RepoData } from "./githubService";
 import { buildPromptText } from "./geminiService";
+import { isTauri } from "../utils/tauriAdapter.ts";
+import { invoke } from "@tauri-apps/api/core";
 
 export async function rewriteQueryWithQwen(
   query: string,
@@ -22,6 +24,31 @@ export async function rewriteQueryWithQwen(
 Query: "${query}"`;
 
   try {
+    if (isTauri()) {
+      const data = await invoke<any>("qwen_ai_proxy", {
+        token,
+        prompt,
+        model: "coder-model",
+        isJson: true,
+        resourceUrl,
+      });
+
+      if (data.status && data.status >= 400) {
+        const err: any = new Error(data.output?.error || "Qwen API Error");
+        err.rateLimit = data.rateLimit;
+        err.status = data.status;
+        throw err;
+      }
+
+      const text = data.output?.output?.text || "{}";
+      const parsed = JSON.parse(text);
+      return {
+        optimizedQuery: parsed.optimizedQuery || query,
+        intent: parsed.intent || "GENERAL",
+        rateLimit: data.rateLimit,
+      };
+    }
+
     const response = await fetch("/api/qwen", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -85,6 +112,31 @@ export async function generateSystemPromptWithQwen(
     attachedDocs,
     fileTruncationLimit,
   );
+
+  if (isTauri()) {
+    const data = await invoke<any>("qwen_ai_proxy", {
+      token,
+      prompt,
+      model: "coder-model",
+      isJson: false,
+      resourceUrl,
+    });
+
+    if (data.status && data.status >= 400) {
+      const err: any = new Error(data.output?.error || "Qwen API Error");
+      err.rateLimit = data.rateLimit;
+      err.status = data.status;
+      throw err;
+    }
+
+    let finalPrompt = data.output?.output?.text || "Failed to generate prompt.";
+
+    return {
+      text: finalPrompt,
+      modelVersion: data.output?.model || "coder-model",
+      rateLimit: data.rateLimit,
+    };
+  }
 
   const response = await fetch("/api/qwen", {
     method: "POST",

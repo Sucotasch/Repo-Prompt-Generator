@@ -1,3 +1,6 @@
+import { isTauri } from "../utils/tauriAdapter.ts";
+import { invoke } from "@tauri-apps/api/core";
+
 export const QWEN_OAUTH_CLIENT_ID = "f0304373b74a44d2b584a3fb70ca9e56";
 export const QWEN_OAUTH_SCOPE = "openid profile email model.completion";
 export const QWEN_OAUTH_GRANT_TYPE =
@@ -29,6 +32,15 @@ export async function startDeviceAuth() {
   const codeChallenge = await generateCodeChallenge(codeVerifier);
 
   try {
+    if (isTauri()) {
+      const data = await invoke<any>("qwen_device_code", {
+        clientId: QWEN_OAUTH_CLIENT_ID,
+        scope: QWEN_OAUTH_SCOPE,
+        codeChallenge: codeChallenge,
+      });
+      return { ...data, codeVerifier };
+    }
+
     const response = await fetch("/api/qwen/device/code", {
       method: "POST",
       headers: {
@@ -58,6 +70,29 @@ export async function pollDeviceToken(
   codeVerifier: string,
 ) {
   try {
+    if (isTauri()) {
+      const data = await invoke<any>("qwen_poll_token", {
+        clientId: QWEN_OAUTH_CLIENT_ID,
+        deviceCode: deviceCode,
+        codeVerifier: codeVerifier,
+      });
+
+      const status = data.http_status;
+      if (status === 400 && data.error === "authorization_pending") {
+        return { status: "pending" };
+      }
+      if (status === 429 && data.error === "slow_down") {
+        return { status: "pending", slowDown: true };
+      }
+      if (status && status >= 400) {
+        throw new Error(
+          data.error_description || data.error || "Failed to poll token",
+        );
+      }
+
+      return { status: "success", data };
+    }
+
     const response = await fetch("/api/qwen/device/token", {
       method: "POST",
       headers: {
