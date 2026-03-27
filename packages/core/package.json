@@ -1,0 +1,13 @@
+{
+  "name": "@repo-prompt-generator/core",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "echo 'No build step required'",
+    "lint": "echo 'No lint step required'"
+  },
+  "dependencies": {
+    "@google/genai": "^1.29.0"
+  }
+}
