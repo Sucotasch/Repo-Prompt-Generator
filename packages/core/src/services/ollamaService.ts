@@ -4,7 +4,7 @@ import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
 export async function checkOllamaConnection(url: string): Promise<boolean> {
   try {
     if (isTauri()) {
-      return await tauriInvoke<boolean>("check_ollama_connection", { url });
+      return await tauriInvoke<boolean>("ollama_check_connection", { url });
     }
     const res = await fetch(`${url}/api/tags`, {
       signal: AbortSignal.timeout(3000), // 3s timeout for quick check
@@ -18,7 +18,7 @@ export async function checkOllamaConnection(url: string): Promise<boolean> {
 export async function fetchOllamaModels(url: string): Promise<string[]> {
   try {
     if (isTauri()) {
-      return await tauriInvoke<string[]>("fetch_ollama_models", { url });
+      return await tauriInvoke<string[]>("ollama_fetch_models", { url });
     }
     const res = await fetch(`${url}/api/tags`, {
       signal: AbortSignal.timeout(5000), // 5s timeout for model list

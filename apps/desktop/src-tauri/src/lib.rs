@@ -432,20 +432,29 @@ async fn stop_ollama(state: State<'_, AppState>) -> Result<String, String> {
 
 #[tauri::command]
 async fn ollama_check_connection(state: State<'_, AppState>, url: String) -> Result<bool, String> {
+    let url = url.replace("localhost", "127.0.0.1");
     let endpoint = format!("{}/api/tags", url);
-    let res = state.ollama_client.get_async(endpoint).await;
+    let res = state.ollama_client.get_async(&endpoint).await;
     match res {
         Ok(r) => Ok(r.status().is_success()),
-        Err(_) => Ok(false),
+        Err(e) => {
+            eprintln!("Ollama connection error for {}: {}", endpoint, e);
+            Ok(false)
+        }
     }
 }
 
 #[tauri::command]
 async fn ollama_fetch_models(state: State<'_, AppState>, url: String) -> Result<Vec<String>, String> {
+    let url = url.replace("localhost", "127.0.0.1");
     let endpoint = format!("{}/api/tags", url);
-    let mut res = state.ollama_client.get_async(endpoint).await.map_err(|e| e.to_string())?;
+    let mut res = state.ollama_client.get_async(&endpoint).await.map_err(|e| {
+        eprintln!("Ollama fetch models error for {}: {}", endpoint, e);
+        e.to_string()
+    })?;
     
     if !res.status().is_success() {
+        eprintln!("Ollama fetch models failed with status: {}", res.status());
         return Ok(Vec::new());
     }
 
@@ -474,6 +483,7 @@ async fn ollama_generate(
     temperature: Option<f32>,
     format: Option<String>,
 ) -> Result<String, String> {
+    let url = url.replace("localhost", "127.0.0.1");
     let endpoint = format!("{}/api/generate", url);
     
     let mut options = serde_json::Map::new();
@@ -516,6 +526,7 @@ async fn ollama_embed(
     model: String,
     prompt: String,
 ) -> Result<Vec<f32>, String> {
+    let url = url.replace("localhost", "127.0.0.1");
     let endpoint = format!("{}/api/embeddings", url);
     
     let body = serde_json::json!({

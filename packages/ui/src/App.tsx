@@ -2516,7 +2516,9 @@ pause`;
                     )}
                     {ollamaConnected === false && (
                       <span className="text-xs text-red-600">
-                        Connection failed (Check CORS)
+                        {isTauri()
+                          ? "Connection failed (Is Ollama running?)"
+                          : "Connection failed (Check CORS)"}
                       </span>
                     )}
                   </div>
