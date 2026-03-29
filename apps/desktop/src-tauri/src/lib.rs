@@ -8,6 +8,7 @@ use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 use sysinfo::{System, ProcessRefreshKind};
 use tauri::{State, RunEvent, Manager};
+use tokio::sync::RwLock;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -20,18 +21,63 @@ pub struct FileEntry {
 }
 
 pub struct AppState {
-    pub gemini_api_key: String,
-    pub http_client: HttpClient,
+    pub gemini_api_key: RwLock<String>,
+    pub http_client: RwLock<HttpClient>,
     pub ollama_client: HttpClient,
     pub we_started_ollama: AtomicBool,
 }
 
+#[tauri::command]
+async fn set_app_config(state: State<'_, AppState>, gemini_key: Option<String>, proxy: Option<String>) -> Result<(), String> {
+    if let Some(key) = gemini_key {
+        *state.gemini_api_key.write().await = key.trim().to_string();
+    }
+
+    let proxy_url = proxy.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    
+    let client = if let Some(url) = proxy_url {
+        let proxy_uri = if !url.starts_with("http") {
+            format!("http://{}", url)
+        } else {
+            url.to_string()
+        };
+        
+        let old_https = std::env::var("HTTPS_PROXY").ok();
+        let old_http = std::env::var("HTTP_PROXY").ok();
+        
+        std::env::set_var("HTTPS_PROXY", &proxy_uri);
+        std::env::set_var("HTTP_PROXY", &proxy_uri);
+        
+        let c = isahc::HttpClient::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|e| format!("Failed to create proxy client: {}", e))?;
+            
+        if let Some(old) = old_https {
+            std::env::set_var("HTTPS_PROXY", old);
+        } else {
+            std::env::remove_var("HTTPS_PROXY");
+        }
+        if let Some(old) = old_http {
+            std::env::set_var("HTTP_PROXY", old);
+        } else {
+            std::env::remove_var("HTTP_PROXY");
+        }
+        c
+    } else {
+        isahc::HttpClient::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|e| format!("Failed to create client: {}", e))?
+    };
+
+    *state.http_client.write().await = client;
+    Ok(())
+}
+
 #[tauri::command(rename_all = "snake_case")]
-async fn call_gemini_secure(state: State<'_, AppState>, prompt: String, api_key: Option<String>, proxy: Option<String>) -> Result<String, String> {
-    let key = api_key
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| state.gemini_api_key.clone());
+async fn call_gemini_secure(state: State<'_, AppState>, prompt: String, model: Option<String>) -> Result<String, String> {
+    let key = state.gemini_api_key.read().await.clone();
 
     if key.is_empty() {
         return Err("Gemini API key is missing. Please enter it in the settings or set the GEMINI_API_KEY environment variable.".to_string());
@@ -39,7 +85,8 @@ async fn call_gemini_secure(state: State<'_, AppState>, prompt: String, api_key:
 
     println!("[Gemini] Using key: {}... (len: {})", &key[..std::cmp::min(4, key.len())], key.len());
 
-    let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent";
+    let model_name = model.unwrap_or_else(|| "gemini-3-flash-preview".to_string());
+    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model_name);
 
     let body = serde_json::json!({
         "contents": [{ "parts": [{ "text": prompt }] }]
@@ -53,34 +100,11 @@ async fn call_gemini_secure(state: State<'_, AppState>, prompt: String, api_key:
         .body(serde_json::to_string(&body).unwrap())
         .map_err(|e| e.to_string())?;
 
-    // If proxy is specified, create a dedicated client with proxy
-    let proxy_addr = proxy.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
-    let mut response = if let Some(proxy_url) = proxy_addr {
-        println!("[Gemini] Using proxy: {}", proxy_url);
-        let proxy_uri = if !proxy_url.starts_with("http") {
-            format!("http://{}", proxy_url)
-        } else {
-            proxy_url.to_string()
-        };
-        // Set proxy env vars for libcurl (isahc backend)
-        std::env::set_var("HTTPS_PROXY", &proxy_uri);
-        std::env::set_var("HTTP_PROXY", &proxy_uri);
-        let proxy_client = HttpClient::builder()
-            .timeout(Duration::from_secs(120))
-            .build()
-            .map_err(|e| format!("Failed to create proxy client: {}", e))?;
-        let result = proxy_client.send_async(request).await
-            .map_err(|e| format!("Gemini API connection error (via proxy): {}", e));
-        // Clean up proxy env vars
-        std::env::remove_var("HTTPS_PROXY");
-        std::env::remove_var("HTTP_PROXY");
-        result?
-    } else {
-        state.http_client
-            .send_async(request)
-            .await
-            .map_err(|e| format!("Gemini API connection error: {}", e))?
-    };
+    let client = state.http_client.read().await.clone();
+    let mut response = client
+        .send_async(request)
+        .await
+        .map_err(|e| format!("Gemini API connection error: {}", e))?;
 
     let status = response.status();
     let res_text = response.text().await.unwrap_or_else(|_| "Could not read response body".to_string());
@@ -169,7 +193,7 @@ async fn fetch_github_repo(
     use tokio::task::JoinSet;
     use std::sync::Arc;
 
-    let client = Arc::new(state.http_client.clone());
+    let client = Arc::new(state.http_client.read().await.clone());
     let token_arc = Arc::new(token.unwrap_or_default());
 
     // 1. Fetch basic info
@@ -501,8 +525,15 @@ async fn ollama_generate(
     }
     let body = serde_json::Value::Object(body_map);
 
+    let request = isahc::Request::builder()
+        .method("POST")
+        .uri(endpoint)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&body).unwrap())
+        .map_err(|e| e.to_string())?;
+
     let mut res = state.ollama_client
-        .post_async(endpoint, serde_json::to_string(&body).unwrap())
+        .send_async(request)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -534,8 +565,15 @@ async fn ollama_embed(
         "prompt": prompt
     });
 
+    let request = isahc::Request::builder()
+        .method("POST")
+        .uri(endpoint)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&body).unwrap())
+        .map_err(|e| e.to_string())?;
+
     let mut res = state.ollama_client
-        .post_async(endpoint, serde_json::to_string(&body).unwrap())
+        .send_async(request)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -567,6 +605,7 @@ async fn ai_network_request(
     headers: std::collections::HashMap<String, String>,
     body: Option<String>
 ) -> Result<serde_json::Value, String> {
+    let url = url.replace("localhost", "127.0.0.1");
     let mut builder = isahc::Request::builder()
         .method(method.as_str())
         .uri(&url);
@@ -581,7 +620,8 @@ async fn ai_network_request(
         builder.body("".to_string()).map_err(|e| e.to_string())?
     };
 
-    let mut res = state.http_client.send_async(request).await.map_err(|e| e.to_string())?;
+    let client = state.http_client.read().await.clone();
+    let mut res = client.send_async(request).await.map_err(|e| e.to_string())?;
     
     let mut res_headers = serde_json::Map::new();
     for (name, value) in res.headers() {
@@ -618,7 +658,8 @@ async fn qwen_device_code(state: State<'_, AppState>, client_id: String, scope: 
         .body(form_body)
         .map_err(|e| e.to_string())?;
 
-    let mut res = state.http_client.send_async(request).await.map_err(|e| e.to_string())?;
+    let client = state.http_client.read().await.clone();
+    let mut res = client.send_async(request).await.map_err(|e| e.to_string())?;
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"error": text.clone()}));
@@ -649,7 +690,8 @@ async fn qwen_poll_token(state: State<'_, AppState>, client_id: String, device_c
         .body(form_body)
         .map_err(|e| e.to_string())?;
 
-    let mut res = state.http_client.send_async(request).await.map_err(|e| e.to_string())?;
+    let client = state.http_client.read().await.clone();
+    let mut res = client.send_async(request).await.map_err(|e| e.to_string())?;
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"error": text.clone()}));
@@ -687,6 +729,7 @@ async fn qwen_ai_proxy(
         }
         endpoint = base;
     }
+    endpoint = endpoint.replace("localhost", "127.0.0.1");
 
     // Build OpenAI-compatible request body (same as original server.ts)
     let mut payload = serde_json::json!({
@@ -713,7 +756,8 @@ async fn qwen_ai_proxy(
         .body(serde_json::to_string(&payload).unwrap())
         .map_err(|e| e.to_string())?;
 
-    let mut res = state.http_client.send_async(request).await.map_err(|e| e.to_string())?;
+    let client = state.http_client.read().await.clone();
+    let mut res = client.send_async(request).await.map_err(|e| e.to_string())?;
     
     // Capture rate limit headers
     let mut rate_limit = serde_json::Map::new();
@@ -762,7 +806,12 @@ async fn qwen_ai_proxy(
 }
 
 #[tauri::command]
-async fn get_gemini_key_source() -> Result<String, String> {
+async fn get_gemini_key_source(state: State<'_, AppState>) -> Result<String, String> {
+    let app_key = state.gemini_api_key.read().await.clone();
+    if !app_key.is_empty() {
+        return Ok(format!("app_state:{}...{}", &app_key[..std::cmp::min(4, app_key.len())], &app_key[app_key.len().saturating_sub(4)..]));
+    }
+
     let env_key = std::env::var("GEMINI_API_KEY")
         .or_else(|_| std::env::var("VITE_GEMINI_API_KEY"))
         .unwrap_or_default();
@@ -803,8 +852,8 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
-            gemini_api_key,
-            http_client: client,
+            gemini_api_key: RwLock::new(gemini_api_key),
+            http_client: RwLock::new(client),
             ollama_client,
             we_started_ollama: AtomicBool::new(false),
         })
@@ -831,6 +880,7 @@ pub fn run() {
             ollama_generate,
             ollama_embed,
             get_gemini_key_source,
+            set_app_config,
             qwen_device_code,
             qwen_poll_token,
             qwen_ai_proxy,

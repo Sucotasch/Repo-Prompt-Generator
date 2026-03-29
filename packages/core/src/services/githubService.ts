@@ -1,3 +1,5 @@
+import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
+
 export interface RepoInfo {
   owner: string;
   repo: string;
@@ -52,6 +54,16 @@ export async function fetchRepoData(
       } else {
         throw new Error("Invalid GitHub URL format.");
       }
+    }
+
+    if (isTauri()) {
+      return await tauriInvoke<RepoData>("fetch_github_repo", {
+        owner,
+        repo,
+        branch,
+        token,
+        maxFiles,
+      });
     }
 
     const response = await fetch("/api/repo", {

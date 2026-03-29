@@ -39,6 +39,7 @@ import {
   getAllTemplates,
   saveMarkdownFile,
   isTauri,
+  tauriInvoke,
   isOllamaRunningNative,
   startOllamaNative,
   stopOllamaNative,
@@ -173,6 +174,9 @@ export default function App() {
       ? initialSettings.useQueryExpansion
       : true,
   );
+  const [useOllamaForQueryExpansion, setUseOllamaForQueryExpansion] = useState(
+    initialSettings.useOllamaForQueryExpansion || false,
+  );
   const [useIntentReranking, setUseIntentReranking] = useState(
     initialSettings.useIntentReranking !== undefined
       ? initialSettings.useIntentReranking
@@ -198,6 +202,14 @@ export default function App() {
   >(null);
   const [customProviderError, setCustomProviderError] = useState<string | null>(
     null,
+  );
+
+  // Gemini specific settings
+  const [geminiApiKey, setGeminiApiKey] = useState(
+    initialSettings.geminiApiKey || "",
+  );
+  const [proxyAddress, setProxyAddress] = useState(
+    initialSettings.proxyAddress || "",
   );
 
   const [showAdvancedRag, setShowAdvancedRag] = useState(false);
@@ -293,10 +305,13 @@ export default function App() {
       fileTruncationLimit,
       ollamaTemperature,
       useQueryExpansion,
+      useOllamaForQueryExpansion,
       useIntentReranking,
       customBaseUrl,
       customApiKey,
       customModel,
+      geminiApiKey,
+      proxyAddress,
     };
     localStorage.setItem("gemini_app_settings", JSON.stringify(settings));
   }, [
@@ -320,12 +335,24 @@ export default function App() {
     fileTruncationLimit,
     ollamaTemperature,
     useQueryExpansion,
+    useOllamaForQueryExpansion,
     useIntentReranking,
     customBaseUrl,
     customApiKey,
     customModel,
     ragSearchStrategy,
+    geminiApiKey,
+    proxyAddress,
   ]);
+
+  useEffect(() => {
+    if (isTauri()) {
+      tauriInvoke("set_app_config", {
+        gemini_key: geminiApiKey,
+        proxy: proxyAddress,
+      }).catch(console.error);
+    }
+  }, [geminiApiKey, proxyAddress]);
 
   const handleTemplateChange = (mode: string) => {
     setTemplateMode(mode);
@@ -870,7 +897,7 @@ pause`;
                 });
               } else {
                 let result;
-                if (useOllamaForFinal) {
+                if (useOllamaForQueryExpansion) {
                   result = await rewriteQueryWithOllama(
                     baseQuery,
                     ollamaUrl,
@@ -883,6 +910,8 @@ pause`;
                     customBaseUrl,
                     customApiKey,
                     customModel,
+                    geminiApiKey,
+                    proxyAddress,
                   });
                   if (aiProvider === "qwen" && result.rateLimit) {
                     setQwenRateLimit(result.rateLimit);
@@ -1154,6 +1183,8 @@ pause`;
             customApiKey,
             customModel,
             fileTruncationLimit,
+            geminiApiKey,
+            proxyAddress,
           },
         );
         generatedPrompt = result.text;
@@ -1786,6 +1817,41 @@ pause`;
               </label>
             </div>
 
+            {/* Global Desktop Settings */}
+            {isTauri() && (
+              <div className="mt-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
+                <h3 className="text-sm font-medium text-slate-700 mb-3">Global Desktop Settings</h3>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">
+                      Gemini API Key (Optional if set in environment)
+                    </label>
+                    <input
+                      type="password"
+                      value={geminiApiKey}
+                      onChange={(e) => setGeminiApiKey(e.target.value)}
+                      placeholder="AIzaSy..."
+                      className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                      disabled={loading}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">
+                      Global Proxy Address (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={proxyAddress}
+                      onChange={(e) => setProxyAddress(e.target.value)}
+                      placeholder="http://127.0.0.1:10809"
+                      className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                      disabled={loading}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* AI Provider Settings */}
             <div className="mt-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
               <label className="block text-sm font-medium text-slate-700 mb-2">
@@ -1799,7 +1865,6 @@ pause`;
               >
                 <option value="gemini">✨ Gemini (default)</option>
                 <option value="qwen">🔥 Qwen (via OAuth)</option>
-                <option value="ollama">🏠 Ollama (local, private)</option>
                 <option value="custom">🌐 Custom (OpenAI Compatible)</option>
               </select>
 
@@ -2137,7 +2202,7 @@ pause`;
                 </div>
               </div>
 
-              {(useOllama || useOllamaForFinal || useRag) && (
+              {(useOllama || useOllamaForFinal || useOllamaForQueryExpansion || useRag) && (
                 <div className="space-y-4 pl-6 border-l-2 border-indigo-100 ml-2">
                   <div className="flex flex-col sm:flex-row gap-4">
                     <div className="flex-1">
@@ -2155,7 +2220,7 @@ pause`;
                         disabled={loading}
                       />
                     </div>
-                    {(useOllama || useOllamaForFinal) && (
+                    {(useOllama || useOllamaForFinal || useOllamaForQueryExpansion) && (
                       <div className="flex-1">
                         <label className="block text-xs font-medium text-slate-500 mb-1">
                           LLM Model Name
@@ -2344,6 +2409,21 @@ pause`;
                               AI Query Expansion (Expands query with synonyms)
                             </span>
                           </label>
+                          {useQueryExpansion && (
+                            <label className="flex items-center space-x-2 cursor-pointer pl-5">
+                              <input
+                                type="checkbox"
+                                checked={useOllamaForQueryExpansion}
+                                onChange={(e) =>
+                                  setUseOllamaForQueryExpansion(e.target.checked)
+                                }
+                                className="w-3.5 h-3.5 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
+                              />
+                              <span className="text-xs text-slate-600">
+                                Use Local Model for Query Expansion (Ollama)
+                              </span>
+                            </label>
+                          )}
                           <label className="flex items-center space-x-2 cursor-pointer">
                             <input
                               type="checkbox"
@@ -2404,7 +2484,7 @@ pause`;
                     </div>
                   )}
 
-                  {(useOllama || useOllamaForFinal) && (
+                  {(useOllama || useOllamaForFinal || useOllamaForQueryExpansion) && (
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
                       <div>
                         <label

@@ -7,17 +7,13 @@ import {
   generateSystemPromptWithQwen,
   rewriteQueryWithQwen,
 } from "./qwenService";
-import {
-  generate_final_prompt_with_ollama,
-  rewriteQueryWithOllama,
-} from "./ollamaService";
 import { buildPromptText } from "./geminiService";
 import {
   generate_final_prompt_with_openai_compatible,
   rewriteQueryWithOpenAICompatible,
 } from "./openaiCompatibleService";
 
-export type AIProvider = "gemini" | "qwen" | "ollama" | "custom";
+export type AIProvider = "gemini" | "qwen" | "custom";
 
 export async function rewriteQuery(
   provider: AIProvider,
@@ -48,16 +44,6 @@ export async function rewriteQuery(
       query,
       options.qwenToken,
       options.qwenResourceUrl,
-    );
-  } else if (
-    provider === "ollama" &&
-    options?.ollamaUrl &&
-    options?.ollamaModel
-  ) {
-    return await rewriteQueryWithOllama(
-      query,
-      options.ollamaUrl,
-      options.ollamaModel,
     );
   } else if (
     provider === "custom" &&
@@ -127,26 +113,6 @@ export async function generatePrompt(
       options.qwenResourceUrl,
       0,
     );
-  } else if (
-    provider === "ollama" &&
-    options?.ollamaUrl &&
-    options?.ollamaModel
-  ) {
-    const promptText = buildPromptText(
-      repoData,
-      taskInstruction,
-      additionalContext,
-      analyzeIssues,
-      referenceRepoData,
-      attachedDocs,
-      fileTruncationLimit,
-    );
-    const text = await generate_final_prompt_with_ollama(
-      promptText,
-      options.ollamaUrl,
-      options.ollamaModel,
-    );
-    return { text, modelVersion: `ollama/${options.ollamaModel}` };
   } else if (
     provider === "custom" &&
     options?.customBaseUrl &&

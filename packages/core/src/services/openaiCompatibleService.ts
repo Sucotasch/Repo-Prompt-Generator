@@ -1,8 +1,47 @@
+import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
+
 export async function fetchOpenAICompatibleModels(
   baseURL: string,
   apiKey: string,
 ): Promise<string[]> {
   try {
+    if (isTauri()) {
+      const response = await tauriInvoke<any>("ai_network_request", {
+        method: "GET",
+        url: `${baseURL}/models`,
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: null,
+      });
+      
+      if (response.status < 200 || response.status >= 300) {
+        let errorMessage = `HTTP ${response.status}`;
+        try {
+          const errorData = JSON.parse(response.text);
+          if (errorData.error?.message) {
+            errorMessage = errorData.error.message;
+          } else if (errorData.message) {
+            errorMessage = errorData.message;
+          } else {
+            errorMessage = `${errorMessage} - ${response.text}`;
+          }
+        } catch (e) {
+          errorMessage = `${errorMessage} - ${response.text}`;
+        }
+        throw new Error(errorMessage);
+      }
+      
+      const data = JSON.parse(response.text);
+      if (data && data.data && Array.isArray(data.data)) {
+        const models = data.data.map((model: any) => model.id).filter(Boolean);
+        const uniqueModels = Array.from(new Set(models)) as string[];
+        return uniqueModels.sort((a, b) => a.localeCompare(b));
+      }
+      return [];
+    }
+
     const response = await fetch(`/api/openai-compatible/models`, {
       method: "POST",
       headers: {
@@ -55,6 +94,42 @@ export async function generate_final_prompt_with_openai_compatible(
   modelName: string,
   temperature: number = 0.3,
 ): Promise<string> {
+  if (isTauri()) {
+    const response = await tauriInvoke<any>("ai_network_request", {
+      method: "POST",
+      url: `${baseURL}/chat/completions`,
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: modelName,
+        messages: [{ role: "user", content: promptText }],
+        temperature: temperature,
+      }),
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      let errorMessage = `HTTP ${response.status}`;
+      try {
+        const errorData = JSON.parse(response.text);
+        if (errorData.error?.message) {
+          errorMessage = errorData.error.message;
+        } else if (errorData.message) {
+          errorMessage = errorData.message;
+        } else {
+          errorMessage = `${errorMessage} - ${response.text}`;
+        }
+      } catch (e) {
+        errorMessage = `${errorMessage} - ${response.text}`;
+      }
+      throw new Error(`OpenAI API Error: ${errorMessage}`);
+    }
+
+    const data = JSON.parse(response.text);
+    return data.choices?.[0]?.message?.content || "";
+  }
+
   const response = await fetch(`/api/openai-compatible/chat`, {
     method: "POST",
     headers: {
@@ -106,10 +181,10 @@ Given a user's task description, extract the core technical keywords, function n
 Output ONLY the optimized search query, nothing else. No explanations.
 
 Also, determine the intent of the query. Is it:
+- BUG_HUNT: asking to fix a specific error, issue, or bug.
 - ARCHITECTURE: asking about high-level structure, patterns, or how things connect.
-- BUGFIX: asking to fix a specific error or issue.
-- FEATURE: asking to add new functionality.
-- REFACTOR: asking to clean up or optimize existing code.
+- UI_UX: asking about user interface, styling, or frontend components.
+- DATA: asking about database, models, or data processing.
 - GENERAL: anything else.
 
 Return your response in the following JSON format:
@@ -117,6 +192,62 @@ Return your response in the following JSON format:
   "optimizedQuery": "keyword1 keyword2 functionName",
   "intent": "ARCHITECTURE"
 }`;
+
+  if (isTauri()) {
+    const response = await tauriInvoke<any>("ai_network_request", {
+      method: "POST",
+      url: `${baseURL}/chat/completions`,
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: modelName,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: query },
+        ],
+        temperature: 0.3,
+      }),
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      let errorMessage = `HTTP ${response.status}`;
+      try {
+        const errorData = JSON.parse(response.text);
+        if (errorData.error?.message) {
+          errorMessage = errorData.error.message;
+        } else if (errorData.message) {
+          errorMessage = errorData.message;
+        } else {
+          errorMessage = `${errorMessage} - ${response.text}`;
+        }
+      } catch (e) {
+        errorMessage = `${errorMessage} - ${response.text}`;
+      }
+      throw new Error(`OpenAI API Error: ${errorMessage}`);
+    }
+
+    const data = JSON.parse(response.text);
+    const content = data.choices?.[0]?.message?.content || "";
+
+    try {
+      const parsed = JSON.parse(content);
+      return {
+        optimizedQuery: parsed.optimizedQuery || query,
+        intent: parsed.intent || "GENERAL",
+      };
+    } catch (e) {
+      console.warn(
+        "Failed to parse JSON from OpenAI compatible API, falling back to raw text",
+        e,
+      );
+      return {
+        optimizedQuery: content.trim() || query,
+        intent: "GENERAL",
+      };
+    }
+  }
 
   const response = await fetch(`/api/openai-compatible/chat`, {
     method: "POST",

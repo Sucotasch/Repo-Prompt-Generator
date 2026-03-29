@@ -2,6 +2,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { RepoData } from "./githubService";
 import { buildCodeDependencyGraph } from "../utils/codeGraph";
+import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
 
 export function buildPromptText(
   repoData: RepoData,
@@ -121,8 +122,23 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
 }`;
 
   try {
+    if (isTauri()) {
+      const responseText = await tauriInvoke<string>("call_gemini_secure", {
+        prompt,
+        model: "gemini-3-flash-preview",
+      });
+      
+      const cleanText = responseText.trim();
+      const parsed = JSON.parse(cleanText);
+
+      return {
+        optimizedQuery: parsed.optimizedQuery || query,
+        intent: parsed.intent || "GENERAL",
+      };
+    }
+
     const ai = new GoogleGenAI({
-      apiKey: geminiApiKey || process.env.GEMINI_API_KEY || "",
+      apiKey: geminiApiKey || (typeof process !== 'undefined' ? process.env.GEMINI_API_KEY : undefined) || import.meta.env.VITE_GEMINI_API_KEY || "",
     });
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
@@ -168,15 +184,34 @@ export async function generateSystemPrompt(
     fileTruncationLimit,
   );
 
-  const ai = new GoogleGenAI({
-    apiKey: geminiApiKey || process.env.GEMINI_API_KEY || "",
-  });
-  const response = await ai.models.generateContent({
-    model: "gemini-3.1-pro-preview",
-    contents: prompt,
-  });
+  let finalPrompt = "Failed to generate prompt.";
 
-  let finalPrompt = response.text || "Failed to generate prompt.";
+  if (isTauri()) {
+    try {
+      finalPrompt = await tauriInvoke<string>("call_gemini_secure", {
+        prompt,
+        model: "gemini-3.1-pro-preview",
+      });
+    } catch (e) {
+      console.error("Failed to generate prompt with Gemini via Tauri:", e);
+      finalPrompt = `Error: ${e}`;
+    }
+  } else {
+    try {
+      const ai = new GoogleGenAI({
+        apiKey: geminiApiKey || (typeof process !== 'undefined' ? process.env.GEMINI_API_KEY : undefined) || import.meta.env.VITE_GEMINI_API_KEY || "",
+      });
+      const response = await ai.models.generateContent({
+        model: "gemini-3.1-pro-preview",
+        contents: prompt,
+      });
+      finalPrompt = response.text || "Failed to generate prompt.";
+    } catch (e) {
+      console.error("Failed to generate prompt with Gemini:", e);
+      finalPrompt = `Error: ${e}`;
+    }
+  }
+
   if (usedOllama) {
     finalPrompt =
       `> **Note:** This context was pre-processed by local LLM.\n\n` +

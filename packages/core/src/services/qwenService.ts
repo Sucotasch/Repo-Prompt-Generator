@@ -21,6 +21,7 @@ export async function rewriteQueryWithQwen(
 
   const prompt = `Optimize the search query for RAG over a code repository. Return ONLY JSON:
 {"optimizedQuery":"key1,key2...", "intent":"CATEGORY"}
+CATEGORY must be one of: BUG_HUNT, ARCHITECTURE, UI_UX, DATA, GENERAL.
 Query: "${query}"`;
 
   try {
