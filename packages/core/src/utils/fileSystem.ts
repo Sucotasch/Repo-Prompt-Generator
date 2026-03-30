@@ -1,9 +1,25 @@
+import { isTauri, tauriInvoke } from "./tauriAdapter";
+
 export const saveMarkdownFile = async (
   content: string,
   defaultFilename: string = "README.md",
 ) => {
-  // Tauri support removed for web version. See CHANGELOG_WEB_TO_WIN.md
-  downloadWebFile(content, defaultFilename);
+  if (isTauri()) {
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const filePath = await save({
+        defaultPath: defaultFilename,
+        filters: [{ name: "Markdown", extensions: ["md"] }],
+      });
+      if (filePath) {
+        await tauriInvoke("save_text_file", { path: filePath, content });
+      }
+    } catch (e) {
+      console.error("Failed to save file in Tauri:", e);
+    }
+  } else {
+    downloadWebFile(content, defaultFilename);
+  }
   return true;
 };
 
