@@ -762,8 +762,8 @@ pause`;
         setCachedRepoData(null);
         setCacheKey("");
 
-        // Free up memory by clearing the file selection if it's very large
-        if (localFiles && localFiles.length > 1000) {
+        // Free up memory by clearing the file selection if it's very large, unless we need it for deep analysis
+        if (localFiles && localFiles.length > 1000 && !isDeepAnalysis) {
           setLocalFiles(null);
           if (fileInputRef.current) {
             fileInputRef.current.value = "";
@@ -1193,6 +1193,8 @@ pause`;
             proxyAddress,
             isDeepAnalysis,
             onStatusUpdate: setStatus,
+            localFiles: inputMode === "local" ? localFiles : undefined,
+            referenceLocalFiles: referenceInputMode === "local" ? referenceLocalFiles : undefined,
           },
         );
         generatedPrompt = result.text;

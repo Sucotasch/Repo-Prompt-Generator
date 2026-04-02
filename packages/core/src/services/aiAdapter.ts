@@ -89,6 +89,8 @@ export async function generatePrompt(
     fileTruncationLimit?: number;
     isDeepAnalysis?: boolean;
     onStatusUpdate?: (status: string) => void;
+    localFiles?: FileList | null;
+    referenceLocalFiles?: FileList | null;
   },
 ): Promise<{
   text: string;
@@ -118,7 +120,9 @@ export async function generatePrompt(
       options.qwenResourceUrl,
       fileTruncationLimit,
       options.isDeepAnalysis,
-      options.onStatusUpdate
+      options.onStatusUpdate,
+      options.localFiles,
+      options.referenceLocalFiles
     );
   } else if (
     provider === "custom" &&
@@ -157,6 +161,8 @@ export async function generatePrompt(
       fileTruncationLimit,
       options?.isDeepAnalysis,
       options?.onStatusUpdate,
+      options?.localFiles,
+      options?.referenceLocalFiles
     );
   }
 }

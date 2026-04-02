@@ -109,6 +109,8 @@ export async function generateSystemPromptWithQwen(
   fileTruncationLimit: number = 0,
   isDeepAnalysis?: boolean,
   onStatusUpdate?: (status: string) => void,
+  localFiles?: FileList | null,
+  referenceLocalFiles?: FileList | null
 ): Promise<{
   text: string;
   modelVersion: string;
@@ -267,7 +269,7 @@ export async function generateSystemPromptWithQwen(
         requestedFilesList = requestedFiles;
         if (onStatusUpdate) onStatusUpdate(`Requesting additional files (${requestedFiles.length})...`);
         
-        const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, token, referenceRepoData);
+        const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, token, referenceRepoData, localFiles, referenceLocalFiles);
         fetchedFilesCount = fetchedFiles.length;
         fetchedFilesDetails = fetchedFiles.map(f => ({
           path: f.path,

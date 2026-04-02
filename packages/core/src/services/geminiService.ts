@@ -177,6 +177,8 @@ export async function generateSystemPrompt(
   fileTruncationLimit: number = 0,
   isDeepAnalysis: boolean = false,
   onStatusUpdate?: (status: string) => void,
+  localFiles?: FileList | null,
+  referenceLocalFiles?: FileList | null
 ): Promise<{ text: string; modelVersion: string; requestedFiles?: string[]; fetchedFilesCount?: number }> {
   const prompt = buildPromptText(
     repoData,
@@ -236,7 +238,7 @@ export async function generateSystemPrompt(
           requestedFilesList = requestedFiles;
           if (onStatusUpdate) onStatusUpdate(`Requesting additional files (${requestedFiles.length})...`);
           
-          const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, undefined, referenceRepoData);
+          const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, undefined, referenceRepoData, localFiles, referenceLocalFiles);
           fetchedFilesCount = fetchedFiles.length;
           
           let instructionText = "";
@@ -328,7 +330,7 @@ export async function generateSystemPrompt(
             }
           } catch (e) {}
 
-          const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, token, referenceRepoData);
+          const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, token, referenceRepoData, localFiles, referenceLocalFiles);
           fetchedFilesCount = fetchedFiles.length;
           
           let instructionText = "";

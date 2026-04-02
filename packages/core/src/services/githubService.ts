@@ -171,7 +171,9 @@ export async function fetchSpecificFiles(
   repoData: RepoData,
   filePaths: string[],
   token?: string,
-  referenceRepoData?: RepoData
+  referenceRepoData?: RepoData,
+  localFiles?: FileList | null,
+  referenceLocalFiles?: FileList | null
 ): Promise<{ path: string; content: string }[]> {
   const targetFiles = filePaths.filter(f => repoData.tree.includes(f));
   const refFiles = referenceRepoData ? filePaths.filter(f => referenceRepoData.tree.includes(f) && !repoData.tree.includes(f)) : [];
@@ -182,13 +184,52 @@ export async function fetchSpecificFiles(
   let results: { path: string; content: string }[] = [];
   
   if (finalTargetFiles.length > 0) {
-    const targetResults = await fetchFilesFromRepo(repoData.info, finalTargetFiles, token);
-    results = results.concat(targetResults);
+    if (repoData.info.owner === "local") {
+      const localResults = await fetchLocalFiles(finalTargetFiles, localFiles, repoData);
+      results = results.concat(localResults);
+    } else {
+      const targetResults = await fetchFilesFromRepo(repoData.info, finalTargetFiles, token);
+      results = results.concat(targetResults);
+    }
   }
   
   if (refFiles.length > 0 && referenceRepoData) {
-    const refResults = await fetchFilesFromRepo(referenceRepoData.info, refFiles, token);
-    results = results.concat(refResults);
+    if (referenceRepoData.info.owner === "local") {
+      const refLocalResults = await fetchLocalFiles(refFiles, referenceLocalFiles, referenceRepoData);
+      results = results.concat(refLocalResults);
+    } else {
+      const refResults = await fetchFilesFromRepo(referenceRepoData.info, refFiles, token);
+      results = results.concat(refResults);
+    }
+  }
+  
+  return results;
+}
+
+async function fetchLocalFiles(filePaths: string[], localFiles: FileList | null | undefined, repoData: RepoData): Promise<{ path: string; content: string }[]> {
+  const results: { path: string; content: string }[] = [];
+  
+  for (const filePath of filePaths) {
+    const existing = repoData.sourceFiles?.find(f => f.path === filePath);
+    if (existing) {
+      results.push(existing);
+      continue;
+    }
+    
+    if (localFiles) {
+      const file = Array.from(localFiles).find(f => (f.webkitRelativePath || f.name) === filePath);
+      if (file) {
+        try {
+          let content = await file.text();
+          if (content.length > 50000) {
+            content = content.substring(0, 50000) + "\n\n... [TRUNCATED: File exceeds 50KB limit. Showing only the top part.]";
+          }
+          results.push({ path: filePath, content });
+        } catch (e) {
+          console.error(`Failed to read local file ${filePath}:`, e);
+        }
+      }
+    }
   }
   
   return results;
