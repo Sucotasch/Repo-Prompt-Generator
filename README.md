@@ -1,3 +1,4 @@
+
 # 🤖 Repo-Prompt-Generator
 
 <div align="center">
@@ -11,28 +12,24 @@
 [![Gemini AI](https://img.shields.io/badge/Gemini-API-4285f4)](https://ai.google.dev/)
 [![Ollama](https://img.shields.io/badge/Ollama-Local-white)](https://ollama.com/)
 
-[English](#english) | [Русский](#russian)
-
 </div>
 
 ---
 
-# English Documentation {#english}
-
 ## 📋 Table of Contents
 
 - [About the Project](#-about-the-project)
-- [Features](#-features)
+- [Capabilities](#-capabilities)
 - [Architecture (Monorepo)](#-architecture-monorepo)
 - [Web vs Desktop (Tauri)](#-web-vs-desktop-tauri)
+- [Algorithm of Operation](#-algorithm-of-operation)
 - [Installation and Setup](#-installation-and-setup)
-- [Usage](#-usage)
+- [Configuration](#-configuration)
+- [Usage Examples](#-usage-examples)
 - [Analysis Templates](#-analysis-templates)
 - [AI Providers](#-ai-providers)
-- [API Reference](#-api-reference)
 - [Technology Stack](#-technology-stack)
-- [Contributing](#-contributing)
-- [License](#-license)
+- [Troubleshooting](#-troubleshooting)
 
 ---
 
@@ -46,46 +43,47 @@ The application supports both **GitHub repositories** and **local files**, utili
 
 | Feature | Benefit |
 |---------|---------|
-| Multi-Provider AI Support | Choose between cloud (Gemini, Qwen) or local (Ollama) AI models |
-| Template-Based Analysis | Pre-configured templates for different use cases |
-| RAG-Powered Search | Semantic search with embedding cache for accurate context retrieval |
-| Code Dependency Graph | Visual representation of module relationships |
-| Dual Platform | Web application for quick access, Desktop for native features |
+| Multi-provider AI Support | Choose between cloud (Gemini, Qwen) or local (Ollama) AI models |
+| RAG-Powered Analysis | Context-aware code understanding with semantic search |
+| Template System | Pre-built prompts for documentation, audits, and integration |
+| Cross-Platform | Web application and native desktop app (Tauri) |
+| Code Graph Visualization | Dependency mapping for better architectural understanding |
 
 ---
 
-## ⚡ Features
+## ⚡ Capabilities
 
-### 1. **AI Prompt Generation**
-Generate optimized system prompts for AI assistants (Gemini CLI, Cursor, Claude, etc.) based on your codebase structure and conventions.
+### 1. AI Prompt Generation
+Generate optimized system prompts for AI assistants (Gemini CLI, Cursor, Claude, etc.) based on your codebase structure and patterns.
 
-### 2. **Code Architecture Audit**
+### 2. Code Architecture Audit
 Deep analysis of your codebase including:
 - Algorithm and data flow documentation
 - Defect identification (bugs, race conditions, dead code)
-- Performance impact analysis
+- Performance bottleneck analysis
 - Actionable recommendations with minimal intervention
 
-### 3. **Technical Documentation**
-Auto-generate comprehensive documentation including:
-- Project capabilities and architecture
-- Installation and configuration guides
-- API documentation with usage examples
-- Mermaid diagrams for visualization
+### 3. Technical Documentation
+Automatic generation of:
+- README.md files
+- Wiki-style documentation
+- API documentation
+- Mermaid diagrams for architecture visualization
 
-### 4. **Integration Analysis**
-Compare two repositories and identify:
-- Architectural patterns worth adopting
-- Migration plans with code implementation
-- Compatibility assessment
+### 4. Integration Analysis
+Compare two repositories and generate:
+- Architectural pattern recommendations
+- Migration plans
+- Code implementation snippets
+- Conflict identification
 
-### 5. **Topological RAG**
-Build code dependency graphs for better context understanding:
+### 5. Topological RAG
+Build code dependency graphs for enhanced context understanding:
 - Import/export relationship mapping
 - Module dependency visualization
-- Context-aware search results
+- Semantic chunking for efficient retrieval
 
-### 6. **Multi-Provider Support**
+### 6. Multi-Provider Support
 | Provider | Type | Use Case |
 |----------|------|----------|
 | Gemini | Cloud | High-quality analysis, large context |
@@ -102,27 +100,31 @@ repo-prompt-generator/
 ├── apps/
 │   ├── web/                    # Web application (React + Vite)
 │   │   ├── src/
-│   │   ├── server.ts           # Backend server for web version
+│   │   ├── index.html
+│   │   ├── package.json
 │   │   └── vite.config.ts
 │   │
 │   └── desktop/                # Desktop application (Tauri + React)
-│       ├── src/                # Frontend source
-│       └── src-tauri/          # Rust backend
-│           ├── src/
-│           │   ├── main.rs     # Tauri entry point
-│           │   └── lib.rs      # Core Rust library
-│           └── Cargo.toml
+│       ├── src/
+│       ├── src-tauri/          # Rust backend
+│       │   ├── src/
+│       │   │   ├── main.rs     # Tauri entry point
+│       │   │   └── lib.rs      # Core Rust logic
+│       │   ├── Cargo.toml
+│       │   └── tauri.conf.json
+│       └── package.json
 │
 ├── packages/
-│   ├── core/                   # Shared core logic
+│   ├── core/                   # Shared business logic
 │   │   └── src/
-│   │       ├── services/       # AI providers, file handling
+│   │       ├── services/       # AI & data services
 │   │       │   ├── aiAdapter.ts
 │   │       │   ├── geminiService.ts
 │   │       │   ├── ollamaService.ts
 │   │       │   ├── qwenService.ts
 │   │       │   ├── githubService.ts
-│   │       │   └── localFileService.ts
+│   │       │   ├── localFileService.ts
+│   │       │   └── ragService.ts
 │   │       │
 │   │       ├── templates/      # Prompt templates
 │   │       │   ├── default.ts
@@ -133,481 +135,593 @@ repo-prompt-generator/
 │   │       │   ├── architecture.ts
 │   │       │   └── eli5.ts
 │   │       │
-│   │       └── utils/          # Utilities
-│   │           ├── codeGraph.ts
-│   │           ├── fileSystem.ts
-│   │           ├── hybridSearch.ts
-│   │           ├── semanticChunker.ts
-│   │           └── tauriAdapter.ts
+│   │       ├── utils/          # Utility functions
+│   │       │   ├── codeGraph.ts
+│   │       │   ├── fileSystem.ts
+│   │       │   ├── hybridSearch.ts
+│   │       │   ├── semanticChunker.ts
+│   │       │   └── tauriAdapter.ts
+│   │       │
+│   │       └── types/
+│   │           └── template.ts
 │   │
 │   └── ui/                     # Shared UI components
 │       └── src/
 │           ├── App.tsx
+│           ├── index.ts
 │           └── tailwind.css
 │
-├── .env.example
 ├── package.json                # Root workspace config
 └── README.md
 ```
 
-### Core Module Dependencies
+### Package Dependencies
 
 ```dot
-digraph CoreArchitecture {
+digraph Dependencies {
   rankdir=TB;
   
-  subgraph cluster_services {
-    label "Services Layer";
-    geminiService;
-    ollamaService;
-    qwenService;
-    githubService;
-    localFileService;
+  subgraph cluster_apps {
+    label "Applications";
+    web [label="apps/web"];
+    desktop [label="apps/desktop"];
   }
   
-  subgraph cluster_templates {
-    label "Template Layer";
-    defaultTemplate;
-    docsTemplate;
-    auditTemplate;
-    integrationTemplate;
+  subgraph cluster_packages {
+    label "Packages";
+    core [label="packages/core"];
+    ui [label="packages/ui"];
   }
   
-  subgraph cluster_utils {
-    label "Utilities";
-    codeGraph;
-    hybridSearch;
-    semanticChunker;
-    tauriAdapter;
-  }
-  
-  aiAdapter -> geminiService;
-  aiAdapter -> ollamaService;
-  aiAdapter -> qwenService;
-  
-  docsTemplate -> templateTypes;
-  auditTemplate -> templateTypes;
-  integrationTemplate -> templateTypes;
-  
-  hybridSearch -> semanticChunker;
-  codeGraph -> fileSystem;
-  
-  tauriAdapter -> qwenAuthService;
-  localFileService -> githubService;
+  web -> core;
+  web -> ui;
+  desktop -> core;
+  desktop -> ui;
+  core -> ui;
 }
 ```
 
 ---
 
-## 🖥️ Web vs Desktop (Tauri)
+## 🌐 Web vs Desktop (Tauri)
 
-| Feature | Web Version | Desktop (Tauri) |
-|---------|-------------|-----------------|
-| GitHub Analysis | ✅ | ✅ |
-| Local File Access | ⚠️ Limited | ✅ Full |
-| Ollama Integration | ⚠️ CORS issues | ✅ Native |
-| File System Access | Browser sandbox | Native API |
-| Offline Mode | ❌ | ✅ |
-| System Tray | ❌ | ✅ |
-| Auto-updates | ❌ | ✅ |
-| Native Notifications | ❌ | ✅ |
+| Feature | Web App | Desktop App (Tauri) |
+|---------|---------|---------------------|
+| Local File Access | Limited (browser sandbox) | Full filesystem access |
+| Ollama Integration | Requires CORS configuration | Native integration |
+| OAuth (Qwen) | Web-based flow | Native device code flow |
+| Portability | Browser-based | Standalone executable |
+| System Resources | Browser limits | Direct system access |
+| Installation | None (URL access) | Download & install |
 
-### When to Use Each
+### When to Use Which
 
-**Web Version:**
-- Quick analysis of public GitHub repositories
+**Choose Web App when:**
+- Quick analysis without installation
+- Working with GitHub repositories
 - Sharing analysis results via URL
-- No installation required
 
-**Desktop Version:**
-- Working with private/local codebases
-- Full Ollama integration without CORS
-- Native file system access
-- Better performance for large repositories
+**Choose Desktop App when:**
+- Analyzing local/private codebases
+- Need full filesystem access
+- Working offline with Ollama
+- Require native OAuth flows
 
 ---
 
-## 📦 Installation and Setup
+## 🔄 Algorithm of Operation
+
+### 1. Repository Data Collection
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Input Selection                          │
+├─────────────────────────────────────────────────────────────┤
+│  GitHub URL                    Local Folder                 │
+│  ┌──────────────┐              ┌──────────────┐             │
+│  │ 1. Parse URL │              │ 1. File Pick │             │
+│  │ 2. Auth API  │              │ 2. Filter    │             │
+│  │ 3. Fetch     │              │ 3. Score     │             │
+│  │ 4. Extract   │              │ 4. Process   │             │
+│  └──────────────┘              └──────────────┘             │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    File Scoring System                      │
+├─────────────────────────────────────────────────────────────┤
+│  Base Score: 0                                              │
+│  +50: Entry points (main.ts, index.ts, app.tsx)             │
+│  +30: Configuration files (package.json, tsconfig.json)     │
+│  +20: Core services and utilities                           │
+│  -30: Build/config files (webpack, vite, gulp)              │
+│  -50: Test files (*.test.*, __tests__, specs)               │
+│  -100: Ignored folders (node_modules, .git, dist)           │
+│  -100: Secret files (.env, .pem, .key, credentials)         │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    RAG Processing                           │
+├─────────────────────────────────────────────────────────────┤
+│  1. Semantic Chunking → Split code into meaningful units    │
+│  2. Embedding Generation → Vector representation            │
+│  3. Cache Storage → Local embedding cache                   │
+│  4. Hybrid Search → Combine semantic + keyword matching     │
+│  5. Re-ranking → Score results by relevance                 │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Code Graph Building                      │
+├─────────────────────────────────────────────────────────────┤
+│  Parse imports/exports → Build dependency graph → DOT format│
+│  Example:                                                   │
+│  digraph Codebase {                                         │
+│    rankdir=LR;                                              │
+│    "src/main.tsx" -> "src/App.tsx";                         │
+│    "src/services/api.ts" -> "src/utils/fetch.ts";           │
+│  }                                                          │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    AI Prompt Generation                     │
+├─────────────────────────────────────────────────────────────┤
+│  1. Select Template (docs/audit/integration/etc.)           │
+│  2. Inject Repository Context                               │
+│  3. Add Code Graph (if available)                           │
+│  4. Apply RAG Results                                       │
+│  5. Generate Final Prompt via AI Provider                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 2. RAG Hybrid Search Flow
+
+```typescript
+// Simplified flow representation
+async function performRAG(query: string, repoData: RepoData): Promise<string[]> {
+  // Step 1: Rewrite query for better retrieval
+  const rewrittenQuery = await rewriteQueryWithAI(query);
+  
+  // Step 2: Check embedding cache
+  const cachedEmbedding = await embeddingCache.get(rewrittenQuery);
+  
+  // Step 3: Generate embedding if not cached
+  const embedding = cachedEmbedding || await generateEmbedding(rewrittenQuery);
+  
+  // Step 4: Hybrid search (semantic + keyword)
+  const semanticResults = await semanticSearch(embedding, repoData.chunks);
+  const keywordResults = await keywordSearch(rewrittenQuery, repoData.files);
+  
+  // Step 5: Re-rank and combine
+  const combined = hybridRank(semanticResults, keywordResults);
+  
+  // Step 6: Return top results
+  return combined.slice(0, MAX_RESULTS);
+}
+```
+
+### 3. Template System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Template Definition                      │
+├─────────────────────────────────────────────────────────────┤
+│  interface TemplateDefinition {                             │
+│    metadata: {                                              │
+│      id: string;         // Unique identifier               │
+│      name: string;       // Display name                    │
+│      description: string;// Purpose description             │
+│      color: string;      // UI color code                   │
+│      category: string;   // Grouping category               │
+│    };                                                       │
+│    systemInstruction: string;  // AI system prompt          │
+│    defaultSearchQuery: string; // Default RAG query         │
+│    deliverables: string[];   // Expected outputs            │
+│    successMetrics: string[]; // Quality criteria            │
+│  }                                                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📥 Installation and Setup
 
 ### Prerequisites
 
-```bash
-# Node.js 18+ required
-node --version  # >= 18.0.0
+| Requirement | Version | Purpose |
+|-------------|---------|---------|
+| Node.js | 18.x or higher | Runtime environment |
+| npm | 9.x or higher | Package management |
+| Git | 2.x or higher | Repository access |
+| Rust (Desktop only) | 1.70+ | Tauri backend |
 
-# npm or pnpm
-npm --version   # >= 9.0.0
-
-# For Desktop build (optional)
-rustc --version # >= 1.70.0
-cargo --version
-```
-
-### 1. Clone Repository
+### Option 1: Web Application
 
 ```bash
+# 1. Clone the repository
 git clone https://github.com/Sucotasch/Repo-Prompt-Generator.git
 cd Repo-Prompt-Generator
-```
 
-### 2. Install Dependencies
-
-```bash
-# Install all workspace dependencies
+# 2. Install dependencies
 npm install
 
-# Or with pnpm
-pnpm install
-```
-
-### 3. Environment Configuration
-
-```bash
-# Copy example environment file
-cp .env.example .env
-
-# Edit .env with your API keys
-# GEMINI_API_KEY=your_gemini_key
-# GITHUB_TOKEN=your_github_token (optional, increases rate limits)
-# OLLAMA_URL=http://localhost:11434
-```
-
-### 4. Run Development Server
-
-```bash
-# Web application
+# 3. Start development server
 npm run dev
 
-# Desktop application (requires Rust)
-cd apps/desktop
-npm run tauri dev
-```
-
-### 5. Build for Production
-
-```bash
-# Build all workspaces
+# 4. Build for production
 npm run build
 
-# Build desktop app
-cd apps/desktop
+# 5. Start production server
+npm run start
+```
+
+### Option 2: Desktop Application (Tauri)
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/Sucotasch/Repo-Prompt-Generator.git
+cd Repo-Prompt-Generator/apps/desktop
+
+# 2. Install dependencies
+npm install
+
+# 3. Install Tauri CLI (if not installed)
+npm install -g @tauri-apps/cli
+
+# 4. Run in development mode
+npm run tauri dev
+
+# 5. Build for production
 npm run tauri build
 ```
 
-### 6. Ollama Setup (Optional)
+### Option 3: Using Pre-built Binaries
 
-```bash
-# Install Ollama
-curl -fsSL https://ollama.com/install.sh | sh
+Download the latest release from the [Releases page](https://github.com/Sucotasch/Repo-Prompt-Generator/releases):
 
-# Pull recommended models
-ollama pull llama2
-ollama pull coder-model
-ollama pull nomic-embed-text  # For embeddings
-
-# Configure CORS for web version
-export OLLAMA_ORIGINS="http://localhost:5173"
-ollama serve
-```
+| Platform | File |
+|----------|------|
+| Windows | `Repo-Prompt-Generator_x.x.x_x64_en-US.msi` |
+| macOS | `Repo-Prompt-Generator_x.x.x_x64.dmg` |
+| Linux | `Repo-Prompt-Generator_x.x.x_amd64.AppImage` |
 
 ---
 
-## 🚀 Usage
+## ⚙️ Configuration
 
-### Quick Start Guide
+### Environment Variables
 
-#### Step 1: Choose Input Mode
+Create a `.env` file based on `.env.example`:
 
-```typescript
-// GitHub Repository
-const githubUrl = "https://github.com/username/repo";
+```bash
+# GitHub API Token (optional, increases rate limits)
+GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 
-// OR Local Files
-const localFiles = await fileInput.files;
+# Gemini API Key (for cloud AI)
+GEMINI_API_KEY=xxxxxxxxxxxxxxxxxxxxxx
+
+# Ollama Configuration (for local AI)
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=coder-model
+
+# Qwen OAuth (for Alibaba Cloud AI)
+QWEN_CLIENT_ID=f0304373b74a44d2b584a3fb70ca9e56
+
+# Custom OpenAI-Compatible API
+CUSTOM_API_BASE_URL=https://your-api.com/v1
+CUSTOM_API_KEY=your-api-key
+CUSTOM_MODEL=your-model-name
 ```
 
-#### Step 2: Select Template
+### Application Settings (LocalStorage)
 
-```typescript
-import { getTemplate } from "@repo-prompt-generator/core";
+The application stores user preferences in browser localStorage:
 
-// Available templates
-const templates = [
-  "default",      // General system prompt
-  "docs",         // Technical documentation
-  "audit",        // Code architecture audit
-  "integration",  // Repository comparison
-  "security",     // Security analysis
-  "architecture", // Architecture documentation
-  "eli5",         // Simple explanation
-];
-
-const template = getTemplate("docs");
+```json
+{
+  "githubToken": "ghp_xxx",
+  "maxFiles": 5,
+  "inputMode": "github",
+  "aiProvider": "gemini",
+  "ollamaUrl": "http://localhost:11434",
+  "ollamaModel": "coder-model",
+  "customApiUrl": "",
+  "customApiKey": "",
+  "customModel": ""
+}
 ```
 
-#### Step 3: Configure AI Provider
+### Ollama Setup (Local AI)
+
+```bash
+# 1. Install Ollama
+# macOS/Linux:
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Windows: Download from https://ollama.com/download
+
+# 2. Pull a coding model
+ollama pull coder-model
+# or
+ollama pull llama2
+# or
+ollama pull codellama
+
+# 3. Configure CORS (for web app)
+export OLLAMA_ORIGINS="http://localhost:5173"
+ollama serve
+
+# 4. Verify connection
+curl http://localhost:11434/api/tags
+```
+
+### GitHub Token Setup
+
+1. Go to [GitHub Personal Access Tokens](https://github.com/settings/tokens)
+2. Click "Generate new token (classic)"
+3. Select scopes: `repo`, `read:user`
+4. Copy the token and paste into application settings
+
+---
+
+## 💡 Usage Examples
+
+### Example 1: Generate System Prompt for AI Assistant
 
 ```typescript
+// 1. Select "Default" template
+// 2. Enter GitHub repository URL or upload local files
+// 3. Configure RAG query:
+const ragQuery = "core logic, architecture, main components, tech stack";
+
+// 4. Click "Generate Prompt"
+// 5. Result will be a gemini.md file containing:
+//    - Project purpose and tech stack
+//    - Architectural patterns and conventions
+//    - AI assistance instructions
+//    - Contribution guidelines
+```
+
+**Output Example (gemini.md):**
+```markdown
+# Project Context: Repo-Prompt-Generator
+
+## Purpose
+AI-powered tool for generating prompts and code audits based on GitHub 
+or local repositories.
+
+## Tech Stack
+- Frontend: React 19, TypeScript 5.8, Vite 6.2
+- Desktop: Tauri 2.0 (Rust backend)
+- AI Providers: Gemini, Ollama, Qwen, OpenAI-compatible
+
+## Architecture
+Monorepo structure with shared core package containing:
+- Services: AI adapters, GitHub/local file handlers, RAG engine
+- Templates: Pre-built prompt definitions for various use cases
+- Utils: Code graph builder, semantic chunker, hybrid search
+
+## Development Guidelines
+1. Always check existing templates before creating new ones
+2. Use TypeScript strict mode
+3. Follow the established service pattern for new AI providers
+```
+
+### Example 2: Code Architecture Audit
+
+```typescript
+// 1. Select "Audit" template
+// 2. Load repository (GitHub or local)
+// 3. RAG query:
+const ragQuery = "core logic, complex algorithms, potential bugs, performance bottlenecks";
+
+// 4. Generate audit report
+// 5. Export as markdown
+```
+
+**Audit Report Structure:**
+```markdown
+# Code Architecture Audit Report
+
+## 1. Algorithm & Architecture
+[Detailed step-by-step description of core algorithms and data flow]
+
+## 2. Defect Identification
+| File | Issue | Severity | Description |
+|------|-------|----------|-------------|
+| src/service.ts | Race Condition | High | Async operation without proper locking |
+| src/utils/cache.ts | Memory Leak | Medium | Cache entries never expire |
+
+## 3. Performance Impact
+- O(n²) loop detected in `processFiles()` - affects large repositories
+- Unbounded cache growth in `embeddingCacheService`
+
+## 4. Actionable Recommendations
+### Fix 1: Add cache expiration
+File: packages/core/src/services/embeddingCacheService.ts
+[Code snippet with fix]
+
+### Fix 2: Optimize file processing
+File: packages/core/src/services/localFileService.ts
+[Code snippet with fix]
+```
+
+### Example 3: Technical Documentation Generation
+
+```typescript
+// 1. Select "Documentation" template
+// 2. Upload local project files
+// 3. RAG query:
+const ragQuery = "exported functions, public API, configuration options";
+
+// 4. Generate documentation
+// 5. Export to markdown
+```
+
+### Example 4: Integration Analysis (Two Repositories)
+
+```typescript
+// 1. Select "Integration" template
+// 2. Specify target repository (your codebase)
+// 3. Specify reference repository (source of patterns)
+// 4. RAG query:
+const ragQuery = "API endpoints, data models, service layer";
+
+// 5. Receive integration plan with code snippets
+```
+
+**Integration Plan Output:**
+```markdown
+# Integration Analysis Report
+
+## Recommendation: PARTIALLY RECOMMENDED
+
+### Patterns to Adopt from [REFERENCE_REPO]
+1. **Error Handling Middleware** - Centralized error processing
+2. **Request Validation** - Schema-based input validation
+3. **Caching Layer** - Redis-based response caching
+
+### Architectural Mapping
+| Reference Component | Target Equivalent | Compatibility |
+|--------------------|-------------------|---------------|
+| AuthService | UserService | Partial - needs adaptation |
+| CacheManager | (none) | New implementation required |
+
+### Integration Steps
+1. Add validation library to dependencies
+2. Create middleware/wrapper files
+3. Update API endpoint handlers
+4. Add caching layer configuration
+
+### Code Implementation
+[Actual code snippets based on reference repository]
+```
+
+### Example 5: Local Ollama Usage
+
+```bash
+# 1. Start Ollama server
+ollama serve
+
+# 2. In application settings:
+#    - AI Provider: Ollama
+#    - URL: http://localhost:11434
+#    - Model: coder-model
+
+# 3. All requests processed locally (no API costs)
+```
+
+### Example 6: Custom OpenAI-Compatible API
+
+```typescript
+// Configuration for compatible services:
 const config = {
-  provider: "gemini",  // or "ollama", "qwen", "custom"
-  model: "gemini-2.0-flash",
-  apiKey: process.env.GEMINI_API_KEY,
-  
-  // For Ollama
-  ollamaUrl: "http://localhost:11434",
-  ollamaModel: "llama2",
-  
-  // For custom OpenAI-compatible API
-  customBaseUrl: "https://api.example.com/v1",
-  customApiKey: "your-key",
+  provider: 'custom',
+  customBaseUrl: 'https://your-api.com/v1',
+  customApiKey: 'your-key',
+  customModel: 'your-model-name'
 };
-```
 
-#### Step 4: Generate Prompt
-
-```typescript
-import { generateSystemPrompt, performRAG } from "@repo-prompt-generator/core";
-
-// Perform RAG search for relevant context
-const ragResults = await performRAG({
-  query: "main entry points, exported functions, core architecture",
-  repoData: repositoryData,
-  maxResults: 10,
-});
-
-// Generate the final prompt
-const prompt = await generateSystemPrompt({
-  template: "docs",
-  repoData: repositoryData,
-  ragResults: ragResults,
-  config: config,
-});
-
-// Save to file
-await saveMarkdownFile("gemini.md", prompt);
+// Supported services:
+// - OpenAI
+// - Azure OpenAI
+// - LocalAI
+// - vLLM
+// - LM Studio
+// - Any OpenAI-compatible API
 ```
 
 ---
 
 ## 📑 Analysis Templates
 
-### 1. Default Template (`default`)
+| Template | ID | Category | Use Case |
+|----------|-----|----------|----------|
+| Default | `default` | default | General system prompt generation |
+| Documentation | `docs` | docs | Technical documentation & README |
+| Audit | `audit` | audit | Code architecture & defect analysis |
+| Integration | `integration` | integration | Cross-repository pattern adoption |
+| Security | `security` | security | Vulnerability assessment |
+| Architecture | `architecture` | architecture | System design documentation |
+| ELI5 | `eli5` | education | Explain code simply (for beginners) |
 
-**Purpose:** Generate a general system prompt for AI assistants
+### Template Selection Guide
 
-**Best For:** Setting up AI context for ongoing development
-
-**Output Format:** `gemini.md` ready for Gemini CLI or Cursor
-
-```typescript
-const defaultTemplate = {
-  systemInstruction: `You are an expert software engineer and AI assistant. 
-  Based on the GitHub repository information, generate a comprehensive 
-  system prompt suitable for further development...`,
-  
-  defaultSearchQuery: "core logic, architecture, main components, tech stack",
-};
 ```
-
-### 2. Documentation Template (`docs`)
-
-**Purpose:** Create comprehensive technical documentation
-
-**Best For:** Wiki pages, detailed README, API documentation
-
-**Output Includes:**
-- Real capabilities of the program
-- Algorithm of operation and architecture
-- Installation and configuration process
-- Usage examples for main functions
-
-```typescript
-const docsTemplate = {
-  systemInstruction: `You are an expert technical writer and software architect.
-  Analyze the provided GitHub repository data to create comprehensive 
-  technical documentation in Markdown format...`,
-  
-  defaultSearchQuery: "main entry points, exported functions, public API",
-};
+┌─────────────────────────────────────────────────────────────┐
+│                    Template Decision Tree                   │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  What is your goal?                                         │
+│  │                                                          │
+│  ├── Create AI assistant context → Default Template         │
+│  │                                                          │
+│  ├── Generate documentation → Documentation Template        │
+│  │                                                          │
+│  ├── Find bugs & issues → Audit Template                    │
+│  │                                                          │
+│  ├── Compare repositories → Integration Template            │
+│  │                                                          │
+│  ├── Security review → Security Template                    │
+│  │                                                          │
+│  └── Explain to beginners → ELI5 Template                   │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
 ```
-
-### 3. Audit Template (`audit`)
-
-**Purpose:** Deep analysis of codebase architecture and defects
-
-**Best For:** Code reviews, technical debt assessment, security audits
-
-**Output Includes:**
-- Algorithm & Architecture documentation
-- Defect Identification (bugs, dead code, race conditions)
-- Performance Impact analysis
-- Actionable Recommendations
-
-```typescript
-const auditTemplate = {
-  systemInstruction: `You are an expert Principal Software Engineer 
-  conducting a rigorous code audit. Do not rely solely on the README...`,
-  
-  defaultSearchQuery: "core logic, complex algorithms, potential bugs",
-};
-```
-
-### 4. Integration Template (`integration`)
-
-**Purpose:** Compare two repositories and plan integration
-
-**Best For:** Migration projects, feature adoption, monorepo consolidation
-
-**Critical Rules:**
-- Domain Preservation: Target repo's business logic unchanged
-- Pattern Extraction Only: Reference repo is technical pattern source
-- Minimal Intervention: Least disruption to existing architecture
-
-```typescript
-const integrationTemplate = {
-  systemInstruction: `Analyze both codebases and identify the top 1-3 
-  architectural patterns from [REFERENCE_REPO] that would provide the 
-  most value if integrated into [TARGET_REPO]...`,
-  
-  defaultSearchQuery: "system architecture, main components, interfaces",
-};
-```
-
-### 5. Security Template (`security`)
-
-**Purpose:** Security vulnerability analysis
-
-**Best For:** Security audits, compliance checks, penetration testing prep
-
-### 6. Architecture Template (`architecture`)
-
-**Purpose:** High-level architecture documentation
-
-**Best For:** System design docs, onboarding, technical presentations
-
-### 7. ELI5 Template (`eli5`)
-
-**Purpose:** Simple explanation for non-technical stakeholders
-
-**Best For:** Product documentation, stakeholder updates, marketing
 
 ---
 
 ## 🤖 AI Providers
 
-### Gemini (Google)
+### Provider Comparison
 
+| Provider | Speed | Quality | Cost | Privacy |
+|----------|-------|---------|------|---------|
+| Gemini | Fast | High | Free tier available | Cloud |
+| Ollama | Medium | Good | Free | Local |
+| Qwen | Fast | High | Free tier available | Cloud |
+| Custom API | Varies | Varies | Varies | Depends |
+
+### Provider Configuration
+
+#### Gemini (Google)
 ```typescript
-import { GeminiService } from "@repo-prompt-generator/core";
-
-const gemini = new GeminiService({
-  apiKey: process.env.GEMINI_API_KEY,
-  model: "gemini-2.0-flash",
-});
-
-const response = await gemini.generateContent({
-  prompt: systemPrompt,
-  context: repoContext,
-});
+{
+  provider: "gemini",
+  apiKey: "YOUR_GEMINI_KEY",
+  model: "gemini-pro"
+}
 ```
 
-**Pros:** Large context window, high quality, multimodal
-**Cons:** Requires API key, cloud-only
-
-### Ollama (Local)
-
+#### Ollama (Local)
 ```typescript
-import { OllamaService } from "@repo-prompt-generator/core";
-
-const ollama = new OllamaService({
+{
+  provider: "ollama",
   baseUrl: "http://localhost:11434",
-  model: "llama2",
-});
-
-// Check connection
-const isConnected = await checkOllamaConnection();
-
-// List available models
-const models = await fetchOllamaModels();
-
-// Generate response
-const response = await generate_final_prompt_with_ollama({
-  prompt: systemPrompt,
-  model: "coder-model",
-});
+  model: "coder-model"
+}
 ```
 
-**Pros:** Privacy, offline, free, customizable
-**Cons:** Requires local setup, variable quality
-
-### Qwen (Alibaba)
-
+#### Qwen (Alibaba)
 ```typescript
-import { QwenService, startDeviceAuth } from "@repo-prompt-generator/core";
-
-// OAuth Device Flow Authentication
-const auth = await startDeviceAuth();
-// User visits URL and enters code
-const token = await pollDeviceToken(auth.deviceCode);
-
-const qwen = new QwenService({ token });
+{
+  provider: "qwen",
+  // Uses OAuth device flow for authentication
+  clientId: "f0304373b74a44d2b584a3fb70ca9e56"
+}
 ```
 
-**Pros:** Competitive pricing, good performance
-**Cons:** OAuth setup required
-
-### OpenAI-Compatible
-
+#### Custom OpenAI-Compatible
 ```typescript
-import { OpenAICompatibleService } from "@repo-prompt-generator/core";
-
-const custom = new OpenAICompatibleService({
-  baseUrl: "https://your-api.com/v1",
-  apiKey: "your-key",
-  model: "your-model",
-});
+{
+  provider: "custom",
+  baseUrl: "https://api.example.com/v1",
+  apiKey: "YOUR_KEY",
+  model: "custom-model"
+}
 ```
-
-**Supported Providers:**
-- OpenAI
-- Azure OpenAI
-- LocalAI
-- vLLM
-- LM Studio
-- Any OpenAI-compatible API
-
----
-
-## 📚 API Reference
-
-### Core Services
-
-| Service | Method | Description |
-|---------|--------|-------------|
-| `githubService` | `fetchRepoData(url, token)` | Fetch repository structure from GitHub |
-| `localFileService` | `processLocalFolder(files, maxFiles)` | Process local file upload |
-| `geminiService` | `generateContent(prompt, context)` | Generate content with Gemini |
-| `ollamaService` | `generate(prompt, model)` | Generate content with Ollama |
-| `ragService` | `performRAG(query, repoData)` | Semantic search with RAG |
-
-### Template Functions
-
-| Function | Parameters | Returns |
-|----------|------------|---------|
-| `getTemplate(id)` | `templateId: string` | `TemplateDefinition` |
-| `getAllTemplates()` | - | `TemplateDefinition[]` |
-| `generateSystemPrompt()` | `PromptConfig` | `string` |
-| `buildPromptText()` | `template, context` | `string` |
-
-### Utility Functions
-
-| Function | Description |
-|----------|-------------|
-| `buildCodeDependencyGraph()` | Generate DOT graph of imports |
-| `semanticChunker()` | Split code into semantic chunks |
-| `hybridSearch()` | Combine keyword + semantic search |
-| `isTauri()` | Check if running in Tauri |
-| `tauriInvoke()` | Call Rust backend from JS |
 
 ---
 
@@ -616,107 +730,52 @@ const custom = new OpenAICompatibleService({
 ### Frontend
 | Technology | Version | Purpose |
 |------------|---------|---------|
-| React | 19.0 | UI Framework |
-| TypeScript | 5.8 | Type Safety |
-| Vite | 6.2 | Build Tool |
+| React | 19.0 | UI framework |
+| TypeScript | 5.8 | Type safety |
+| Vite | 6.2 | Build tool & dev server |
 | Tailwind CSS | Latest | Styling |
 | Lucide React | Latest | Icons |
 
 ### Backend (Desktop)
 | Technology | Version | Purpose |
 |------------|---------|---------|
-| Tauri | 2.0 | Desktop Framework |
-| Rust | 1.70+ | Native Backend |
-| Cargo | Latest | Package Manager |
+| Tauri | 2.0 | Desktop framework |
+| Rust | 1.70+ | System-level operations |
+| @tauri-apps/api | 2.x | Tauri JavaScript API |
 
-### AI/ML
-| Technology | Purpose |
-|------------|---------|
-| Google Gemini API | Cloud AI |
-| Ollama | Local AI |
-| Qwen API | Alternative Cloud AI |
-| Embedding Cache | Semantic Search |
-
-### Development
-| Tool | Purpose |
-|------|---------|
-| npm workspaces | Monorepo management |
-| ESLint | Code quality |
-| Git | Version control |
-
----
-
-## 🤝 Contributing
-
-### Development Workflow
-
-```bash
-# 1. Fork the repository
-# 2. Create feature branch
-git checkout -b feature/your-feature
-
-# 3. Make changes and test
-npm run lint
-npm run build
-
-# 4. Commit with conventional commits
-git commit -m "feat: add new template type"
-
-# 5. Push and create PR
-git push origin feature/your-feature
-```
-
-### Code Style
-
-- TypeScript strict mode enabled
-- ESLint rules enforced
-- Conventional Commits for commit messages
-- Prettier for code formatting
-
-### Adding New Templates
-
-```typescript
-// packages/core/src/templates/your-template.ts
-import { TemplateDefinition } from "../types/template";
-
-export const yourTemplate: TemplateDefinition = {
-  metadata: {
-    id: "your-template",
-    name: "Your Template Name",
-    description: "Description of what this template does",
-    color: "#hex-color",
-    category: "category-name",
-  },
-  systemInstruction: `Your system instruction here...`,
-  deliverables: [],
-  successMetrics: [],
-  evidenceRequirements: [],
-  defaultSearchQuery: "relevant search terms",
-};
-
-// Export in packages/core/src/templates/index.ts
-export { yourTemplate } from "./your-template";
-```
+### Core Services
+| Module | Purpose |
+|--------|---------|
+| `aiAdapter.ts` | Unified AI provider interface |
+| `geminiService.ts` | Google Gemini integration |
+| `ollamaService.ts` | Local Ollama integration |
+| `qwenService.ts` | Alibaba Qwen integration |
+| `githubService.ts` | GitHub API client |
+| `localFileService.ts` | Local file system access |
+| `ragService.ts` | RAG engine & hybrid search |
+| `embeddingCacheService.ts` | Vector cache management |
+| `codeGraph.ts` | Dependency graph builder |
+| `semanticChunker.ts` | Code chunking for RAG |
+| `hybridSearch.ts` | Combined semantic + keyword search |
 
 ---
 
-## 📄 License
-
-MIT License - See LICENSE file for details
-
----
-
-## 🆘 Troubleshooting
+## 🔧 Troubleshooting
 
 ### Error: "Failed to embed query"
 
-**Cause:** Ollama model not loaded
+**Cause:** Ollama model not loaded or server not running
 
 **Solution:**
 ```bash
-ollama pull nomic-embed-text
-# or use different model
+# Pull the model
+ollama pull coder-model
+
+# Or use alternative model
 ollama pull llama2
+
+# Restart Ollama server
+ollama serve
 ```
 
 ### Error: "CORS Error"
@@ -725,7 +784,7 @@ ollama pull llama2
 
 **Solution:**
 ```bash
-# Windows - use start-ollama.bat
+# Windows - use start-ollama.bat with proper origins
 # Linux/Mac:
 export OLLAMA_ORIGINS="http://localhost:5173"
 ollama serve
@@ -733,27 +792,45 @@ ollama serve
 
 ### Error: "Rate Limit Exceeded"
 
-**Cause:** API rate limit reached
+**Cause:** GitHub API rate limit reached
 
 **Solution:**
-- Add GitHub token for higher limits
-- Wait and retry
-- Use local Ollama instead
+1. Add GitHub token in settings (increases limit from 60 to 5000/hour)
+2. Wait for rate limit reset (usually 1 hour)
+3. Use local files instead of GitHub
 
 ### Error: "Not running in Tauri"
 
-**Cause:** Tauri-specific function called in web version
+**Cause:** Tauri-specific function called in web context
 
 **Solution:**
-```typescript
-import { isTauri } from "@repo-prompt-generator/core";
+- Use desktop app for filesystem operations
+- Web app has limited file access via browser sandbox
 
-if (isTauri()) {
-  // Tauri-specific code
-} else {
-  // Web fallback
-}
-```
+### Error: "Qwen OAuth Failed"
+
+**Cause:** Device code flow timeout or network issue
+
+**Solution:**
+1. Ensure stable internet connection
+2. Complete OAuth flow within 10 minutes
+3. Try again with fresh device code
+
+---
+
+## 📄 License
+
+This project is open source and available under the [MIT License](LICENSE).
+
+---
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ---
 
@@ -761,26 +838,35 @@ if (isTauri()) {
 
 - **Issues:** [GitHub Issues](https://github.com/Sucotasch/Repo-Prompt-Generator/issues)
 - **Discussions:** [GitHub Discussions](https://github.com/Sucotasch/Repo-Prompt-Generator/discussions)
-- **Email:** Contact via GitHub
 
 ---
 
-# Русская Документация {#russian}
+---
+
+# 🤖 Repo-Prompt-Generator (Русская версия)
+
+<div align="center">
+
+**AI-инструмент для генерации промптов и аудита кода на основе репозиториев GitHub или локальных файлов**
+
+</div>
+
+---
 
 ## 📋 Содержание
 
-- [О проекте](#-о-проекте-1)
-- [Возможности](#-возможности-1)
-- [Архитектура (Монорепозиторий)](#-архитектура-монорепозиторий-1)
-- [Web vs Desktop (Tauri)](#-web-vs-desktop-tauri-1)
+- [О проекте](#-о-проекте)
+- [Возможности](#-возможности)
+- [Архитектура (Монорепозиторий)](#-архитектура-монорепозиторий)
+- [Web vs Desktop (Tauri)](#-web-vs-desktop-tauri)
+- [Алгоритм работы](#-алгоритм-работы)
 - [Установка и настройка](#-установка-и-настройка)
-- [Использование](#-использование-1)
-- [Шаблоны анализа](#-шаблоны-анализа-1)
-- [AI Провайдеры](#-ai-провайдеры)
-- [Справочник API](#-справочник-api)
-- [Технологический стек](#-технологический-стек-1)
-- [Вклад в проект](#-вклад-в-проект)
-- [Лицензия](#-лицензия)
+- [Конфигурация](#-конфигурация)
+- [Примеры использования](#-примеры-использования)
+- [Шаблоны анализа](#-шаблоны-анализа)
+- [AI-провайдеры](#-ai-провайдеры)
+- [Технологический стек](#-технологический-стек)
+- [Решение проблем](#-решение-проблем)
 
 ---
 
@@ -795,49 +881,50 @@ if (isTauri()) {
 | Возможность | Преимущество |
 |-------------|--------------|
 | Поддержка нескольких AI-провайдеров | Выбор между облачными (Gemini, Qwen) или локальными (Ollama) моделями |
-| Шаблонный анализ | Преднастроенные шаблоны для различных сценариев использования |
-| RAG-поиск | Семантический поиск с кэшированием эмбеддингов для точного извлечения контекста |
-| Граф зависимостей кода | Визуальное представление связей между модулями |
-| Две платформы | Веб-приложение для быстрого доступа, Desktop для нативных функций |
+| RAG-анализ | Контекстно-зависимое понимание кода с семантическим поиском |
+| Система шаблонов | Готовые промпты для документации, аудитов и интеграции |
+| Кроссплатформенность | Веб-приложение и нативное десктопное приложение (Tauri) |
+| Визуализация графа кода | Карта зависимостей для лучшего понимания архитектуры |
 
 ---
 
 ## ⚡ Возможности
 
-### 1. **Генерация промптов для AI-ассистентов**
-Создание оптимизированных системных промптов для AI-ассистентов (Gemini CLI, Cursor, Claude и др.) на основе структуры и соглашений вашей кодовой базы.
+### 1. Генерация промптов для AI-ассистентов
+Создание оптимизированных системных промптов для AI-ассистентов (Gemini CLI, Cursor, Claude и др.) на основе структуры и паттернов вашей кодовой базы.
 
-### 2. **Аудит кодовой базы**
+### 2. Аудит архитектуры кода
 Глубокий анализ кодовой базы, включающий:
 - Документирование алгоритмов и потоков данных
-- Идентификация дефектов (баги, состояния гонки, мёртвый код)
-- Анализ влияния на производительность
+- Выявление дефектов (баги, состояния гонки, мёртвый код)
+- Анализ узких мест производительности
 - Практические рекомендации с минимальным вмешательством
 
-### 3. **Техническая документация**
-Автоматическая генерация комплексной документации:
-- Возможности проекта и архитектура
-- Руководства по установке и настройке
-- API-документация с примерами использования
-- Диаграммы Mermaid для визуализации
+### 3. Техническая документация
+Автоматическая генерация:
+- Файлов README.md
+- Документации в стиле Wiki
+- API-документации
+- Диаграмм Mermaid для визуализации архитектуры
 
-### 4. **Интеграционный анализ**
-Сравнение двух репозиториев и определение:
-- Архитектурных паттернов для внедрения
-- Планов миграции с реализацией кода
-- Оценки совместимости
+### 4. Интеграционный анализ
+Сравнение двух репозиториев и генерация:
+- Рекомендаций по архитектурным паттернам
+- Планов миграции
+- Фрагментов кода для реализации
+- Идентификации конфликтов
 
-### 5. **Топологический RAG**
-Построение графов зависимостей кода для лучшего понимания контекста:
+### 5. Топологический RAG
+Построение графов зависимостей кода для улучшенного понимания контекста:
 - Маппинг отношений импорт/экспорт
 - Визуализация зависимостей модулей
-- Контекстно-зависимые результаты поиска
+- Семантическое чанкование для эффективного поиска
 
-### 6. **Поддержка нескольких провайдеров**
-| Провайдер | Тип | Сценарий использования |
-|-----------|-----|------------------------|
+### 6. Поддержка нескольких провайдеров
+| Провайдер | Тип | Случай использования |
+|-----------|-----|---------------------|
 | Gemini | Облачный | Высококачественный анализ, большой контекст |
-| Ollama | Локальный | Фокус на приватность, работа офлайн |
+| Ollama | Локальный | Приватность, работа офлайн |
 | Qwen | Облачный | Альтернативный облачный провайдер |
 | OpenAI-совместимый | Кастомный | Azure, LocalAI, vLLM и др. |
 
@@ -850,27 +937,31 @@ repo-prompt-generator/
 ├── apps/
 │   ├── web/                    # Веб-приложение (React + Vite)
 │   │   ├── src/
-│   │   ├── server.ts           # Бэкенд-сервер для веб-версии
+│   │   ├── index.html
+│   │   ├── package.json
 │   │   └── vite.config.ts
 │   │
-│   └── desktop/                # Desktop-приложение (Tauri + React)
-│       ├── src/                # Фронтенд исходный код
-│       └── src-tauri/          # Rust бэкенд
-│           ├── src/
-│           │   ├── main.rs     # Точка входа Tauri
-│           │   └── lib.rs      # Основная Rust библиотека
-│           └── Cargo.toml
+│   └── desktop/                # Десктопное приложение (Tauri + React)
+│       ├── src/
+│       ├── src-tauri/          # Rust бэкенд
+│       │   ├── src/
+│       │   │   ├── main.rs     # Точка входа Tauri
+│       │   │   └── lib.rs      # Основная логика Rust
+│       │   ├── Cargo.toml
+│       │   └── tauri.conf.json
+│       └── package.json
 │
 ├── packages/
-│   ├── core/                   # Общая основная логика
+│   ├── core/                   # Общая бизнес-логика
 │   │   └── src/
-│   │       ├── services/       # AI провайдеры, обработка файлов
+│   │       ├── services/       # AI и дата-сервисы
 │   │       │   ├── aiAdapter.ts
 │   │       │   ├── geminiService.ts
 │   │       │   ├── ollamaService.ts
 │   │       │   ├── qwenService.ts
 │   │       │   ├── githubService.ts
-│   │       │   └── localFileService.ts
+│   │       │   ├── localFileService.ts
+│   │       │   └── ragService.ts
 │   │       │
 │   │       ├── templates/      # Шаблоны промптов
 │   │       │   ├── default.ts
@@ -881,481 +972,403 @@ repo-prompt-generator/
 │   │       │   ├── architecture.ts
 │   │       │   └── eli5.ts
 │   │       │
-│   │       └── utils/          # Утилиты
-│   │           ├── codeGraph.ts
-│   │           ├── fileSystem.ts
-│   │           ├── hybridSearch.ts
-│   │           ├── semanticChunker.ts
-│   │           └── tauriAdapter.ts
+│   │       ├── utils/          # Утилиты
+│   │       │   ├── codeGraph.ts
+│   │       │   ├── fileSystem.ts
+│   │       │   ├── hybridSearch.ts
+│   │       │   ├── semanticChunker.ts
+│   │       │   └── tauriAdapter.ts
+│   │       │
+│   │       └── types/
+│   │           └── template.ts
 │   │
 │   └── ui/                     # Общие UI компоненты
 │       └── src/
 │           ├── App.tsx
+│           ├── index.ts
 │           └── tailwind.css
 │
-├── .env.example
-├── package.json                # Конфигурация корневого workspace
+├── package.json                # Конфигурация рабочего пространства
 └── README.md
 ```
 
-### Зависимости основных модулей
+---
 
-```dot
-digraph CoreArchitecture {
-  rankdir=TB;
+## 🌐 Web vs Desktop (Tauri)
+
+| Функция | Веб-приложение | Десктопное приложение (Tauri) |
+|---------|----------------|-------------------------------|
+| Доступ к локальным файлам | Ограничен (песочница браузера) | Полный доступ к файловой системе |
+| Интеграция с Ollama | Требует настройки CORS | Нативная интеграция |
+| OAuth (Qwen) | Веб-поток | Нативный поток device code |
+| Портативность | На основе браузера | Автономный исполняемый файл |
+| Системные ресурсы | Ограничения браузера | Прямой доступ к системе |
+| Установка | Не требуется (доступ по URL) | Скачать и установить |
+
+### Когда что использовать
+
+**Выбирайте Веб-приложение когда:**
+- Быстрый анализ без установки
+- Работа с GitHub репозиториями
+- Публикация результатов анализа через URL
+
+**Выбирайте Десктопное приложение когда:**
+- Анализ локальных/приватных кодовых баз
+- Требуется полный доступ к файловой системе
+- Работа офлайн с Ollama
+- Требуются нативные OAuth потоки
+
+---
+
+## 🔄 Алгоритм работы
+
+### 1. Сбор данных репозитория
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Выбор входа                              │
+├─────────────────────────────────────────────────────────────┤
+│  GitHub URL                    Локальная папка              │
+│  ┌──────────────┐              ┌──────────────┐             │
+│  │ 1. Парсинг   │              │ 1. Выбор     │             │
+│  │ 2. Auth API  │              │ 2. Фильтрация│             │
+│  │ 3. Загрузка  │              │ 3. Оценка    │             │
+│  │ 4. Извлечение│              │ 4. Обработка │             │
+│  └──────────────┘              └──────────────┘             │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Система оценки файлов                    │
+├─────────────────────────────────────────────────────────────┤
+│  Базовый балл: 0                                            │
+│  +50: Точки входа (main.ts, index.ts, app.tsx)              │
+│  +30: Конфигурационные файлы (package.json, tsconfig.json)  │
+│  +20: Основные сервисы и утилиты                            │
+│  -30: Файлы сборки/конфигурации (webpack, vite, gulp)       │
+│  -50: Тестовые файлы (*.test.*, __tests__, specs)           │
+│  -100: Игнорируемые папки (node_modules, .git, dist)        │
+│  -100: Секретные файлы (.env, .pem, .key, credentials)      │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    RAG обработка                            │
+├─────────────────────────────────────────────────────────────┤
+│  1. Семантическое чанкование → Разбиение кода на единицы    │
+│  2. Генерация эмбеддингов → Векторное представление         │
+│  3. Кэширование → Локальный кэш эмбеддингов                 │
+│  4. Гибридный поиск → Комбинация семантического + ключевого │
+│  5. Переранжирование → Оценка релевантности                 │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Построение графа кода                    │
+├─────────────────────────────────────────────────────────────┤
+│  Парсинг импортов/экспортов → Граф зависимостей → DOT формат│
+│  Пример:                                                    │
+│  digraph Codebase {                                         │
+│    rankdir=LR;                                              │
+│    "src/main.tsx" -> "src/App.tsx";                         │
+│    "src/services/api.ts" -> "src/utils/fetch.ts";           │
+│  }                                                          │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Генерация промпта                        │
+├─────────────────────────────────────────────────────────────┤
+│  1. Выбор шаблона (docs/audit/integration и т.д.)           │
+│  2. Инъекция контекста репозитория                          │
+│  3. Добавление графа кода (если доступен)                   │
+│  4. Применение результатов RAG                              │
+│  5. Генерация финального промпта через AI-провайдер         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 2. Поток гибридного поиска RAG
+
+```typescript
+// Упрощённое представление потока
+async function performRAG(query: string, repoData: RepoData): Promise<string[]> {
+  // Шаг 1: Переписать запрос для лучшего поиска
+  const rewrittenQuery = await rewriteQueryWithAI(query);
   
-  subgraph cluster_services {
-    label "Слой сервисов";
-    geminiService;
-    ollamaService;
-    qwenService;
-    githubService;
-    localFileService;
-  }
+  // Шаг 2: Проверить кэш эмбеддингов
+  const cachedEmbedding = await embeddingCache.get(rewrittenQuery);
   
-  subgraph cluster_templates {
-    label "Слой шаблонов";
-    defaultTemplate;
-    docsTemplate;
-    auditTemplate;
-    integrationTemplate;
-  }
+  // Шаг 3: Сгенерировать эмбеддинг если нет в кэше
+  const embedding = cachedEmbedding || await generateEmbedding(rewrittenQuery);
   
-  subgraph cluster_utils {
-    label "Утилиты";
-    codeGraph;
-    hybridSearch;
-    semanticChunker;
-    tauriAdapter;
-  }
+  // Шаг 4: Гибридный поиск (семантический + ключевые слова)
+  const semanticResults = await semanticSearch(embedding, repoData.chunks);
+  const keywordResults = await keywordSearch(rewrittenQuery, repoData.files);
   
-  aiAdapter -> geminiService;
-  aiAdapter -> ollamaService;
-  aiAdapter -> qwenService;
+  // Шаг 5: Объединить и переранжировать
+  const combined = hybridRank(semanticResults, keywordResults);
   
-  docsTemplate -> templateTypes;
-  auditTemplate -> templateTypes;
-  integrationTemplate -> templateTypes;
-  
-  hybridSearch -> semanticChunker;
-  codeGraph -> fileSystem;
-  
-  tauriAdapter -> qwenAuthService;
-  localFileService -> githubService;
+  // Шаг 6: Вернуть лучшие результаты
+  return combined.slice(0, MAX_RESULTS);
 }
 ```
 
 ---
 
-## 🖥️ Web vs Desktop (Tauri)
-
-| Функция | Веб-версия | Desktop (Tauri) |
-|---------|------------|-----------------|
-| Анализ GitHub | ✅ | ✅ |
-| Доступ к локальным файлам | ⚠️ Ограничен | ✅ Полный |
-| Интеграция с Ollama | ⚠️ Проблемы CORS | ✅ Нативная |
-| Доступ к файловой системе | Песочница браузера | Нативный API |
-| Офлайн-режим | ❌ | ✅ |
-| Системный трей | ❌ | ✅ |
-| Авто-обновления | ❌ | ✅ |
-| Нативные уведомления | ❌ | ✅ |
-
-### Когда использовать каждую версию
-
-**Веб-версия:**
-- Быстрый анализ публичных GitHub репозиториев
-- Обмен результатами анализа через URL
-- Не требует установки
-
-**Desktop-версия:**
-- Работа с приватными/локальными кодовыми базами
-- Полная интеграция с Ollama без CORS
-- Нативный доступ к файловой системе
-- Лучшая производительность для больших репозиториев
-
----
-
-## 📦 Установка и настройка
+## 📥 Установка и настройка
 
 ### Требования
 
-```bash
-# Требуется Node.js 18+
-node --version  # >= 18.0.0
+| Требование | Версия | Назначение |
+|------------|--------|------------|
+| Node.js | 18.x или выше | Среда выполнения |
+| npm | 9.x или выше | Управление пакетами |
+| Git | 2.x или выше | Доступ к репозиториям |
+| Rust (только Desktop) | 1.70+ | Бэкенд Tauri |
 
-# npm или pnpm
-npm --version   # >= 9.0.0
-
-# Для сборки Desktop (опционально)
-rustc --version # >= 1.70.0
-cargo --version
-```
-
-### 1. Клонирование репозитория
+### Вариант 1: Веб-приложение
 
 ```bash
+# 1. Клонировать репозиторий
 git clone https://github.com/Sucotasch/Repo-Prompt-Generator.git
 cd Repo-Prompt-Generator
-```
 
-### 2. Установка зависимостей
-
-```bash
-# Установка всех зависимостей workspace
+# 2. Установить зависимости
 npm install
 
-# Или с pnpm
-pnpm install
-```
-
-### 3. Настройка окружения
-
-```bash
-# Копирование примера файла окружения
-cp .env.example .env
-
-# Редактирование .env с вашими API ключами
-# GEMINI_API_KEY=ваш_gemini_ключ
-# GITHUB_TOKEN=ваш_github_токен (опционально, увеличивает лимиты)
-# OLLAMA_URL=http://localhost:11434
-```
-
-### 4. Запуск сервера разработки
-
-```bash
-# Веб-приложение
+# 3. Запустить сервер разработки
 npm run dev
 
-# Desktop-приложение (требуется Rust)
-cd apps/desktop
-npm run tauri dev
-```
-
-### 5. Сборка для продакшена
-
-```bash
-# Сборка всех workspace
+# 4. Собрать для продакшена
 npm run build
 
-# Сборка desktop приложения
-cd apps/desktop
+# 5. Запустить продакшен сервер
+npm run start
+```
+
+### Вариант 2: Десктопное приложение (Tauri)
+
+```bash
+# 1. Клонировать репозиторий
+git clone https://github.com/Sucotasch/Repo-Prompt-Generator.git
+cd Repo-Prompt-Generator/apps/desktop
+
+# 2. Установить зависимости
+npm install
+
+# 3. Установить Tauri CLI (если не установлен)
+npm install -g @tauri-apps/cli
+
+# 4. Запустить в режиме разработки
+npm run tauri dev
+
+# 5. Собрать для продакшена
 npm run tauri build
 ```
 
-### 6. Настройка Ollama (опционально)
+### Вариант 3: Использование готовых бинарников
 
-```bash
-# Установка Ollama
-curl -fsSL https://ollama.com/install.sh | sh
+Скачайте последнюю версию со страницы [Releases](https://github.com/Sucotasch/Repo-Prompt-Generator/releases):
 
-# Загрузка рекомендуемых моделей
-ollama pull llama2
-ollama pull coder-model
-ollama pull nomic-embed-text  # Для эмбеддингов
-
-# Настройка CORS для веб-версии
-export OLLAMA_ORIGINS="http://localhost:5173"
-ollama serve
-```
+| Платформа | Файл |
+|-----------|------|
+| Windows | `Repo-Prompt-Generator_x.x.x_x64_en-US.msi` |
+| macOS | `Repo-Prompt-Generator_x.x.x_x64.dmg` |
+| Linux | `Repo-Prompt-Generator_x.x.x_amd64.AppImage` |
 
 ---
 
-## 🚀 Использование
+## ⚙️ Конфигурация
 
-### Быстрый старт
+### Переменные окружения
 
-#### Шаг 1: Выбор режима ввода
+Создайте файл `.env` на основе `.env.example`:
 
-```typescript
-// GitHub репозиторий
-const githubUrl = "https://github.com/username/repo";
+```bash
+# GitHub API Token (опционально, увеличивает лимиты)
+GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 
-// ИЛИ Локальные файлы
-const localFiles = await fileInput.files;
+# Gemini API Key (для облачного AI)
+GEMINI_API_KEY=xxxxxxxxxxxxxxxxxxxxxx
+
+# Конфигурация Ollama (для локального AI)
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=coder-model
+
+# Qwen OAuth (для Alibaba Cloud AI)
+QWEN_CLIENT_ID=f0304373b74a44d2b584a3fb70ca9e56
+
+# Кастомный OpenAI-совместимый API
+CUSTOM_API_BASE_URL=https://your-api.com/v1
+CUSTOM_API_KEY=your-api-key
+CUSTOM_MODEL=your-model-name
 ```
 
-#### Шаг 2: Выбор шаблона
+### Настройки приложения (LocalStorage)
 
-```typescript
-import { getTemplate } from "@repo-prompt-generator/core";
+Приложение хранит пользовательские предпочтения в localStorage браузера:
 
-// Доступные шаблоны
-const templates = [
-  "default",      // Общий системный промпт
-  "docs",         // Техническая документация
-  "audit",        // Аудит архитектуры кода
-  "integration",  // Сравнение репозиториев
-  "security",     // Анализ безопасности
-  "architecture", // Документация архитектуры
-  "eli5",         // Простое объяснение
-];
-
-const template = getTemplate("docs");
+```json
+{
+  "githubToken": "ghp_xxx",
+  "maxFiles": 5,
+  "inputMode": "github",
+  "aiProvider": "gemini",
+  "ollamaUrl": "http://localhost:11434",
+  "ollamaModel": "coder-model",
+  "customApiUrl": "",
+  "customApiKey": "",
+  "customModel": ""
+}
 ```
 
-#### Шаг 3: Настройка AI провайдера
+### Настройка Ollama (локальный AI)
+
+```bash
+# 1. Установить Ollama
+# macOS/Linux:
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Windows: Скачать с https://ollama.com/download
+
+# 2. Загрузить модель для кодинга
+ollama pull coder-model
+# или
+ollama pull llama2
+# или
+ollama pull codellama
+
+# 3. Настроить CORS (для веб-приложения)
+export OLLAMA_ORIGINS="http://localhost:5173"
+ollama serve
+
+# 4. Проверить подключение
+curl http://localhost:11434/api/tags
+```
+
+### Настройка GitHub токена
+
+1. Перейдите на [GitHub Personal Access Tokens](https://github.com/settings/tokens)
+2. Нажмите "Generate new token (classic)"
+3. Выберите scope: `repo`, `read:user`
+4. Скопируйте токен и вставьте в настройки приложения
+
+---
+
+## 💡 Примеры использования
+
+### Пример 1: Генерация системного промпта для AI-ассистента
 
 ```typescript
+// 1. Выберите шаблон "Default"
+// 2. Введите URL GitHub репозитория или загрузите локальные файлы
+// 3. Настройте RAG запрос:
+const ragQuery = "core logic, architecture, main components, tech stack";
+
+// 4. Нажмите "Generate Prompt"
+// 5. Результат будет содержать файл gemini.md:
+//    - Назначение проекта и стек технологий
+//    - Архитектурные паттерны и соглашения
+//    - Инструкции для AI по работе с кодовой базой
+//    - Правила внесения изменений
+```
+
+### Пример 2: Аудит архитектуры кода
+
+```typescript
+// 1. Выберите шаблон "Audit"
+// 2. Загрузите репозиторий (GitHub или локально)
+// 3. RAG запрос:
+const ragQuery = "core logic, complex algorithms, potential bugs, performance bottlenecks";
+
+// 4. Сгенерируйте отчёт аудита
+// 5. Экспортируйте в markdown
+```
+
+### Пример 3: Генерация технической документации
+
+```typescript
+// 1. Выберите шаблон "Documentation"
+// 2. Загрузите файлы локального проекта
+// 3. RAG запрос:
+const ragQuery = "exported functions, public API, configuration options";
+
+// 4. Сгенерируйте документацию
+// 5. Экспортируйте в markdown
+```
+
+### Пример 4: Интеграционный анализ (два репозитория)
+
+```typescript
+// 1. Выберите шаблон "Integration"
+// 2. Укажите целевой репозиторий (ваша кодовая база)
+// 3. Укажите референсный репозиторий (источник паттернов)
+// 4. RAG запрос:
+const ragQuery = "API endpoints, data models, service layer";
+
+// 5. Получите план интеграции с фрагментами кода
+```
+
+### Пример 5: Локальное использование с Ollama
+
+```bash
+# 1. Запустите сервер Ollama
+ollama serve
+
+# 2. В настройках приложения:
+#    - AI Provider: Ollama
+#    - URL: http://localhost:11434
+#    - Model: coder-model
+
+# 3. Все запросы обрабатываются локально (без затрат на API)
+```
+
+### Пример 6: Кастомный OpenAI-совместимый API
+
+```typescript
+// Конфигурация для совместимых сервисов:
 const config = {
-  provider: "gemini",  // или "ollama", "qwen", "custom"
-  model: "gemini-2.0-flash",
-  apiKey: process.env.GEMINI_API_KEY,
-  
-  // Для Ollama
-  ollamaUrl: "http://localhost:11434",
-  ollamaModel: "llama2",
-  
-  // Для кастомного OpenAI-совместимого API
-  customBaseUrl: "https://api.example.com/v1",
-  customApiKey: "ваш-ключ",
+  provider: 'custom',
+  customBaseUrl: 'https://your-api.com/v1',
+  customApiKey: 'your-key',
+  customModel: 'your-model-name'
 };
-```
 
-#### Шаг 4: Генерация промпта
-
-```typescript
-import { generateSystemPrompt, performRAG } from "@repo-prompt-generator/core";
-
-// Выполнение RAG поиска для релевантного контекста
-const ragResults = await performRAG({
-  query: "основные точки входа, экспортируемые функции, ядро архитектуры",
-  repoData: repositoryData,
-  maxResults: 10,
-});
-
-// Генерация финального промпта
-const prompt = await generateSystemPrompt({
-  template: "docs",
-  repoData: repositoryData,
-  ragResults: ragResults,
-  config: config,
-});
-
-// Сохранение в файл
-await saveMarkdownFile("gemini.md", prompt);
+// Поддерживаемые сервисы:
+// - OpenAI
+// - Azure OpenAI
+// - LocalAI
+// - vLLM
+// - LM Studio
+// - Любой OpenAI-совместимый API
 ```
 
 ---
 
 ## 📑 Шаблоны анализа
 
-### 1. Шаблон Default (`default`)
-
-**Назначение:** Генерация общего системного промпта для AI-ассистентов
-
-**Лучше всего подходит для:** Настройки AI контекста для продолжающейся разработки
-
-**Формат вывода:** `gemini.md` готовый для Gemini CLI или Cursor
-
-```typescript
-const defaultTemplate = {
-  systemInstruction: `Вы эксперт инженер ПО и AI ассистент. 
-  На основе информации GitHub репозитория, сгенерируйте комплексный 
-  системный промпт подходящий для дальнейшей разработки...`,
-  
-  defaultSearchQuery: "основная логика, архитектура, главные компоненты, стек технологий",
-};
-```
-
-### 2. Шаблон Documentation (`docs`)
-
-**Назначение:** Создание комплексной технической документации
-
-**Лучше всего подходит для:** Wiki страниц, детального README, API документации
-
-**Вывод включает:**
-- Реальные возможности программы
-- Алгоритм работы и архитектура
-- Процесс установки и настройки
-- Примеры использования основных функций
-
-```typescript
-const docsTemplate = {
-  systemInstruction: `Вы эксперт технический писатель и архитектор ПО.
-  Проанализируйте предоставленные данные GitHub репозитория для создания 
-  комплексной технической документации в формате Markdown...`,
-  
-  defaultSearchQuery: "основные точки входа, экспортируемые функции, публичный API",
-};
-```
-
-### 3. Шаблон Audit (`audit`)
-
-**Назначение:** Глубокий анализ архитектуры кодовой базы и дефектов
-
-**Лучше всего подходит для:** Код ревью, оценка технического долга, аудиты безопасности
-
-**Вывод включает:**
-- Документация алгоритмов и архитектуры
-- Идентификация дефектов (баги, мёртвый код, состояния гонки)
-- Анализ влияния на производительность
-- Практические рекомендации
-
-```typescript
-const auditTemplate = {
-  systemInstruction: `Вы эксперт Principal Software Engineer 
-  проводящий строгий аудит кода. Не полагайтесь только на README...`,
-  
-  defaultSearchQuery: "основная логика, сложные алгоритмы, потенциальные баги",
-};
-```
-
-### 4. Шаблон Integration (`integration`)
-
-**Назначение:** Сравнение двух репозиториев и планирование интеграции
-
-**Лучше всего подходит для:** Проектов миграции, внедрения функций, консолидации монорепозиториев
-
-**Критические правила:**
-- Сохранение домена: Бизнес-логика целевого репозитория неизменна
-- Только извлечение паттернов: Референсный репозиторий — источник технических паттернов
-- Минимальное вмешательство: Наименьшее нарушение существующей архитектуры
-
-```typescript
-const integrationTemplate = {
-  systemInstruction: `Проанализируйте обе кодовые базы и определите топ 1-3 
-  архитектурных паттерна из [REFERENCE_REPO], которые принесут 
-  наибольшую ценность при интеграции в [TARGET_REPO]...`,
-  
-  defaultSearchQuery: "архитектура системы, основные компоненты, интерфейсы",
-};
-```
-
-### 5. Шаблон Security (`security`)
-
-**Назначение:** Анализ уязвимостей безопасности
-
-**Лучше всего подходит для:** Аудитов безопасности, проверок соответствия, подготовки к пентестам
-
-### 6. Шаблон Architecture (`architecture`)
-
-**Назначение:** Документация архитектуры высокого уровня
-
-**Лучше всего подходит для:** Документов дизайна системы, онбординга, технических презентаций
-
-### 7. Шаблон ELI5 (`eli5`)
-
-**Назначение:** Простое объяснение для нетехнических стейкхолдеров
-
-**Лучше всего подходит для:** Продуктовой документации, обновлений для стейкхолдеров, маркетинга
+| Шаблон | ID | Категория | Случай использования |
+|--------|-----|-----------|---------------------|
+| Default | `default` | default | Генерация общего системного промпта |
+| Documentation | `docs` | docs | Техническая документация и README |
+| Audit | `audit` | audit | Анализ архитектуры и дефектов кода |
+| Integration | `integration` | integration | Заимствование паттернов между репозиториями |
+| Security | `security` | security | Оценка уязвимостей |
+| Architecture | `architecture` | architecture | Документирование дизайна системы |
+| ELI5 | `eli5` | education | Простое объяснение кода (для начинающих) |
 
 ---
 
-## 🤖 AI Провайдеры
+## 🤖 AI-провайдеры
 
-### Gemini (Google)
+### Сравнение провайдеров
 
-```typescript
-import { GeminiService } from "@repo-prompt-generator/core";
-
-const gemini = new GeminiService({
-  apiKey: process.env.GEMINI_API_KEY,
-  model: "gemini-2.0-flash",
-});
-
-const response = await gemini.generateContent({
-  prompt: systemPrompt,
-  context: repoContext,
-});
-```
-
-**Преимущества:** Большое контекстное окно, высокое качество, мультимодальность
-**Недостатки:** Требуется API ключ, только облако
-
-### Ollama (Локальный)
-
-```typescript
-import { OllamaService } from "@repo-prompt-generator/core";
-
-const ollama = new OllamaService({
-  baseUrl: "http://localhost:11434",
-  model: "llama2",
-});
-
-// Проверка подключения
-const isConnected = await checkOllamaConnection();
-
-// Список доступных моделей
-const models = await fetchOllamaModels();
-
-// Генерация ответа
-const response = await generate_final_prompt_with_ollama({
-  prompt: systemPrompt,
-  model: "coder-model",
-});
-```
-
-**Преимущества:** Приватность, офлайн, бесплатно, настраиваемость
-**Недостатки:** Требуется локальная настройка, переменное качество
-
-### Qwen (Alibaba)
-
-```typescript
-import { QwenService, startDeviceAuth } from "@repo-prompt-generator/core";
-
-// OAuth Device Flow аутентификация
-const auth = await startDeviceAuth();
-// Пользователь посещает URL и вводит код
-const token = await pollDeviceToken(auth.deviceCode);
-
-const qwen = new QwenService({ token });
-```
-
-**Преимущества:** Конкурентное ценообразование, хорошая производительность
-**Недостатки:** Требуется настройка OAuth
-
-### OpenAI-совместимый
-
-```typescript
-import { OpenAICompatibleService } from "@repo-prompt-generator/core";
-
-const custom = new OpenAICompatibleService({
-  baseUrl: "https://your-api.com/v1",
-  apiKey: "ваш-ключ",
-  model: "ваша-модель",
-});
-```
-
-**Поддерживаемые провайдеры:**
-- OpenAI
-- Azure OpenAI
-- LocalAI
-- vLLM
-- LM Studio
-- Любой OpenAI-совместимый API
-
----
-
-## 📚 Справочник API
-
-### Основные сервисы
-
-| Сервис | Метод | Описание |
-|--------|-------|----------|
-| `githubService` | `fetchRepoData(url, token)` | Получение структуры репозитория из GitHub |
-| `localFileService` | `processLocalFolder(files, maxFiles)` | Обработка загрузки локальных файлов |
-| `geminiService` | `generateContent(prompt, context)` | Генерация контента с Gemini |
-| `ollamaService` | `generate(prompt, model)` | Генерация контента с Ollama |
-| `ragService` | `performRAG(query, repoData)` | Семантический поиск с RAG |
-
-### Функции шаблонов
-
-| Функция | Параметры | Возвращает |
-|---------|-----------|------------|
-| `getTemplate(id)` | `templateId: string` | `TemplateDefinition` |
-| `getAllTemplates()` | - | `TemplateDefinition[]` |
-| `generateSystemPrompt()` | `PromptConfig` | `string` |
-| `buildPromptText()` | `template, context` | `string` |
-
-### Утилиты
-
-| Функция | Описание |
-|---------|----------|
-| `buildCodeDependencyGraph()` | Генерация DOT графа импортов |
-| `semanticChunker()` | Разделение кода на семантические чанки |
-| `hybridSearch()` | Комбинация ключевого + семантического поиска |
-| `isTauri()` | Проверка запуска в Tauri |
-| `tauriInvoke()` | Вызов Rust бэкенда из JS |
+| Провайдер | Скорость | Качество | Стоимость | Приватность |
+|-----------|----------|----------|-----------|-------------|
+| Gemini | Быстро | Высокое | Есть бесплатный тариф | Облако |
+| Ollama | Средне | Хорошее | Бесплатно | Локально |
+| Qwen | Быстро | Высокое | Есть бесплатный тариф | Облако |
+| Кастомный API | Варьируется | Варьируется | Варьируется | Зависит |
 
 ---
 
@@ -1366,105 +1379,50 @@ const custom = new OpenAICompatibleService({
 |------------|--------|------------|
 | React | 19.0 | UI фреймворк |
 | TypeScript | 5.8 | Типобезопасность |
-| Vite | 6.2 | Инструмент сборки |
+| Vite | 6.2 | Инструмент сборки и dev-сервер |
 | Tailwind CSS | Latest | Стилизация |
 | Lucide React | Latest | Иконки |
 
 ### Бэкенд (Desktop)
 | Технология | Версия | Назначение |
 |------------|--------|------------|
-| Tauri | 2.0 | Desktop фреймворк |
-| Rust | 1.70+ | Нативный бэкенд |
-| Cargo | Latest | Менеджер пакетов |
+| Tauri | 2.0 | Десктопный фреймворк |
+| Rust | 1.70+ | Системные операции |
+| @tauri-apps/api | 2.x | JavaScript API Tauri |
 
-### AI/ML
-| Технология | Назначение |
-|------------|------------|
-| Google Gemini API | Облачный AI |
-| Ollama | Локальный AI |
-| Qwen API | Альтернативный облачный AI |
-| Embedding Cache | Семантический поиск |
-
-### Разработка
-| Инструмент | Назначение |
-|------------|------------|
-| npm workspaces | Управление монорепозиторием |
-| ESLint | Качество кода |
-| Git | Контроль версий |
-
----
-
-## 🤝 Вклад в проект
-
-### Рабочий процесс разработки
-
-```bash
-# 1. Форкните репозиторий
-# 2. Создайте feature ветку
-git checkout -b feature/ваша-фича
-
-# 3. Внесите изменения и протестируйте
-npm run lint
-npm run build
-
-# 4. Закоммитьте с conventional commits
-git commit -m "feat: добавлен новый тип шаблона"
-
-# 5. Запушьте и создайте PR
-git push origin feature/ваша-фича
-```
-
-### Стиль кода
-
-- TypeScript strict mode включён
-- Правила ESLint применяются
-- Conventional Commits для сообщений коммитов
-- Prettier для форматирования кода
-
-### Добавление новых шаблонов
-
-```typescript
-// packages/core/src/templates/ваш-шаблон.ts
-import { TemplateDefinition } from "../types/template";
-
-export const yourTemplate: TemplateDefinition = {
-  metadata: {
-    id: "ваш-шаблон",
-    name: "Название вашего шаблона",
-    description: "Описание что делает этот шаблон",
-    color: "#hex-цвет",
-    category: "название-категории",
-  },
-  systemInstruction: `Ваша системная инструкция здесь...`,
-  deliverables: [],
-  successMetrics: [],
-  evidenceRequirements: [],
-  defaultSearchQuery: "релевантные поисковые термины",
-};
-
-// Экспорт в packages/core/src/templates/index.ts
-export { yourTemplate } from "./ваш-шаблон";
-```
+### Основные сервисы
+| Модуль | Назначение |
+|--------|------------|
+| `aiAdapter.ts` | Унифицированный интерфейс AI-провайдеров |
+| `geminiService.ts` | Интеграция с Google Gemini |
+| `ollamaService.ts` | Интеграция с локальным Ollama |
+| `qwenService.ts` | Интеграция с Alibaba Qwen |
+| `githubService.ts` | Клиент GitHub API |
+| `localFileService.ts` | Доступ к локальной файловой системе |
+| `ragService.ts` | RAG-движок и гибридный поиск |
+| `embeddingCacheService.ts` | Управление кэшем векторов |
+| `codeGraph.ts` | Построитель графа зависимостей |
+| `semanticChunker.ts` | Чанкование кода для RAG |
+| `hybridSearch.ts` | Комбинированный семантический + ключевой поиск |
 
 ---
 
-## 📄 Лицензия
-
-Лицензия MIT — См. файл LICENSE для деталей
-
----
-
-## 🆘 Устранение неполадок
+## 🔧 Решение проблем
 
 ### Ошибка: "Failed to embed query"
 
-**Причина:** Модель Ollama не загружена
+**Причина:** Модель Ollama не загружена или сервер не запущен
 
 **Решение:**
 ```bash
-ollama pull nomic-embed-text
-# или используйте другую модель
+# Загрузить модель
+ollama pull coder-model
+
+# Или использовать альтернативную модель
 ollama pull llama2
+
+# Перезапустить сервер Ollama
+ollama serve
 ```
 
 ### Ошибка: "CORS Error"
@@ -1473,7 +1431,7 @@ ollama pull llama2
 
 **Решение:**
 ```bash
-# Windows - используйте start-ollama.bat
+# Windows - используйте start-ollama.bat с правильными origins
 # Linux/Mac:
 export OLLAMA_ORIGINS="http://localhost:5173"
 ollama serve
@@ -1481,27 +1439,45 @@ ollama serve
 
 ### Ошибка: "Rate Limit Exceeded"
 
-**Причина:** Достигнут лимит API
+**Причина:** Достигнут лимит GitHub API
 
 **Решение:**
-- Добавьте GitHub токен для больших лимитов
-- Подождите и повторите попытку
-- Используйте локальный Ollama вместо этого
+1. Добавьте GitHub токен в настройках (увеличивает лимит с 60 до 5000/час)
+2. Дождитесь сброса лимита (обычно 1 час)
+3. Используйте локальные файлы вместо GitHub
 
 ### Ошибка: "Not running in Tauri"
 
-**Причина:** Tauri-специфичная функция вызвана в веб-версии
+**Причина:** Tauri-специфичная функция вызвана в веб-контексте
 
 **Решение:**
-```typescript
-import { isTauri } from "@repo-prompt-generator/core";
+- Используйте десктопное приложение для операций с файловой системой
+- Веб-приложение имеет ограниченный доступ к файлам через песочницу браузера
 
-if (isTauri()) {
-  // Tauri-специфичный код
-} else {
-  // Веб фоллбэк
-}
-```
+### Ошибка: "Qwen OAuth Failed"
+
+**Причина:** Таймаут потока device code или проблема с сетью
+
+**Решение:**
+1. Убедитесь в стабильном интернет-соединении
+2. Завершите OAuth поток в течение 10 минут
+3. Попробуйте снова с новым device code
+
+---
+
+## 📄 Лицензия
+
+Этот проект с открытым исходным кодом доступен под [лицензией MIT](LICENSE).
+
+---
+
+## 🤝 Вклад в проект
+
+1. Форкните репозиторий
+2. Создайте ветку для функции (`git checkout -b feature/amazing-feature`)
+3. Закоммитьте изменения (`git commit -m 'Add amazing feature'`)
+4. Отправьте в ветку (`git push origin feature/amazing-feature`)
+5. Откройте Pull Request
 
 ---
 
@@ -1509,14 +1485,5 @@ if (isTauri()) {
 
 - **Issues:** [GitHub Issues](https://github.com/Sucotasch/Repo-Prompt-Generator/issues)
 - **Discussions:** [GitHub Discussions](https://github.com/Sucotasch/Repo-Prompt-Generator/discussions)
-- **Email:** Контакт через GitHub
 
 ---
-
-<div align="center">
-
-**Made with ❤️ by Sucotasch**
-
-[⭐ Star on GitHub](https://github.com/Sucotasch/Repo-Prompt-Generator) | [🐛 Report Issue](https://github.com/Sucotasch/Repo-Prompt-Generator/issues)
-
-</div>
