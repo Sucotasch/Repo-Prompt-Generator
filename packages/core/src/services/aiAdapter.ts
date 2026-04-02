@@ -87,10 +87,15 @@ export async function generatePrompt(
     geminiApiKey?: string;
     proxyAddress?: string;
     fileTruncationLimit?: number;
+    isDeepAnalysis?: boolean;
+    onStatusUpdate?: (status: string) => void;
   },
 ): Promise<{
   text: string;
   modelVersion: string;
+  requestedFiles?: string[];
+  fetchedFilesCount?: number;
+  fetchedFilesDetails?: any[];
   rateLimit?: {
     remainingRequests: string;
     resetRequests: string;
@@ -111,7 +116,9 @@ export async function generatePrompt(
       referenceRepoData,
       attachedDocs,
       options.qwenResourceUrl,
-      0,
+      fileTruncationLimit,
+      options.isDeepAnalysis,
+      options.onStatusUpdate
     );
   } else if (
     provider === "custom" &&
@@ -147,7 +154,9 @@ export async function generatePrompt(
       usedOllama,
       referenceRepoData,
       attachedDocs,
-      0,
+      fileTruncationLimit,
+      options?.isDeepAnalysis,
+      options?.onStatusUpdate,
     );
   }
 }

@@ -117,6 +117,45 @@ async fn call_gemini_secure(state: State<'_, AppState>, prompt: String, model: O
 }
 
 #[tauri::command]
+async fn call_gemini_advanced(state: State<'_, AppState>, contents: serde_json::Value, tools: Option<serde_json::Value>, model: Option<String>) -> Result<serde_json::Value, String> {
+    let key = state.gemini_api_key.read().await.clone();
+
+    if key.is_empty() {
+        return Err("Gemini API key is missing. Please enter it in the settings or set the GEMINI_API_KEY environment variable.".to_string());
+    }
+
+    let model_name = model.unwrap_or_else(|| "gemini-3.1-pro-preview".to_string());
+    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model_name);
+
+    let mut body_map = serde_json::Map::new();
+    body_map.insert("contents".to_string(), contents);
+    if let Some(t) = tools {
+        body_map.insert("tools".to_string(), t);
+    }
+    let body = serde_json::Value::Object(body_map);
+
+    let request = isahc::Request::builder()
+        .method("POST")
+        .uri(url)
+        .header("Content-Type", "application/json")
+        .header("x-goog-api-key", &key)
+        .body(body.to_string())
+        .map_err(|e| e.to_string())?;
+
+    let client = state.http_client.read().await.clone();
+    let mut response = client.send_async(request).await.map_err(|e| e.to_string())?;
+
+    let response_body = response.text_async().await.map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format!("Gemini API error: {} - {}", response.status(), response_body));
+    }
+
+    let json: serde_json::Value = serde_json::from_str(&response_body).map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
+#[tauri::command]
 async fn scan_local_repository(path: String) -> Result<Vec<FileEntry>, String> {
     use tokio::task::JoinSet;
     let mut files = Vec::new();
@@ -714,7 +753,9 @@ async fn qwen_ai_proxy(
     prompt: String, 
     model: String, 
     is_json: bool,
-    resource_url: Option<String>
+    resource_url: Option<String>,
+    messages: Option<serde_json::Value>,
+    tools: Option<serde_json::Value>
 ) -> Result<serde_json::Value, String> {
     // Use OpenAI-compatible endpoint (same as original server.ts)
     let mut endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions".to_string();
@@ -734,12 +775,21 @@ async fn qwen_ai_proxy(
     // Build OpenAI-compatible request body (same as original server.ts)
     let mut payload = serde_json::json!({
         "model": model,
-        "messages": [
-            { "role": "system", "content": "You are an expert software architect. Output clean markdown." },
-            { "role": "user", "content": prompt }
-        ],
         "temperature": if is_json { 0.1 } else { 0.3 }
     });
+
+    if let Some(msgs) = messages {
+        payload.as_object_mut().unwrap().insert("messages".to_string(), msgs);
+    } else {
+        payload.as_object_mut().unwrap().insert("messages".to_string(), serde_json::json!([
+            { "role": "system", "content": "You are an expert software architect. Output clean markdown." },
+            { "role": "user", "content": prompt }
+        ]));
+    }
+
+    if let Some(t) = tools {
+        payload.as_object_mut().unwrap().insert("tools".to_string(), t);
+    }
 
     if is_json {
         payload.as_object_mut().unwrap().insert(
@@ -776,9 +826,18 @@ async fn qwen_ai_proxy(
             .and_then(|m| m.as_str())
             .or_else(|| json.get("message").and_then(|m| m.as_str()))
             .unwrap_or("Qwen API Error");
+            
+        let err_code = json.get("error")
+            .and_then(|e| e.get("code"))
+            .or_else(|| json.get("code"));
         
         let mut err_result = serde_json::Map::new();
-        err_result.insert("output".to_string(), serde_json::json!({"error": err_msg}));
+        let mut output_obj = serde_json::Map::new();
+        output_obj.insert("error".to_string(), serde_json::Value::from(err_msg));
+        if let Some(c) = err_code {
+            output_obj.insert("code".to_string(), c.clone());
+        }
+        err_result.insert("output".to_string(), serde_json::Value::Object(output_obj));
         err_result.insert("rateLimit".to_string(), serde_json::Value::Object(rate_limit));
         err_result.insert("status".to_string(), serde_json::Value::from(status.as_u16()));
         return Ok(serde_json::Value::Object(err_result));
@@ -792,13 +851,20 @@ async fn qwen_ai_proxy(
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
         .unwrap_or("");
+    let response_message = json.get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"));
     let response_model = json.get("model").and_then(|m| m.as_str()).unwrap_or(&model);
 
     let mut result_obj = serde_json::Map::new();
-    result_obj.insert("output".to_string(), serde_json::json!({
-        "output": { "text": response_text },
-        "model": response_model
-    }));
+    let mut output_obj = serde_json::Map::new();
+    output_obj.insert("text".to_string(), serde_json::Value::from(response_text));
+    if let Some(msg) = response_message {
+        output_obj.insert("message".to_string(), msg.clone());
+    }
+    
+    result_obj.insert("output".to_string(), serde_json::Value::Object(output_obj));
+    result_obj.insert("model".to_string(), serde_json::Value::from(response_model));
     result_obj.insert("rateLimit".to_string(), serde_json::Value::Object(rate_limit));
     result_obj.insert("status".to_string(), serde_json::Value::from(status.as_u16()));
 
@@ -869,6 +935,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             call_gemini_secure,
+            call_gemini_advanced,
             scan_local_repository,
             fetch_github_repo,
             is_ollama_running,

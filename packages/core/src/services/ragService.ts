@@ -1,6 +1,7 @@
 import { EmbeddingCacheService } from "./embeddingCacheService";
 import { BM25, reciprocalRankFusion } from "../utils/hybridSearch";
 import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
+import { SemanticChunker } from "../utils/semanticChunker";
 
 export interface RagChunk {
   path: string;
@@ -73,31 +74,15 @@ function cosineSimilarity(a: number[], b: number[]): number {
 
 /**
  * Splits text into chunks for RAG.
+ * Maps legacy "linesPerChunk" to approximate tokens to preserve backward compatibility.
  */
 function chunkText(text: string, linesPerChunk: number = 30): string[] {
-  const lines = text.split("\n");
-  const chunks: string[] = [];
-  // Overlapping chunks by 5 lines to preserve context across boundaries
-  const overlap = 5;
-  const step = linesPerChunk - overlap;
-
-  for (let i = 0; i < lines.length; i += step) {
-    let chunk = lines.slice(i, i + linesPerChunk).join("\n");
-
-    // Fallback: If a chunk is insanely large (e.g., minified code or base64 on a single line),
-    // force-split it by character length to prevent Ollama 500 errors.
-    const MAX_CHARS = 8000;
-    if (chunk.length > MAX_CHARS) {
-      for (let j = 0; j < chunk.length; j += MAX_CHARS) {
-        chunks.push(chunk.substring(j, j + MAX_CHARS));
-      }
-    } else {
-      chunks.push(chunk);
-    }
-
-    if (i + linesPerChunk >= lines.length) break;
-  }
-  return chunks;
+  // Approximate conversion: 1 line ≈ 15 tokens.
+  const maxTokens = linesPerChunk * 15;
+  // 10% overlap to preserve context across boundaries
+  const overlapTokens = Math.floor(maxTokens * 0.1);
+  
+  return SemanticChunker.chunkText(text, { maxTokens, overlapTokens });
 }
 
 /**
@@ -128,7 +113,7 @@ Analyze the provided code snippets. When determining relevance:
   try {
     // We don't cache the query embedding as it's dynamic and small
     queryEmbedding = await getEmbedding(
-      query + "\n" + RAG_SYSTEM_INSTRUCTION,
+      query,
       ollamaUrl,
       model,
       repoUrl,
@@ -192,24 +177,24 @@ Analyze the provided code snippets. When determining relevance:
 
     if (intent === "BUG_HUNT") {
       if (pathLower.includes(".test.") || pathLower.includes(".spec."))
-        semanticScore *= 1.1;
+        semanticScore += 0.1;
       if (
         contentLower.includes("error") ||
         contentLower.includes("catch") ||
         contentLower.includes("throw")
       )
-        semanticScore *= 1.1;
+        semanticScore += 0.1;
     } else if (intent === "ARCHITECTURE") {
       if (pathLower.endsWith(".md") || pathLower.includes("docs/"))
-        semanticScore *= 1.2;
+        semanticScore += 0.2;
       if (pathLower.includes("types") || pathLower.includes("interfaces"))
-        semanticScore *= 1.1;
+        semanticScore += 0.1;
       if (
         pathLower.includes("index.") ||
         pathLower.includes("main.") ||
         pathLower.includes("app.")
       )
-        semanticScore *= 1.1;
+        semanticScore += 0.1;
     } else if (intent === "UI_UX") {
       if (
         pathLower.endsWith(".tsx") ||
@@ -217,26 +202,26 @@ Analyze the provided code snippets. When determining relevance:
         pathLower.endsWith(".css") ||
         pathLower.endsWith(".scss")
       )
-        semanticScore *= 1.2;
+        semanticScore += 0.2;
       if (
         pathLower.includes("components/") ||
         pathLower.includes("views/") ||
         pathLower.includes("pages/")
       )
-        semanticScore *= 1.1;
+        semanticScore += 0.1;
     } else if (intent === "DATA") {
       if (
         pathLower.endsWith(".sql") ||
         pathLower.includes("db/") ||
         pathLower.includes("models/")
       )
-        semanticScore *= 1.2;
+        semanticScore += 0.2;
       if (
         pathLower.includes("services/") ||
         pathLower.includes("store/") ||
         pathLower.includes("api/")
       )
-        semanticScore *= 1.1;
+        semanticScore += 0.1;
     }
 
     return {

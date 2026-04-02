@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { RepoData } from "./githubService";
 import { buildCodeDependencyGraph } from "../utils/codeGraph";
 import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
@@ -162,6 +162,8 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
   }
 }
 
+import { fetchSpecificFiles } from "./githubService";
+
 export async function generateSystemPrompt(
   repoData: RepoData,
   taskInstruction: string,
@@ -173,7 +175,9 @@ export async function generateSystemPrompt(
   referenceRepoData?: RepoData,
   attachedDocs?: { name: string; content: string }[],
   fileTruncationLimit: number = 0,
-): Promise<{ text: string; modelVersion: string }> {
+  isDeepAnalysis: boolean = false,
+  onStatusUpdate?: (status: string) => void,
+): Promise<{ text: string; modelVersion: string; requestedFiles?: string[]; fetchedFilesCount?: number }> {
   const prompt = buildPromptText(
     repoData,
     taskInstruction,
@@ -185,13 +189,110 @@ export async function generateSystemPrompt(
   );
 
   let finalPrompt = "Failed to generate prompt.";
+  let modelVersion = "gemini-3.1-pro-preview";
+  let requestedFilesList: string[] = [];
+  let fetchedFilesCount: number | undefined = undefined;
+
+  const contents: any[] = [{ role: "user", parts: [{ text: prompt }] }];
+  let tools: any[] | undefined = undefined;
+
+  if (isDeepAnalysis) {
+    tools = [
+      {
+        functionDeclarations: [
+          {
+            name: "request_additional_files",
+            description: "Request specific files from the repository to gain more context before answering.",
+            parameters: {
+              type: Type.OBJECT,
+              properties: {
+                filePaths: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: "List of file paths to fetch. Max 3 files.",
+                },
+              },
+              required: ["filePaths"],
+            },
+          },
+        ],
+      },
+    ];
+  }
 
   if (isTauri()) {
     try {
-      finalPrompt = await tauriInvoke<string>("call_gemini_secure", {
-        prompt,
-        model: "gemini-3.1-pro-preview",
+      if (onStatusUpdate) onStatusUpdate("Analyzing project structure...");
+      let response = await tauriInvoke<any>("call_gemini_advanced", {
+        contents,
+        tools,
+        model: modelVersion,
       });
+
+      if (response.candidates && response.candidates[0].content.parts[0].functionCall) {
+        const call = response.candidates[0].content.parts[0].functionCall;
+        if (call.name === "request_additional_files") {
+          const requestedFiles = call.args.filePaths || [];
+          requestedFilesList = requestedFiles;
+          if (onStatusUpdate) onStatusUpdate(`Requesting additional files (${requestedFiles.length})...`);
+          
+          const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, undefined, referenceRepoData);
+          fetchedFilesCount = fetchedFiles.length;
+          
+          let instructionText = "";
+          if (fetchedFiles.length === 0) {
+            if (onStatusUpdate) onStatusUpdate("Failed to fetch files. Generating fallback response...");
+            instructionText = "\n\nCRITICAL INSTRUCTION: The requested files could not be fetched or were empty. You MUST now provide the final answer based on the initial context. Do NOT request any more files. Provide the final output directly.";
+          } else {
+            if (onStatusUpdate) onStatusUpdate(`Successfully fetched ${fetchedFiles.length} files. Generating final response...`);
+            instructionText = "\n\nCRITICAL INSTRUCTION: You have received the requested files. You MUST now provide the final answer based on these files. Do NOT request any more files. Provide the final output directly.";
+          }
+          
+          contents.push(response.candidates[0].content);
+          contents.push({
+            role: "user",
+            parts: [
+              {
+                functionResponse: {
+                  name: "request_additional_files",
+                  response: { files: fetchedFiles }
+                }
+              },
+              {
+                text: instructionText
+              }
+            ]
+          });
+
+          response = await tauriInvoke<any>("call_gemini_advanced", {
+            contents,
+            tools,
+            model: modelVersion,
+          });
+        }
+      }
+
+      if (response.candidates && response.candidates.length > 0) {
+        const candidate = response.candidates[0];
+        let text = "";
+        let functionCall = null;
+        if (candidate.content?.parts) {
+          for (const part of candidate.content.parts) {
+            if (part.text) text += part.text;
+            if (part.functionCall) functionCall = part.functionCall;
+          }
+        }
+        
+        if (text.trim()) {
+          finalPrompt = text;
+        } else if (functionCall) {
+          finalPrompt = `Failed to generate prompt. Model attempted to call function '${functionCall.name}' again instead of providing a final answer.`;
+        } else {
+          finalPrompt = `Failed to generate prompt. Response was empty. Finish reason: ${candidate.finishReason || "Unknown"}.`;
+        }
+      } else {
+        finalPrompt = "Failed to generate prompt. No candidates returned.";
+      }
     } catch (e) {
       console.error("Failed to generate prompt with Gemini via Tauri:", e);
       finalPrompt = `Error: ${e}`;
@@ -201,11 +302,91 @@ export async function generateSystemPrompt(
       const ai = new GoogleGenAI({
         apiKey: geminiApiKey || (typeof process !== 'undefined' ? process.env.GEMINI_API_KEY : undefined) || import.meta.env.VITE_GEMINI_API_KEY || "",
       });
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
-        contents: prompt,
+
+      if (onStatusUpdate) onStatusUpdate("Analyzing project structure...");
+      let response = await ai.models.generateContent({
+        model: modelVersion,
+        contents,
+        config: {
+          tools,
+        },
       });
-      finalPrompt = response.text || "Failed to generate prompt.";
+
+      if (response.functionCalls && response.functionCalls.length > 0) {
+        const call = response.functionCalls[0];
+        if (call.name === "request_additional_files") {
+          const requestedFiles = (call.args as any).filePaths || [];
+          requestedFilesList = requestedFiles;
+          if (onStatusUpdate) onStatusUpdate(`Requesting additional files (${requestedFiles.length})...`);
+          
+          // Get token from local storage if available
+          let token = undefined;
+          try {
+            const settings = localStorage.getItem("gemini_app_settings");
+            if (settings) {
+              token = JSON.parse(settings).githubToken;
+            }
+          } catch (e) {}
+
+          const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, token, referenceRepoData);
+          fetchedFilesCount = fetchedFiles.length;
+          
+          let instructionText = "";
+          if (fetchedFiles.length === 0) {
+            if (onStatusUpdate) onStatusUpdate("Failed to fetch files. Generating fallback response...");
+            instructionText = "\n\nCRITICAL INSTRUCTION: The requested files could not be fetched or were empty. You MUST now provide the final answer based on the initial context. Do NOT request any more files. Provide the final output directly.";
+          } else {
+            if (onStatusUpdate) onStatusUpdate(`Successfully fetched ${fetchedFiles.length} files. Generating final response...`);
+            instructionText = "\n\nCRITICAL INSTRUCTION: You have received the requested files. You MUST now provide the final answer based on these files. Do NOT request any more files. Provide the final output directly.";
+          }
+          
+          contents.push(response.candidates?.[0]?.content);
+          contents.push({
+            role: "user",
+            parts: [
+              {
+                functionResponse: {
+                  name: "request_additional_files",
+                  response: { files: fetchedFiles }
+                }
+              },
+              {
+                text: instructionText
+              }
+            ]
+          });
+
+          response = await ai.models.generateContent({
+            model: modelVersion,
+            contents,
+            config: {
+              tools,
+            },
+          });
+        }
+      }
+
+      if (response.candidates && response.candidates.length > 0) {
+        const candidate = response.candidates[0];
+        let text = "";
+        let functionCall = null;
+        if (candidate.content?.parts) {
+          for (const part of candidate.content.parts) {
+            if (part.text) text += part.text;
+            if (part.functionCall) functionCall = part.functionCall;
+          }
+        }
+        
+        if (text.trim()) {
+          finalPrompt = text;
+        } else if (functionCall) {
+          finalPrompt = `Failed to generate prompt. Model attempted to call function '${functionCall.name}' again instead of providing a final answer.`;
+        } else {
+          finalPrompt = `Failed to generate prompt. Response was empty. Finish reason: ${candidate.finishReason || "Unknown"}.`;
+        }
+      } else {
+        finalPrompt = "Failed to generate prompt. No candidates returned.";
+      }
     } catch (e) {
       console.error("Failed to generate prompt with Gemini:", e);
       finalPrompt = `Error: ${e}`;
@@ -218,8 +399,5 @@ export async function generateSystemPrompt(
       finalPrompt;
   }
 
-  // Extract model version or fallback
-  const modelVersion = "gemini-3.1-pro-preview";
-
-  return { text: finalPrompt, modelVersion };
+  return { text: finalPrompt, modelVersion, requestedFiles: requestedFilesList, fetchedFilesCount };
 }

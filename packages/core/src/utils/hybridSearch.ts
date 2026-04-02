@@ -20,6 +20,7 @@ export class BM25 {
   private docLengths: number[] = [];
   private averageDocLength: number = 0;
   private termDocumentFrequencies: Map<string, number> = new Map();
+  private docTermFrequencies: Map<string, number>[] = [];
   private readonly k1 = 1.2; // Term frequency saturation
   private readonly b = 0.75; // Length normalization
 
@@ -30,6 +31,10 @@ export class BM25 {
       this.documents.push(terms);
       this.docLengths.push(terms.length);
       totalLength += terms.length;
+
+      const tfMap = new Map<string, number>();
+      terms.forEach((term) => tfMap.set(term, (tfMap.get(term) || 0) + 1));
+      this.docTermFrequencies.push(tfMap);
 
       const uniqueTerms = new Set(terms);
       uniqueTerms.forEach((term) => {
@@ -69,7 +74,7 @@ export class BM25 {
       const idf = Math.log(1 + (N - df + 0.5) / (df + 0.5));
 
       this.documents.forEach((docTerms, docIndex) => {
-        const tf = docTerms.filter((t) => t === term).length;
+        const tf = this.docTermFrequencies[docIndex].get(term) || 0;
         if (tf === 0) return;
 
         const docLength = this.docLengths[docIndex];

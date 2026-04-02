@@ -134,10 +134,8 @@ async function startServer() {
       );
       if (readmeRes.ok) {
         const readmeData = await readmeRes.json();
-        try {
-          readme = decodeURIComponent(escape(atob(readmeData.content)));
-        } catch (e) {
-          readme = atob(readmeData.content);
+        if (readmeData.content) {
+          readme = Buffer.from(readmeData.content, "base64").toString("utf-8");
         }
       }
 
@@ -160,10 +158,8 @@ async function startServer() {
           );
           if (fileRes.ok) {
             const fileData = await fileRes.json();
-            try {
-              dependencies += `\n--- ${file} ---\n${decodeURIComponent(escape(atob(fileData.content)))}\n`;
-            } catch (e) {
-              dependencies += `\n--- ${file} ---\n${atob(fileData.content)}\n`;
+            if (fileData.content) {
+              dependencies += `\n--- ${file} ---\n${Buffer.from(fileData.content, "base64").toString("utf-8")}\n`;
             }
           }
         }
@@ -288,13 +284,11 @@ async function startServer() {
         );
         if (fileRes.ok) {
           const fileData = await fileRes.json();
-          try {
+          if (fileData.content) {
             sourceFiles.push({
               path: file,
-              content: decodeURIComponent(escape(atob(fileData.content))),
+              content: Buffer.from(fileData.content, "base64").toString("utf-8"),
             });
-          } catch (e) {
-            sourceFiles.push({ path: file, content: atob(fileData.content) });
           }
         }
       }
@@ -320,6 +314,57 @@ async function startServer() {
     }
   });
 
+  // API route to fetch specific files from GitHub
+  app.post("/api/repo/files", async (req, res) => {
+    try {
+      const { owner, repo, branch, token, filePaths } = req.body;
+
+      if (!owner || !repo || !filePaths || !Array.isArray(filePaths)) {
+        return res.status(400).json({ error: "Missing required parameters" });
+      }
+
+      const headers: Record<string, string> = {
+        "User-Agent": "AI-Studio-Applet/1.0",
+        "Accept": "application/vnd.github.v3+json",
+      };
+      if (token) {
+        headers["Authorization"] = `token ${token}`;
+      }
+
+      const encodedBranch = encodeURIComponent(branch || "main");
+      const fetchedFiles: { path: string; content: string }[] = [];
+
+      // Limit to 3 files max
+      const pathsToFetch = filePaths.slice(0, 3);
+
+      for (const file of pathsToFetch) {
+        try {
+          const fileRes = await fetch(
+            `https://api.github.com/repos/${owner}/${repo}/contents/${file}?ref=${encodedBranch}`,
+            { headers }
+          );
+          if (fileRes.ok) {
+            const fileData = await fileRes.json();
+            if (fileData.content) {
+              let content = Buffer.from(fileData.content, "base64").toString("utf-8");
+              if (content.length > 50000) {
+                content = content.substring(0, 50000) + "\n\n... [TRUNCATED: Файл превышает лимит в 50KB. Показана только верхняя часть.]";
+              }
+              fetchedFiles.push({ path: file, content });
+            }
+          }
+        } catch (e) {
+          console.warn(`Failed to fetch file ${file}:`, e);
+        }
+      }
+
+      res.json({ files: fetchedFiles });
+    } catch (error: any) {
+      console.error("Error fetching specific files:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
+  });
+
   // API route to proxy Qwen requests
   app.post("/api/qwen", async (req, res) => {
     try {
@@ -327,6 +372,8 @@ async function startServer() {
         token,
         resourceUrl,
         prompt,
+        messages,
+        tools,
         model = "coder-model",
         isJson = false,
       } = req.body;
@@ -337,7 +384,7 @@ async function startServer() {
 
       const payload: any = {
         model,
-        messages: [
+        messages: messages || [
           {
             role: "system",
             content:
@@ -347,6 +394,10 @@ async function startServer() {
         ],
         temperature: isJson ? 0.1 : 0.3,
       };
+
+      if (tools) {
+        payload.tools = tools;
+      }
 
       if (isJson) {
         payload.response_format = { type: "json_object" };
@@ -423,6 +474,7 @@ async function startServer() {
             data.error?.message ||
             data.message ||
             `Qwen API Error: ${JSON.stringify(data)}`,
+          code: data.code || data.error?.code,
           rateLimit,
         });
       }
@@ -431,6 +483,7 @@ async function startServer() {
       res.json({
         output: {
           text: data.choices?.[0]?.message?.content || "",
+          message: data.choices?.[0]?.message,
         },
         model: data.model,
         rateLimit,

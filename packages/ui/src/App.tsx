@@ -132,6 +132,7 @@ export default function App() {
     resetTokens: string;
   } | null>(null);
   const [useRag, setUseRag] = useState(initialSettings.useRag || false);
+  const [isDeepAnalysis, setIsDeepAnalysis] = useState(initialSettings.isDeepAnalysis || false);
   const [ragModel, setRagModel] = useState(initialSettings.ragModel || "");
   const [ragTopK, setRagTopK] = useState(initialSettings.ragTopK || 10);
   const [ragChunkSize, setRagChunkSize] = useState(
@@ -293,6 +294,7 @@ export default function App() {
       qwenOAuthToken,
       qwenResourceUrl,
       useRag,
+      isDeepAnalysis,
       ragModel,
       ragTopK,
       ragChunkSize,
@@ -324,6 +326,7 @@ export default function App() {
     qwenOAuthToken,
     qwenResourceUrl,
     useRag,
+    isDeepAnalysis,
     ragModel,
     ragTopK,
     ragChunkSize,
@@ -1087,6 +1090,9 @@ pause`;
 
       let generatedPrompt = "";
       let finalModel = "";
+      let requestedFiles: string[] = [];
+      let fetchedFilesCount: number | undefined = undefined;
+      let fetchedFilesDetails: any[] | undefined = undefined;
       const taskInstruction = getSystemPrompt(templateMode, customInstruction);
 
       if (useOllamaForFinal && ollamaConnected !== false) {
@@ -1185,10 +1191,17 @@ pause`;
             fileTruncationLimit,
             geminiApiKey,
             proxyAddress,
+            isDeepAnalysis,
+            onStatusUpdate: setStatus,
           },
         );
         generatedPrompt = result.text;
         finalModel = result.modelVersion;
+        if (result.requestedFiles) {
+          requestedFiles = result.requestedFiles;
+          fetchedFilesCount = result.fetchedFilesCount;
+          fetchedFilesDetails = result.fetchedFilesDetails;
+        }
         if (aiProvider === "qwen" && result.rateLimit) {
           setQwenRateLimit(result.rateLimit);
         }
@@ -1220,6 +1233,34 @@ pause`;
       }
       if (usedOllama)
         metadata += `> - **Pre-processing:** Local LLM (Ollama)\n`;
+
+      if (requestedFiles && requestedFiles.length > 0) {
+        if (fetchedFilesCount !== undefined) {
+          metadata += `> - **Agentic RAG Requested Files:** (${fetchedFilesCount}/${requestedFiles.length} fetched)\n`;
+        } else {
+          metadata += `> - **Agentic RAG Requested Files:**\n`;
+        }
+        
+        // Add detailed file status if available
+        if (fetchedFilesDetails) {
+          requestedFiles.forEach(file => {
+            const detail = fetchedFilesDetails?.find((f: any) => f.path === file);
+            if (detail) {
+              if (detail.truncated) {
+                metadata += `>   - \`${file}\` (⚠️ Truncated: >50KB)\n`;
+              } else {
+                metadata += `>   - \`${file}\` (✅ Fetched)\n`;
+              }
+            } else {
+              metadata += `>   - \`${file}\` (❌ Not found)\n`;
+            }
+          });
+        } else {
+          requestedFiles.forEach(file => {
+            metadata += `>   - \`${file}\`\n`;
+          });
+        }
+      }
 
       metadata += `> \n`;
       metadata += `> <details><summary><b>Task Instructions</b></summary>\n> \n`;
@@ -2200,6 +2241,30 @@ pause`;
                     Use RAG (Smart Context Filter)
                   </label>
                 </div>
+                {(aiProvider === "gemini" || aiProvider === "qwen") && (
+                  <div className="flex items-center">
+                    <input
+                      id="isDeepAnalysis"
+                      type="checkbox"
+                      className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer disabled:opacity-50"
+                      checked={isDeepAnalysis}
+                      onChange={(e) => setIsDeepAnalysis(e.target.checked)}
+                      disabled={loading}
+                    />
+                    <label
+                      htmlFor="isDeepAnalysis"
+                      className="ml-2 flex items-center text-sm font-medium text-slate-700 cursor-pointer"
+                    >
+                      Agentic RAG (Deep Analysis)
+                      <span 
+                        className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200 uppercase tracking-wide"
+                        title="Warning: This mode sends the full context multiple times, which can triple token usage."
+                      >
+                        ⚠️ Tokens x3
+                      </span>
+                    </label>
+                  </div>
+                )}
               </div>
 
               {(useOllama || useOllamaForFinal || useOllamaForQueryExpansion || useRag) && (

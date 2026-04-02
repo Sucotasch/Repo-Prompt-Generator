@@ -90,3 +90,106 @@ export async function fetchRepoData(
     throw err;
   }
 }
+
+async function fetchFilesFromRepo(
+  info: RepoInfo,
+  filePaths: string[],
+  token?: string
+): Promise<{ path: string; content: string }[]> {
+  if (filePaths.length === 0) return [];
+  
+  try {
+    const owner = info.owner;
+    const repo = info.repo;
+    const branch = info.branch || info.defaultBranch;
+
+    if (isTauri()) {
+      const fetchedFiles: { path: string; content: string }[] = [];
+      const encodedBranch = encodeURIComponent(branch);
+      const headers: Record<string, string> = {
+        "User-Agent": "AI-Studio-Applet/1.0",
+        "Accept": "application/vnd.github.v3+json",
+      };
+      if (token) {
+        headers["Authorization"] = `token ${token}`;
+      }
+
+      for (const file of filePaths.slice(0, 3)) {
+        try {
+          const url = `https://api.github.com/repos/${owner}/${repo}/contents/${file}?ref=${encodedBranch}`;
+          const response = await tauriInvoke<any>("ai_network_request", {
+            method: "GET",
+            url,
+            headers,
+            body: null,
+          });
+
+          if (response && response.content) {
+            // Base64 decode in browser
+            const binaryString = atob(response.content);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
+            }
+            let content = new TextDecoder("utf-8").decode(bytes);
+
+            if (content.length > 50000) {
+              content = content.substring(0, 50000) + "\n\n... [TRUNCATED: File exceeds 50KB limit. Showing only the top part.]";
+            }
+            fetchedFiles.push({ path: file, content });
+          }
+        } catch (e) {
+          console.warn(`Failed to fetch specific file ${file} in Tauri:`, e);
+        }
+      }
+      return fetchedFiles;
+    }
+
+    const response = await fetch("/api/repo/files", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      signal: AbortSignal.timeout(30000),
+      body: JSON.stringify({ owner, repo, branch, token, filePaths }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error || "Failed to fetch specific files");
+    }
+
+    const data = await response.json();
+    return data.files || [];
+  } catch (err: any) {
+    console.error("Error fetching specific files:", err);
+    return [];
+  }
+}
+
+export async function fetchSpecificFiles(
+  repoData: RepoData,
+  filePaths: string[],
+  token?: string,
+  referenceRepoData?: RepoData
+): Promise<{ path: string; content: string }[]> {
+  const targetFiles = filePaths.filter(f => repoData.tree.includes(f));
+  const refFiles = referenceRepoData ? filePaths.filter(f => referenceRepoData.tree.includes(f) && !repoData.tree.includes(f)) : [];
+  const unknownFiles = filePaths.filter(f => !repoData.tree.includes(f) && !(referenceRepoData && referenceRepoData.tree.includes(f)));
+  
+  const finalTargetFiles = [...targetFiles, ...unknownFiles];
+  
+  let results: { path: string; content: string }[] = [];
+  
+  if (finalTargetFiles.length > 0) {
+    const targetResults = await fetchFilesFromRepo(repoData.info, finalTargetFiles, token);
+    results = results.concat(targetResults);
+  }
+  
+  if (refFiles.length > 0 && referenceRepoData) {
+    const refResults = await fetchFilesFromRepo(referenceRepoData.info, refFiles, token);
+    results = results.concat(refResults);
+  }
+  
+  return results;
+}
