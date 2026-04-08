@@ -1,6 +1,14 @@
+import { detectZoneFromPath } from "./zoneDetector";
+
 export interface ChunkingOptions {
   maxTokens?: number;
   overlapTokens?: number;
+  filePath?: string;
+}
+
+export interface ChunkResult {
+  text: string;
+  zone: string;
 }
 
 /**
@@ -16,11 +24,12 @@ export class SemanticChunker {
    * Разбивает текст на массив чанков.
    * @param text Исходный текст (код)
    * @param options Настройки размера чанка и перекрытия
-   * @returns Массив строк (чанков)
+   * @returns Массив объектов (текст чанка и его зона)
    */
-  static chunkText(text: string, options: ChunkingOptions = {}): string[] {
+  static chunkText(text: string, options: ChunkingOptions = {}): ChunkResult[] {
     const maxChars = (options.maxTokens || 512) * this.CHARS_PER_TOKEN;
     const overlapChars = (options.overlapTokens || 50) * this.CHARS_PER_TOKEN;
+    const zone = options.filePath ? detectZoneFromPath(options.filePath) : "General";
     
     const chunks: string[] = [];
     
@@ -69,6 +78,6 @@ export class SemanticChunker {
       }
     }
 
-    return finalChunks;
+    return finalChunks.map(chunk => ({ text: chunk, zone }));
   }
 }

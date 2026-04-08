@@ -757,16 +757,28 @@ async fn qwen_ai_proxy(
     messages: Option<serde_json::Value>,
     tools: Option<serde_json::Value>
 ) -> Result<serde_json::Value, String> {
+    let actual_model = if model.is_empty() { "coder-model".to_string() } else { model.clone() };
+    
     // Use OpenAI-compatible endpoint (same as original server.ts)
-    let mut endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions".to_string();
+    let mut endpoint = if actual_model == "coder-model" {
+        "https://coding.dashscope.aliyuncs.com/v1/chat/completions".to_string()
+    } else {
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions".to_string()
+    };
     if let Some(ref url) = resource_url {
         let mut base = url.clone();
         if !base.starts_with("http://") && !base.starts_with("https://") {
             base = format!("https://{}", base);
         }
-        if !base.ends_with("/v1/chat/completions") {
-            if !base.ends_with('/') { base.push('/'); }
-            base.push_str("v1/chat/completions");
+        if !base.ends_with("/chat/completions") {
+            if base.ends_with("/v1") {
+                base.push_str("/chat/completions");
+            } else {
+                if base.ends_with('/') {
+                    base.pop();
+                }
+                base.push_str("/v1/chat/completions");
+            }
         }
         endpoint = base;
     }
@@ -774,12 +786,19 @@ async fn qwen_ai_proxy(
 
     // Build OpenAI-compatible request body (same as original server.ts)
     let mut payload = serde_json::json!({
-        "model": model,
-        "temperature": if is_json { 0.1 } else { 0.3 }
+        "model": actual_model,
+        "max_tokens": 8192
     });
 
     if let Some(msgs) = messages {
-        payload.as_object_mut().unwrap().insert("messages".to_string(), msgs);
+        if !msgs.is_null() {
+            payload.as_object_mut().unwrap().insert("messages".to_string(), msgs);
+        } else {
+            payload.as_object_mut().unwrap().insert("messages".to_string(), serde_json::json!([
+                { "role": "system", "content": "You are an expert software architect. Output clean markdown." },
+                { "role": "user", "content": prompt }
+            ]));
+        }
     } else {
         payload.as_object_mut().unwrap().insert("messages".to_string(), serde_json::json!([
             { "role": "system", "content": "You are an expert software architect. Output clean markdown." },
@@ -788,14 +807,9 @@ async fn qwen_ai_proxy(
     }
 
     if let Some(t) = tools {
-        payload.as_object_mut().unwrap().insert("tools".to_string(), t);
-    }
-
-    if is_json {
-        payload.as_object_mut().unwrap().insert(
-            "response_format".to_string(), 
-            serde_json::json!({ "type": "json_object" })
-        );
+        if !t.is_null() && t.as_array().map_or(false, |a| !a.is_empty()) {
+            payload.as_object_mut().unwrap().insert("tools".to_string(), t);
+        }
     }
 
     let request = isahc::Request::builder()
@@ -803,6 +817,8 @@ async fn qwen_ai_proxy(
         .uri(&endpoint)
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", token))
+        .header("X-DashScope-AuthType", "qwen-oauth")
+        .header("X-DashScope-CacheControl", "enable")
         .body(serde_json::to_string(&payload).unwrap())
         .map_err(|e| e.to_string())?;
 

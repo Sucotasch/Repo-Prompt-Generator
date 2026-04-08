@@ -83,7 +83,12 @@ Query: "${query}"`;
 
   try {
     const data = await callQwen();
-    const text = data.output?.text || "{}";
+    let text = "{}";
+    if (data.choices && data.choices.length > 0) {
+      text = data.choices[0].message?.content || "{}";
+    } else if (data.output?.text) {
+      text = data.output.text;
+    }
     const parsed = JSON.parse(text);
     return {
       optimizedQuery: parsed.optimizedQuery || query,
@@ -176,15 +181,17 @@ export async function generateSystemPromptWithQwen(
   const callQwen = async (currentMessages: any[], currentTools?: any[], retryCount = 0): Promise<any> => {
     try {
       if (isTauri()) {
-        const data = await invoke<any>("qwen_ai_proxy", {
+        const payload: any = {
           token,
           prompt: "",
           messages: currentMessages,
-          tools: currentTools,
           model: "coder-model",
           isJson: false,
           resourceUrl,
-        });
+        };
+        if (currentTools) payload.tools = currentTools;
+        
+        const data = await invoke<any>("qwen_ai_proxy", payload);
 
         if (data.status && data.status >= 400) {
           const err: any = new Error(data.output?.error || data.output?.message || "Qwen API Error");
@@ -195,18 +202,20 @@ export async function generateSystemPromptWithQwen(
         }
         return data;
       } else {
+        const payload: any = {
+          token,
+          resourceUrl,
+          prompt: "",
+          messages: currentMessages,
+          model: "coder-model",
+          isJson: false,
+        };
+        if (currentTools) payload.tools = currentTools;
+
         const response = await fetch("/api/qwen", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            token,
-            resourceUrl,
-            prompt: "",
-            messages: currentMessages,
-            tools: currentTools,
-            model: "coder-model",
-            isJson: false,
-          }),
+          body: JSON.stringify(payload),
         });
 
         const data = await response.json();
@@ -242,7 +251,7 @@ export async function generateSystemPromptWithQwen(
     currentModelVersion = data.model || "coder-model";
     currentRateLimit = data.rateLimit;
 
-    let message = data.output?.message;
+    let message = data.choices && data.choices.length > 0 ? data.choices[0].message : data.output?.message;
     
     let toolCall = undefined;
     if (message?.tool_calls && message.tool_calls.length > 0) {
@@ -285,26 +294,25 @@ export async function generateSystemPromptWithQwen(
           instructionText = "\n\nCRITICAL INSTRUCTION: You have received the requested files. You MUST now provide the final answer based on these files. Do NOT request any more files. Provide the final output directly.";
         }
 
+        if (message && !message.content) {
+          message.content = "";
+        }
         messages.push(message);
         messages.push({
           role: "tool",
-          tool_call_id: toolCall.id,
-          name: toolCall.function.name,
-          content: JSON.stringify({ files: fetchedFiles })
-        });
-        messages.push({
-          role: "user",
-          content: instructionText
+          tool_call_id: toolCall.id || toolCall.function?.name,
+          name: toolCall.function?.name,
+          content: instructionText + "\n\n" + JSON.stringify({ files: fetchedFiles })
         });
 
         data = await callQwen(messages, undefined);
         currentModelVersion = data.model || "coder-model";
         currentRateLimit = data.rateLimit;
-        message = data.output?.message;
+        message = data.choices && data.choices.length > 0 ? data.choices[0].message : data.output?.message;
       }
     }
 
-    finalPrompt = data.output?.text || message?.content || "Failed to generate prompt.";
+    finalPrompt = (data.choices && data.choices.length > 0 ? data.choices[0].message?.content : data.output?.text) || message?.content || "Failed to generate prompt.";
   } catch (e: any) {
     console.error("Failed to generate prompt with Qwen:", e);
     finalPrompt = `Error: ${e.message || e}`;

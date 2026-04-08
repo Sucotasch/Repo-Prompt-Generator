@@ -382,9 +382,12 @@ async function startServer() {
         return res.status(401).json({ error: "Qwen OAuth token is required." });
       }
 
+      let actualModel = model === "coder-model" ? "qwen3-coder-plus" : model;
+
       const payload: any = {
-        model,
-        messages: messages || [
+        model: actualModel,
+        max_tokens: 8192,
+        messages: (messages && messages !== null) ? messages : [
           {
             role: "system",
             content:
@@ -392,32 +395,29 @@ async function startServer() {
           },
           { role: "user", content: prompt },
         ],
-        temperature: isJson ? 0.1 : 0.3,
       };
 
-      if (tools) {
+      if (tools && Array.isArray(tools) && tools.length > 0) {
         payload.tools = tools;
       }
 
-      if (isJson) {
-        payload.response_format = { type: "json_object" };
-      }
+      console.log("Qwen API Payload:", JSON.stringify(payload, null, 2));
 
-      let endpoint =
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+      let endpoint = model === "coder-model" 
+        ? "https://coding.dashscope.aliyuncs.com/v1/chat/completions"
+        : "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
       if (resourceUrl) {
         let baseUrl = resourceUrl;
         if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
           baseUrl = "https://" + baseUrl;
         }
-        try {
-          const urlObj = new URL(baseUrl);
-          if (urlObj.pathname === "/" || urlObj.pathname === "") {
-            endpoint = new URL("/v1/chat/completions", baseUrl).toString();
+        if (!baseUrl.endsWith("/chat/completions")) {
+          if (baseUrl.endsWith("/v1")) {
+            endpoint = baseUrl + "/chat/completions";
           } else {
-            endpoint = baseUrl;
+            endpoint = baseUrl.replace(/\/$/, "") + "/v1/chat/completions";
           }
-        } catch (e) {
+        } else {
           endpoint = baseUrl;
         }
       }
@@ -425,8 +425,12 @@ async function startServer() {
       const response = await fetch(endpoint, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+          "X-DashScope-AuthType": "qwen-oauth",
+          "X-DashScope-CacheControl": "enable",
+          "X-DashScope-UserAgent": "QwenCode/1.0.0",
+          "User-Agent": "QwenCode/1.0.0"
         },
         body: JSON.stringify(payload),
       });

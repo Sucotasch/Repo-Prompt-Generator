@@ -76,13 +76,13 @@ function cosineSimilarity(a: number[], b: number[]): number {
  * Splits text into chunks for RAG.
  * Maps legacy "linesPerChunk" to approximate tokens to preserve backward compatibility.
  */
-function chunkText(text: string, linesPerChunk: number = 30): string[] {
+function chunkText(text: string, filePath: string, linesPerChunk: number = 30): { text: string; zone: string }[] {
   // Approximate conversion: 1 line ≈ 15 tokens.
   const maxTokens = linesPerChunk * 15;
   // 10% overlap to preserve context across boundaries
   const overlapTokens = Math.floor(maxTokens * 0.1);
   
-  return SemanticChunker.chunkText(text, { maxTokens, overlapTokens });
+  return SemanticChunker.chunkText(text, { maxTokens, overlapTokens, filePath });
 }
 
 /**
@@ -122,15 +122,16 @@ Analyze the provided code snippets. When determining relevance:
     throw new Error(`Failed to embed query. Details: ${e.message}`);
   }
 
-  const allChunks: { path: string; content: string; embedding?: number[] }[] =
+  const allChunks: { path: string; content: string; zone: string; embedding?: number[] }[] =
     [];
 
   for (const file of sourceFiles) {
-    const chunks = chunkText(file.content, chunkSize);
+    const chunks = chunkText(file.content, file.path, chunkSize);
     for (let i = 0; i < chunks.length; i++) {
       allChunks.push({
         path: `${file.path} (Part ${i + 1})`,
-        content: chunks[i],
+        content: chunks[i].text,
+        zone: chunks[i].zone,
       });
     }
   }
@@ -252,9 +253,36 @@ Analyze the provided code snippets. When determining relevance:
     lexicalWeight,
   );
 
-  // 5. Return top K
-  return fusedResults.slice(0, topK).map((r) => ({
-    path: r.item.path,
-    content: `// RAG Hybrid Rank Score: ${(r.score * 100).toFixed(4)} (Strategy: ${searchStrategy}, Intent: ${intent})\n${r.item.content}`,
-  }));
+  // 5. Group by Zone and Return top K
+  const topResults = fusedResults.slice(0, topK);
+  
+  // Group results by zone
+  const groupedResults: Record<string, typeof topResults> = {};
+  for (const r of topResults) {
+    const zone = r.item.zone || "General";
+    if (!groupedResults[zone]) {
+      groupedResults[zone] = [];
+    }
+    groupedResults[zone].push(r);
+  }
+
+  // Format the output
+  const formattedResults: { path: string; content: string }[] = [];
+  
+  for (const [zone, results] of Object.entries(groupedResults)) {
+    // Add a zone header as a pseudo-file to structure the prompt
+    formattedResults.push({
+      path: `--- ZONE: ${zone.toUpperCase()} ---`,
+      content: `The following files belong to the ${zone} architectural zone.`
+    });
+    
+    for (const r of results) {
+      formattedResults.push({
+        path: r.item.path,
+        content: `// RAG Hybrid Rank Score: ${(r.score * 100).toFixed(4)} (Strategy: ${searchStrategy}, Intent: ${intent})\n${r.item.content}`,
+      });
+    }
+  }
+
+  return formattedResults;
 }
