@@ -3,6 +3,8 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import path from "path";
+import { fileURLToPath } from "url";
+import fs from "fs";
 
 async function startServer() {
   const app = express();
@@ -10,6 +12,11 @@ async function startServer() {
 
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+  // Health check endpoint
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok" });
+  });
 
   // API route to fetch GitHub data
   app.post("/api/repo", async (req, res) => {
@@ -365,192 +372,6 @@ async function startServer() {
     }
   });
 
-  // API route to proxy Qwen requests
-  app.post("/api/qwen", async (req, res) => {
-    try {
-      const {
-        token,
-        resourceUrl,
-        prompt,
-        messages,
-        tools,
-        model = "coder-model",
-        isJson = false,
-      } = req.body;
-
-      if (!token) {
-        return res.status(401).json({ error: "Qwen OAuth token is required." });
-      }
-
-      let actualModel = model === "coder-model" ? "qwen3-coder-plus" : model;
-
-      const payload: any = {
-        model: actualModel,
-        max_tokens: 8192,
-        messages: (messages && messages !== null) ? messages : [
-          {
-            role: "system",
-            content:
-              "You are an expert software architect. Output clean markdown.",
-          },
-          { role: "user", content: prompt },
-        ],
-      };
-
-      if (tools && Array.isArray(tools) && tools.length > 0) {
-        payload.tools = tools;
-      }
-
-      console.log("Qwen API Payload:", JSON.stringify(payload, null, 2));
-
-      let endpoint = model === "coder-model" 
-        ? "https://coding.dashscope.aliyuncs.com/v1/chat/completions"
-        : "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
-      if (resourceUrl) {
-        let baseUrl = resourceUrl;
-        if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
-          baseUrl = "https://" + baseUrl;
-        }
-        if (!baseUrl.endsWith("/chat/completions")) {
-          if (baseUrl.endsWith("/v1")) {
-            endpoint = baseUrl + "/chat/completions";
-          } else {
-            endpoint = baseUrl.replace(/\/$/, "") + "/v1/chat/completions";
-          }
-        } else {
-          endpoint = baseUrl;
-        }
-      }
-
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`,
-          "X-DashScope-AuthType": "qwen-oauth",
-          "X-DashScope-CacheControl": "enable",
-          "X-DashScope-UserAgent": "QwenCode/1.0.0",
-          "User-Agent": "QwenCode/1.0.0"
-        },
-        body: JSON.stringify(payload),
-      });
-
-      const text = await response.text();
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch (e) {
-        console.error("Qwen API returned non-JSON:", text);
-        return res.status(response.status).json({
-          error: `Qwen API returned non-JSON: ${text.substring(0, 100)}`,
-        });
-      }
-
-      console.log(
-        "Qwen API Headers:",
-        Object.fromEntries(response.headers.entries()),
-      );
-
-      const rateLimitRemainingRequests =
-        response.headers.get("X-RateLimit-Remaining-Requests") ||
-        response.headers.get("x-ratelimit-remaining-requests");
-      const rateLimitResetRequests =
-        response.headers.get("X-RateLimit-Reset-Requests") ||
-        response.headers.get("x-ratelimit-reset-requests");
-      const rateLimitRemainingTokens =
-        response.headers.get("X-RateLimit-Remaining-Tokens") ||
-        response.headers.get("x-ratelimit-remaining-tokens");
-      const rateLimitResetTokens =
-        response.headers.get("X-RateLimit-Reset-Tokens") ||
-        response.headers.get("x-ratelimit-reset-tokens");
-
-      const rateLimit = {
-        remainingRequests: rateLimitRemainingRequests,
-        resetRequests: rateLimitResetRequests,
-        remainingTokens: rateLimitRemainingTokens,
-        resetTokens: rateLimitResetTokens,
-      };
-
-      if (!response.ok) {
-        console.error("Qwen API error:", data);
-        return res.status(response.status).json({
-          error:
-            data.error?.message ||
-            data.message ||
-            `Qwen API Error: ${JSON.stringify(data)}`,
-          code: data.code || data.error?.code,
-          rateLimit,
-        });
-      }
-
-      // Map OpenAI format back to the format expected by the frontend
-      res.json({
-        output: {
-          text: data.choices?.[0]?.message?.content || "",
-          message: data.choices?.[0]?.message,
-        },
-        model: data.model,
-        rateLimit,
-      });
-    } catch (error: any) {
-      console.error("Error proxying Qwen request:", error);
-      res.status(500).json({ error: error.message || "Internal server error" });
-    }
-  });
-
-  // Proxy for Qwen OAuth Device Code
-  app.post("/api/qwen/device/code", async (req, res) => {
-    try {
-      const response = await fetch(
-        "https://chat.qwen.ai/api/v1/oauth2/device/code",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-            Accept: "application/json",
-          },
-          body: new URLSearchParams(req.body).toString(),
-        },
-      );
-      const data = await response.json();
-      res.status(response.status).json(data);
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Proxy for Qwen OAuth Token Polling
-  app.post("/api/qwen/device/token", async (req, res) => {
-    try {
-      const response = await fetch("https://chat.qwen.ai/api/v1/oauth2/token", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          Accept: "application/json",
-        },
-        body: new URLSearchParams(req.body).toString(),
-      });
-
-      const text = await response.text();
-      let data;
-      try {
-        data = JSON.parse(text);
-        console.log("Qwen Token Response:", {
-          ...data,
-          access_token: data.access_token ? "***" : undefined,
-          refresh_token: data.refresh_token ? "***" : undefined,
-          id_token: data.id_token ? "***" : undefined,
-        });
-      } catch (e) {
-        return res.status(response.status).send(text);
-      }
-
-      res.status(response.status).json(data);
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
   // Proxy for OpenAI-compatible /models
   app.post("/api/openai-compatible/models", async (req, res) => {
     try {
@@ -606,14 +427,18 @@ async function startServer() {
   });
 
   // Vite middleware for development
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
+      root: __dirname,
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = path.join(__dirname, 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

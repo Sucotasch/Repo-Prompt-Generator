@@ -69,7 +69,7 @@ The application supports both **GitHub repositories** and **local files**, utili
 
 | Feature | Benefit |
 |---------|---------|
-| Multi-provider AI Support | Choose between cloud (Gemini, Qwen) or local (Ollama) AI models |
+| Multi-provider AI Support | Choose between cloud (Gemini), local (Ollama) or Custom OpenAI API |
 | RAG-Powered Analysis | Context-aware code understanding with semantic search |
 | Template System | Pre-built prompts for documentation, audits, and integration |
 | Cross-Platform | Web application and native desktop app (Tauri) |
@@ -114,8 +114,7 @@ Build code dependency graphs for enhanced context understanding:
 |----------|------|----------|
 | Gemini | Cloud | High-quality analysis, large context |
 | Ollama | Local | Privacy-focused, offline capable |
-| Qwen | Cloud | Alternative cloud provider |
-| OpenAI-Compatible | Custom | Azure, LocalAI, vLLM, etc. |
+| OpenAI-Compatible | Custom | Azure, LocalAI, vLLM, Qwen, etc. |
 
 ---
 
@@ -147,7 +146,6 @@ repo-prompt-generator/
 │   │       │   ├── aiAdapter.ts
 │   │       │   ├── geminiService.ts
 │   │       │   ├── ollamaService.ts
-│   │       │   ├── qwenService.ts
 │   │       │   ├── githubService.ts
 │   │       │   ├── localFileService.ts
 │   │       │   └── ragService.ts
@@ -215,7 +213,6 @@ digraph Dependencies {
 |---------|---------|---------------------|
 | Local File Access | Limited (browser sandbox) | Full filesystem access |
 | Ollama Integration | Requires CORS configuration | Native integration |
-| OAuth (Qwen) | Web-based flow | Native device code flow |
 | Portability | Browser-based | Standalone executable |
 | System Resources | Browser limits | Direct system access |
 | Installation | None (URL access) | Download & install |
@@ -231,7 +228,6 @@ digraph Dependencies {
 - Analyzing local/private codebases
 - Need full filesystem access
 - Working offline with Ollama
-- Require native OAuth flows
 
 ---
 
@@ -432,9 +428,6 @@ GEMINI_API_KEY=xxxxxxxxxxxxxxxxxxxxxx
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=coder-model
 
-# Qwen OAuth (for Alibaba Cloud AI)
-QWEN_CLIENT_ID=f0304373b74a44d2b584a3fb70ca9e56
-
 # Custom OpenAI-Compatible API
 CUSTOM_API_BASE_URL=https://your-api.com/v1
 CUSTOM_API_KEY=your-api-key
@@ -521,7 +514,7 @@ or local repositories.
 ## Tech Stack
 - Frontend: React 19, TypeScript 5.8, Vite 6.2
 - Desktop: Tauri 2.0 (Rust backend)
-- AI Providers: Gemini, Ollama, Qwen, OpenAI-compatible
+- AI Providers: Gemini, Ollama, OpenAI-compatible
 
 ## Architecture
 Monorepo structure with shared core package containing:
@@ -707,7 +700,6 @@ const config = {
 |----------|-------|---------|------|---------|
 | Gemini | Fast | High | Free tier available | Cloud |
 | Ollama | Medium | Good | Free | Local |
-| Qwen | Fast | High | Free tier available | Cloud |
 | Custom API | Varies | Varies | Varies | Depends |
 
 ### Provider Configuration
@@ -727,15 +719,6 @@ const config = {
   provider: "ollama",
   baseUrl: "http://localhost:11434",
   model: "coder-model"
-}
-```
-
-#### Qwen (Alibaba)
-```typescript
-{
-  provider: "qwen",
-  // Uses OAuth device flow for authentication
-  clientId: "f0304373b74a44d2b584a3fb70ca9e56"
 }
 ```
 
@@ -775,7 +758,6 @@ const config = {
 | `aiAdapter.ts` | Unified AI provider interface |
 | `geminiService.ts` | Google Gemini integration |
 | `ollamaService.ts` | Local Ollama integration |
-| `qwenService.ts` | Alibaba Qwen integration |
 | `githubService.ts` | GitHub API client |
 | `localFileService.ts` | Local file system access |
 | `ragService.ts` | RAG engine & hybrid search |
@@ -832,15 +814,6 @@ ollama serve
 **Solution:**
 - Use desktop app for filesystem operations
 - Web app has limited file access via browser sandbox
-
-### Error: "Qwen OAuth Failed"
-
-**Cause:** Device code flow timeout or network issue
-
-**Solution:**
-1. Ensure stable internet connection
-2. Complete OAuth flow within 10 minutes
-3. Try again with fresh device code
 
 ---
 
@@ -906,7 +879,7 @@ This project is open source and available under the [MIT License](LICENSE).
 
 | Возможность | Преимущество |
 |-------------|--------------|
-| Поддержка нескольких AI-провайдеров | Выбор между облачными (Gemini, Qwen) или локальными (Ollama) моделями |
+| Поддержка нескольких AI-провайдеров | Выбор между облачными (Gemini), локальными (Ollama) и Custom моделями |
 | RAG-анализ | Контекстно-зависимое понимание кода с семантическим поиском |
 | Система шаблонов | Готовые промпты для документации, аудитов и интеграции |
 | Кроссплатформенность | Веб-приложение и нативное десктопное приложение (Tauri) |
@@ -951,8 +924,7 @@ This project is open source and available under the [MIT License](LICENSE).
 |-----------|-----|---------------------|
 | Gemini | Облачный | Высококачественный анализ, большой контекст |
 | Ollama | Локальный | Приватность, работа офлайн |
-| Qwen | Облачный | Альтернативный облачный провайдер |
-| OpenAI-совместимый | Кастомный | Azure, LocalAI, vLLM и др. |
+| OpenAI-совместимый | Кастомный | Azure, LocalAI, vLLM, Qwen и др. |
 
 ---
 
@@ -984,7 +956,6 @@ repo-prompt-generator/
 │   │       │   ├── aiAdapter.ts
 │   │       │   ├── geminiService.ts
 │   │       │   ├── ollamaService.ts
-│   │       │   ├── qwenService.ts
 │   │       │   ├── githubService.ts
 │   │       │   ├── localFileService.ts
 │   │       │   └── ragService.ts
@@ -1026,7 +997,6 @@ repo-prompt-generator/
 |---------|----------------|-------------------------------|
 | Доступ к локальным файлам | Ограничен (песочница браузера) | Полный доступ к файловой системе |
 | Интеграция с Ollama | Требует настройки CORS | Нативная интеграция |
-| OAuth (Qwen) | Веб-поток | Нативный поток device code |
 | Портативность | На основе браузера | Автономный исполняемый файл |
 | Системные ресурсы | Ограничения браузера | Прямой доступ к системе |
 | Установка | Не требуется (доступ по URL) | Скачать и установить |
@@ -1042,7 +1012,6 @@ repo-prompt-generator/
 - Анализ локальных/приватных кодовых баз
 - Требуется полный доступ к файловой системе
 - Работа офлайн с Ollama
-- Требуются нативные OAuth потоки
 
 ---
 
@@ -1221,9 +1190,6 @@ GEMINI_API_KEY=xxxxxxxxxxxxxxxxxxxxxx
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=coder-model
 
-# Qwen OAuth (для Alibaba Cloud AI)
-QWEN_CLIENT_ID=f0304373b74a44d2b584a3fb70ca9e56
-
 # Кастомный OpenAI-совместимый API
 CUSTOM_API_BASE_URL=https://your-api.com/v1
 CUSTOM_API_KEY=your-api-key
@@ -1393,7 +1359,6 @@ const config = {
 |-----------|----------|----------|-----------|-------------|
 | Gemini | Быстро | Высокое | Есть бесплатный тариф | Облако |
 | Ollama | Средне | Хорошее | Бесплатно | Локально |
-| Qwen | Быстро | Высокое | Есть бесплатный тариф | Облако |
 | Кастомный API | Варьируется | Варьируется | Варьируется | Зависит |
 
 ---
@@ -1422,7 +1387,6 @@ const config = {
 | `aiAdapter.ts` | Унифицированный интерфейс AI-провайдеров |
 | `geminiService.ts` | Интеграция с Google Gemini |
 | `ollamaService.ts` | Интеграция с локальным Ollama |
-| `qwenService.ts` | Интеграция с Alibaba Qwen |
 | `githubService.ts` | Клиент GitHub API |
 | `localFileService.ts` | Доступ к локальной файловой системе |
 | `ragService.ts` | RAG-движок и гибридный поиск |
@@ -1479,15 +1443,6 @@ ollama serve
 **Решение:**
 - Используйте десктопное приложение для операций с файловой системой
 - Веб-приложение имеет ограниченный доступ к файлам через песочницу браузера
-
-### Ошибка: "Qwen OAuth Failed"
-
-**Причина:** Таймаут потока device code или проблема с сетью
-
-**Решение:**
-1. Убедитесь в стабильном интернет-соединении
-2. Завершите OAuth поток в течение 10 минут
-3. Попробуйте снова с новым device code
 
 ---
 

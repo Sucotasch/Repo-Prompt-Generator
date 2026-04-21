@@ -5,8 +5,6 @@ export * from "./services/githubService.ts";
 export * from "./services/localFileService.ts";
 export * from "./services/ollamaService.ts";
 export * from "./services/openaiCompatibleService.ts";
-export * from "./services/qwenAuthService.ts";
-export * from "./services/qwenService.ts";
 export * from "./services/ragService.ts";
 
 export * from "./templates/index.ts";

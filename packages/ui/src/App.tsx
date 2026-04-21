@@ -33,8 +33,6 @@ import {
   AIProvider,
   EmbeddingCacheService,
   performRAG,
-  startDeviceAuth,
-  pollDeviceToken,
   getTemplate,
   getAllTemplates,
   saveMarkdownFile,
@@ -114,23 +112,6 @@ export default function App() {
   const [aiProvider, setAiProvider] = useState<AIProvider>(
     initialSettings.aiProvider || "gemini",
   );
-  const [qwenOAuthToken, setQwenOAuthToken] = useState(
-    initialSettings.qwenOAuthToken || "",
-  );
-  const [qwenResourceUrl, setQwenResourceUrl] = useState(
-    initialSettings.qwenResourceUrl || "",
-  );
-  const [qwenAuthStatus, setQwenAuthStatus] = useState<
-    "idle" | "polling" | "success" | "error"
-  >("idle");
-  const [qwenAuthUrl, setQwenAuthUrl] = useState<string | null>(null);
-  const [qwenAuthMessage, setQwenAuthMessage] = useState<string>("");
-  const [qwenRateLimit, setQwenRateLimit] = useState<{
-    remainingRequests: string;
-    resetRequests: string;
-    remainingTokens: string;
-    resetTokens: string;
-  } | null>(null);
   const [useRag, setUseRag] = useState(initialSettings.useRag || false);
   const [isDeepAnalysis, setIsDeepAnalysis] = useState(initialSettings.isDeepAnalysis || false);
   const [ragModel, setRagModel] = useState(initialSettings.ragModel || "");
@@ -291,8 +272,6 @@ export default function App() {
       useOllama,
       useOllamaForFinal,
       aiProvider,
-      qwenOAuthToken,
-      qwenResourceUrl,
       useRag,
       isDeepAnalysis,
       ragModel,
@@ -323,8 +302,6 @@ export default function App() {
     useOllama,
     useOllamaForFinal,
     aiProvider,
-    qwenOAuthToken,
-    qwenResourceUrl,
     useRag,
     isDeepAnalysis,
     ragModel,
@@ -507,66 +484,6 @@ export default function App() {
     setTestingCustomProvider(false);
   };
 
-  const handleQwenLogin = async () => {
-    try {
-      setQwenAuthStatus("polling");
-      setQwenAuthMessage("Starting authorization...");
-
-      const authData = await startDeviceAuth();
-      setQwenAuthUrl(authData.verification_uri_complete);
-      setQwenAuthMessage("Please open the URL in your browser to authorize.");
-
-      // Open the URL in a new tab or default browser
-      if (isTauri()) {
-        await open(authData.verification_uri_complete);
-      } else {
-        window.open(authData.verification_uri_complete, "_blank");
-      }
-
-      let pollInterval = 2000;
-      const maxAttempts = Math.ceil(
-        authData.expires_in / (pollInterval / 1000),
-      );
-
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const tokenResponse = await pollDeviceToken(
-          authData.device_code,
-          authData.codeVerifier,
-        );
-
-        if (tokenResponse.status === "success") {
-          // Store the access token
-          setQwenOAuthToken(tokenResponse.data.access_token);
-          if (tokenResponse.data.resource_url) {
-            setQwenResourceUrl(tokenResponse.data.resource_url);
-          }
-          setQwenAuthStatus("success");
-          setQwenAuthMessage("Authentication successful!");
-          setQwenAuthUrl(null);
-          return;
-        }
-
-        if (tokenResponse.status === "pending") {
-          if (tokenResponse.slowDown) {
-            pollInterval = Math.min(pollInterval * 1.5, 10000);
-          } else {
-            pollInterval = 2000;
-          }
-          await new Promise((resolve) => setTimeout(resolve, pollInterval));
-          continue;
-        }
-      }
-
-      setQwenAuthStatus("error");
-      setQwenAuthMessage("Authorization timed out. Please try again.");
-      setQwenAuthUrl(null);
-    } catch (error: any) {
-      setQwenAuthStatus("error");
-      setQwenAuthMessage(error.message || "Failed to authenticate with Qwen.");
-      setQwenAuthUrl(null);
-    }
-  };
-
   const handleStartOllama = async () => {
     setOllamaNativeLoading(true);
     try {
@@ -624,7 +541,14 @@ pause`;
     if (!e.target.files) return;
     const files = Array.from(e.target.files) as File[];
     const newDocs: { name: string; content: string }[] = [];
+    const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
+
     for (const file of files) {
+      if (file.size > MAX_FILE_SIZE) {
+        console.warn(`Skipping file ${file.name}: exceeds 5MB limit.`);
+        alert(`File ${file.name} is too large (max 5MB).`);
+        continue;
+      }
       try {
         const content = await file.text();
         newDocs.push({ name: file.name, content });
@@ -828,7 +752,6 @@ pause`;
         }
       }
 
-      let currentQwenRateLimit: any = null;
       let finalUsedRagQuery = "";
       let finalUsedOptimizedQuery = "";
 
@@ -908,18 +831,12 @@ pause`;
                   );
                 } else {
                   result = await rewriteQuery(aiProvider, baseQuery, {
-                    qwenToken: qwenOAuthToken,
-                    qwenResourceUrl: qwenResourceUrl || undefined,
                     customBaseUrl,
                     customApiKey,
                     customModel,
                     geminiApiKey,
                     proxyAddress,
                   });
-                  if (aiProvider === "qwen" && result.rateLimit) {
-                    setQwenRateLimit(result.rateLimit);
-                    currentQwenRateLimit = result.rateLimit;
-                  }
                 }
 
                 if (useQueryExpansion) {
@@ -1142,36 +1059,6 @@ pause`;
 
         finalModel = `Ollama (${ollamaModel})`;
       } else {
-        if (aiProvider === "qwen" && currentQwenRateLimit) {
-          const remainingReqs = parseInt(
-            currentQwenRateLimit.remainingRequests || "1",
-            10,
-          );
-          const remainingTokens = parseInt(
-            currentQwenRateLimit.remainingTokens || "100000",
-            10,
-          );
-
-          if (remainingReqs <= 0 || remainingTokens < 10000) {
-            const resetReqs = parseInt(
-              currentQwenRateLimit.resetRequests || "0",
-              10,
-            );
-            const resetTokens = parseInt(
-              currentQwenRateLimit.resetTokens || "0",
-              10,
-            );
-            const waitTime = Math.max(resetReqs, resetTokens) + 2000; // 2 seconds buffer
-
-            if (waitTime > 0) {
-              setStatus(
-                `Qwen rate limit reached. Pausing for ${Math.ceil(waitTime / 1000)} seconds to reset quota...`,
-              );
-              await delay(waitTime, signal);
-            }
-          }
-        }
-
         setStatus(`Generating system prompt with ${aiProvider}...`);
         const result = await generatePrompt(
           aiProvider,
@@ -1183,8 +1070,6 @@ pause`;
           referenceRepoData,
           attachedDocs,
           {
-            qwenToken: qwenOAuthToken,
-            qwenResourceUrl: qwenResourceUrl || undefined,
             customBaseUrl,
             customApiKey,
             customModel,
@@ -1203,9 +1088,6 @@ pause`;
           requestedFiles = result.requestedFiles;
           fetchedFilesCount = result.fetchedFilesCount;
           fetchedFilesDetails = result.fetchedFilesDetails;
-        }
-        if (aiProvider === "qwen" && result.rateLimit) {
-          setQwenRateLimit(result.rateLimit);
         }
       }
 
@@ -1302,16 +1184,7 @@ pause`;
       setPrompt(generatedPrompt);
       setUsedModel(finalModel);
     } catch (err: any) {
-      if (aiProvider === "qwen" && (err.status === 401 || err.status === 403)) {
-        setQwenOAuthToken("");
-        setError("Qwen session expired. Please re-authenticate.");
-      } else if (aiProvider === "qwen" && err.status === 429) {
-        setError(
-          "Qwen rate limit exceeded. Please wait a moment and try again.",
-        );
-      } else {
-        setError(err.message || "An unexpected error occurred.");
-      }
+      setError(err.message || "An unexpected error occurred.");
     } finally {
       setLoading(false);
       setStatus("");
@@ -1411,33 +1284,6 @@ pause`;
                   )}
                 </div>
               )}
-
-              {aiProvider === "qwen" &&
-                qwenRateLimit &&
-                qwenRateLimit.remainingRequests && (
-                  <div className="flex items-center justify-center gap-4 text-xs text-slate-500">
-                    <div
-                      className="flex items-center gap-1.5"
-                      title="Qwen Requests Quota"
-                    >
-                      <div
-                        className={`w-2 h-2 rounded-full ${parseInt(qwenRateLimit.remainingRequests) > 10 ? "bg-emerald-500" : "bg-amber-500"}`}
-                      ></div>
-                      <span>Reqs: {qwenRateLimit.remainingRequests}</span>
-                    </div>
-                    {qwenRateLimit.remainingTokens && (
-                      <div
-                        className="flex items-center gap-1.5"
-                        title="Qwen Tokens Quota"
-                      >
-                        <div
-                          className={`w-2 h-2 rounded-full ${parseInt(qwenRateLimit.remainingTokens) > 50000 ? "bg-emerald-500" : "bg-amber-500"}`}
-                        ></div>
-                        <span>Tokens: {qwenRateLimit.remainingTokens}</span>
-                      </div>
-                    )}
-                  </div>
-                )}
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1907,7 +1753,6 @@ pause`;
                 disabled={loading}
               >
                 <option value="gemini">✨ Gemini (default)</option>
-                <option value="qwen">🔥 Qwen (via OAuth)</option>
                 <option value="custom">🌐 Custom (OpenAI Compatible)</option>
               </select>
 
@@ -2054,142 +1899,6 @@ pause`;
                   </div>
                 </div>
               )}
-
-              {aiProvider === "qwen" && (
-                <div className="mt-3">
-                  <label className="block text-xs font-medium text-slate-500 mb-2">
-                    Qwen Account Authentication
-                  </label>
-
-                  {qwenOAuthToken ? (
-                    <div>
-                      <div className="flex items-center justify-between p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
-                        <div className="flex items-center text-emerald-700 text-sm font-medium">
-                          <Check className="w-4 h-4 mr-2" />
-                          Authenticated with Qwen
-                        </div>
-                        <button
-                          onClick={() => {
-                            setQwenOAuthToken("");
-                            setQwenAuthStatus("idle");
-                            setQwenAuthMessage("");
-                            setQwenRateLimit(null);
-                          }}
-                          className="text-xs text-slate-500 hover:text-slate-700 underline"
-                        >
-                          Sign Out
-                        </button>
-                      </div>
-                      {qwenRateLimit && (
-                        <div className="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs">
-                          {qwenRateLimit.remainingRequests ? (
-                            <>
-                              <div className="flex justify-between items-center mb-1">
-                                <span className="font-medium text-slate-700">
-                                  Qwen Quota (Reqs)
-                                </span>
-                                <span className="text-slate-500">
-                                  {qwenRateLimit.remainingRequests} remaining
-                                </span>
-                              </div>
-                              <div className="w-full bg-slate-200 rounded-full h-1.5 mb-2">
-                                <div
-                                  className={`h-1.5 rounded-full ${parseInt(qwenRateLimit.remainingRequests) > 10 ? "bg-emerald-500" : parseInt(qwenRateLimit.remainingRequests) > 2 ? "bg-amber-500" : "bg-red-500"}`}
-                                  style={{
-                                    width: `${Math.min(100, Math.max(0, (parseInt(qwenRateLimit.remainingRequests) / 30) * 100))}%`,
-                                  }}
-                                ></div>
-                              </div>
-                            </>
-                          ) : (
-                            <div className="text-slate-500 italic mb-2">
-                              Rate limit headers not provided by Qwen API
-                            </div>
-                          )}
-
-                          {qwenRateLimit.remainingTokens && (
-                            <>
-                              <div className="flex justify-between items-center mb-1">
-                                <span className="font-medium text-slate-700">
-                                  Qwen Quota (Tokens)
-                                </span>
-                                <span className="text-slate-500">
-                                  {qwenRateLimit.remainingTokens} remaining
-                                </span>
-                              </div>
-                              <div className="w-full bg-slate-200 rounded-full h-1.5 mb-1">
-                                <div
-                                  className={`h-1.5 rounded-full ${parseInt(qwenRateLimit.remainingTokens) > 50000 ? "bg-emerald-500" : parseInt(qwenRateLimit.remainingTokens) > 10000 ? "bg-amber-500" : "bg-red-500"}`}
-                                  style={{
-                                    width: `${Math.min(100, Math.max(0, (parseInt(qwenRateLimit.remainingTokens) / 100000) * 100))}%`,
-                                  }}
-                                ></div>
-                              </div>
-                            </>
-                          )}
-
-                          {qwenRateLimit.resetRequests && (
-                            <p className="text-slate-500 text-[10px] text-right mt-1">
-                              Resets in:{" "}
-                              {Math.ceil(
-                                parseInt(qwenRateLimit.resetRequests) / 1000,
-                              )}
-                              s
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      <button
-                        onClick={handleQwenLogin}
-                        disabled={qwenAuthStatus === "polling"}
-                        className="w-full flex items-center justify-center px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-                      >
-                        {qwenAuthStatus === "polling" ? (
-                          <>
-                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                            Waiting for Authorization...
-                          </>
-                        ) : (
-                          "Login via Qwen"
-                        )}
-                      </button>
-
-                      {qwenAuthStatus === "polling" && qwenAuthUrl && (
-                        <div className="p-3 bg-indigo-50 border border-indigo-100 rounded-lg text-sm text-indigo-800">
-                          <p className="mb-2">
-                            A new tab should have opened. If not, click the link
-                            below to authorize:
-                          </p>
-                          <a
-                            href={qwenAuthUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="font-mono text-xs break-all underline"
-                          >
-                            {qwenAuthUrl}
-                          </a>
-                        </div>
-                      )}
-
-                      {qwenAuthStatus === "error" && (
-                        <div className="p-3 bg-red-50 border border-red-100 rounded-lg text-sm text-red-600 flex items-start">
-                          <AlertTriangle className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />
-                          <span>{qwenAuthMessage}</span>
-                        </div>
-                      )}
-
-                      <p className="text-xs text-slate-500">
-                        This uses the official Qwen OAuth Device Flow. Your
-                        token is securely proxied through the backend and never
-                        exposed to third parties.
-                      </p>
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
 
             {/* Ollama Settings */}
@@ -2243,7 +1952,7 @@ pause`;
                     Use RAG (Smart Context Filter)
                   </label>
                 </div>
-                {(aiProvider === "gemini" || aiProvider === "qwen") && (
+                {(aiProvider === "gemini") && (
                   <div className="flex items-center">
                     <input
                       id="isDeepAnalysis"

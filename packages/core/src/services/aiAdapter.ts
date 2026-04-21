@@ -3,24 +3,18 @@ import {
   generateSystemPrompt as geminiGenerate,
   rewriteQueryWithGemini,
 } from "./geminiService";
-import {
-  generateSystemPromptWithQwen,
-  rewriteQueryWithQwen,
-} from "./qwenService";
 import { buildPromptText } from "./geminiService";
 import {
   generate_final_prompt_with_openai_compatible,
   rewriteQueryWithOpenAICompatible,
 } from "./openaiCompatibleService";
 
-export type AIProvider = "gemini" | "qwen" | "custom";
+export type AIProvider = "gemini" | "custom";
 
 export async function rewriteQuery(
   provider: AIProvider,
   query: string,
   options?: {
-    qwenToken?: string;
-    qwenResourceUrl?: string;
     ollamaUrl?: string;
     ollamaModel?: string;
     customBaseUrl?: string;
@@ -32,20 +26,8 @@ export async function rewriteQuery(
 ): Promise<{
   optimizedQuery: string;
   intent: string;
-  rateLimit?: {
-    remainingRequests: string;
-    resetRequests: string;
-    remainingTokens: string;
-    resetTokens: string;
-  };
 }> {
-  if (provider === "qwen" && options?.qwenToken) {
-    return await rewriteQueryWithQwen(
-      query,
-      options.qwenToken,
-      options.qwenResourceUrl,
-    );
-  } else if (
+  if (
     provider === "custom" &&
     options?.customBaseUrl &&
     options?.customApiKey &&
@@ -77,8 +59,6 @@ export async function generatePrompt(
   referenceRepoData?: RepoData,
   attachedDocs?: { name: string; content: string }[],
   options?: {
-    qwenToken?: string;
-    qwenResourceUrl?: string;
     ollamaUrl?: string;
     ollamaModel?: string;
     customBaseUrl?: string;
@@ -98,33 +78,10 @@ export async function generatePrompt(
   requestedFiles?: string[];
   fetchedFilesCount?: number;
   fetchedFilesDetails?: any[];
-  rateLimit?: {
-    remainingRequests: string;
-    resetRequests: string;
-    remainingTokens: string;
-    resetTokens: string;
-  };
 }> {
   const fileTruncationLimit = options?.fileTruncationLimit ?? 0;
 
-  if (provider === "qwen" && options?.qwenToken) {
-    return await generateSystemPromptWithQwen(
-      repoData,
-      taskInstruction,
-      options.qwenToken,
-      additionalContext,
-      analyzeIssues,
-      usedOllama,
-      referenceRepoData,
-      attachedDocs,
-      options.qwenResourceUrl,
-      fileTruncationLimit,
-      options.isDeepAnalysis,
-      options.onStatusUpdate,
-      options.localFiles,
-      options.referenceLocalFiles
-    );
-  } else if (
+  if (
     provider === "custom" &&
     options?.customBaseUrl &&
     options?.customApiKey &&

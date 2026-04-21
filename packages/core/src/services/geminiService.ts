@@ -3,6 +3,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { RepoData } from "./githubService";
 import { buildCodeDependencyGraph } from "../utils/codeGraph";
 import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
+import { safeJsonParse } from "../utils/jsonUtils.ts";
 
 export function buildPromptText(
   repoData: RepoData,
@@ -129,7 +130,10 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
       });
       
       const cleanText = responseText.trim();
-      const parsed = JSON.parse(cleanText);
+      const parsed = safeJsonParse<{optimizedQuery?: string, intent?: string}>(cleanText, {
+        optimizedQuery: query,
+        intent: "GENERAL",
+      });
 
       return {
         optimizedQuery: parsed.optimizedQuery || query,
@@ -150,7 +154,10 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
 
     const text = response.text || "{}";
     const cleanText = text.trim();
-    const parsed = JSON.parse(cleanText);
+    const parsed = safeJsonParse<{optimizedQuery?: string, intent?: string}>(cleanText, {
+      optimizedQuery: query,
+      intent: "GENERAL",
+    });
 
     return {
       optimizedQuery: parsed.optimizedQuery || query,

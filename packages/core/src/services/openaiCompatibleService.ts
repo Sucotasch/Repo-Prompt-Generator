@@ -1,4 +1,5 @@
 import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
+import { safeJsonParse } from "../utils/jsonUtils.ts";
 
 export async function fetchOpenAICompatibleModels(
   baseURL: string,
@@ -231,22 +232,15 @@ Return your response in the following JSON format:
     const data = JSON.parse(response.text);
     const content = data.choices?.[0]?.message?.content || "";
 
-    try {
-      const parsed = JSON.parse(content);
-      return {
-        optimizedQuery: parsed.optimizedQuery || query,
-        intent: parsed.intent || "GENERAL",
-      };
-    } catch (e) {
-      console.warn(
-        "Failed to parse JSON from OpenAI compatible API, falling back to raw text",
-        e,
-      );
-      return {
-        optimizedQuery: content.trim() || query,
-        intent: "GENERAL",
-      };
-    }
+    const parsed = safeJsonParse<{optimizedQuery?: string, intent?: string}>(content, {
+      optimizedQuery: content.trim() || query,
+      intent: "GENERAL",
+    });
+
+    return {
+      optimizedQuery: parsed.optimizedQuery || query,
+      intent: parsed.intent || "GENERAL",
+    };
   }
 
   const response = await fetch(`/api/openai-compatible/chat`, {
@@ -291,20 +285,13 @@ Return your response in the following JSON format:
   const data = await response.json();
   const content = data.choices?.[0]?.message?.content || "";
 
-  try {
-    const parsed = JSON.parse(content);
-    return {
-      optimizedQuery: parsed.optimizedQuery || query,
-      intent: parsed.intent || "GENERAL",
-    };
-  } catch (e) {
-    console.warn(
-      "Failed to parse JSON from OpenAI compatible API, falling back to raw text",
-      e,
-    );
-    return {
-      optimizedQuery: content.trim() || query,
-      intent: "GENERAL",
-    };
-  }
+  const parsed = safeJsonParse<{optimizedQuery?: string, intent?: string}>(content, {
+    optimizedQuery: content.trim() || query,
+    intent: "GENERAL",
+  });
+
+  return {
+    optimizedQuery: parsed.optimizedQuery || query,
+    intent: parsed.intent || "GENERAL",
+  };
 }
