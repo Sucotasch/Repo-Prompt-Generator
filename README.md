@@ -1,30 +1,3 @@
-> **🤖 Prompt Generation Metadata**
-> - **Model:** qwen3.5-plus
-> - **Target Repository:** https://github.com/Sucotasch/Repo-Prompt-Generator
-> - **Auto-generated RAG Query:** "entry point,main function,public API,exported modules,core architecture,package manifest,initialization"
-> 
-> <details><summary><b>Task Instructions</b></summary>
-> 
-> ```text
-> You are an expert technical writer and software architect. Analyze the provided GitHub repository data to create comprehensive technical documentation in Markdown format (suitable for a Wiki or a detailed README.md). Make the code understandable.
-> 
-> Include:
-> 1. Real capabilities of the program.
-> 2. Algorithm of operation and architecture.
-> 3. Installation and configuration process.
-> 4. Examples of using the main functions.
-> ```
-> </details>
->
-> <details><summary><b>Additional Context</b></summary>
-> 
-> ```text
-> Создай подробный README соответствующий современным стандартам и требованиям, мультиязычный - сначала на английском, затем на русском языках.
-> ```
-> </details>
-
----
-
 # 🤖 Repo-Prompt-Generator
 
 <div align="center">
