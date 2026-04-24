@@ -49,7 +49,7 @@ async fn set_app_config(state: State<'_, AppState>, gemini_key: Option<String>, 
         std::env::set_var("HTTP_PROXY", &proxy_uri);
         
         let c = isahc::HttpClient::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(3600))
             .build()
             .map_err(|e| format!("Failed to create proxy client: {}", e))?;
             
@@ -66,7 +66,7 @@ async fn set_app_config(state: State<'_, AppState>, gemini_key: Option<String>, 
         c
     } else {
         isahc::HttpClient::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(3600))
             .build()
             .map_err(|e| format!("Failed to create client: {}", e))?
     };

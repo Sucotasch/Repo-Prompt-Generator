@@ -28,6 +28,8 @@ import {
   generate_final_prompt_with_ollama,
   rewriteQueryWithOllama,
   fetchOpenAICompatibleModels,
+  generate_final_prompt_with_openai_compatible,
+  rewriteQueryWithOpenAICompatible,
   generatePrompt,
   rewriteQuery,
   AIProvider,
@@ -108,6 +110,9 @@ export default function App() {
   );
   const [useOllamaForFinal, setUseOllamaForFinal] = useState(
     initialSettings.useOllamaForFinal || false,
+  );
+  const [localEngine, setLocalEngine] = useState<"ollama" | "lmstudio" | "llamacpp">(
+    initialSettings.localEngine || "ollama",
   );
   const [aiProvider, setAiProvider] = useState<AIProvider>(
     initialSettings.aiProvider || "gemini",
@@ -271,6 +276,7 @@ export default function App() {
       maxFiles,
       useOllama,
       useOllamaForFinal,
+      localEngine,
       aiProvider,
       useRag,
       isDeepAnalysis,
@@ -301,6 +307,7 @@ export default function App() {
     maxFiles,
     useOllama,
     useOllamaForFinal,
+    localEngine,
     aiProvider,
     useRag,
     isDeepAnalysis,
@@ -436,12 +443,26 @@ export default function App() {
     e.target.value = "";
   };
 
-  const handleTestOllama = async () => {
+  const handleTestLocalEngine = async () => {
     setTestingOllama(true);
-    const isConnected = await checkOllamaConnection(ollamaUrl);
+    let isConnected = false;
+    let models: string[] = [];
+    try {
+      if (localEngine === "ollama") {
+        isConnected = await checkOllamaConnection(ollamaUrl);
+        if (isConnected) {
+          models = await fetchOllamaModels(ollamaUrl);
+        }
+      } else {
+        models = await fetchOpenAICompatibleModels(ollamaUrl, "sk-dummy-key");
+        isConnected = models.length > 0;
+      }
+    } catch (e) {
+      isConnected = false;
+    }
+    
     setOllamaConnected(isConnected);
     if (isConnected) {
-      const models = await fetchOllamaModels(ollamaUrl);
       setAvailableModels(models);
       if (models.length > 0 && !models.includes(ollamaModel)) {
         setOllamaModel(models[0]);
@@ -490,7 +511,7 @@ export default function App() {
       const msg = await startOllamaNative();
       console.log(msg);
       setOllamaNativeRunning(true);
-      setTimeout(() => handleTestOllama(), 2000); // Test connection after starting
+      setTimeout(() => handleTestLocalEngine(), 2000); // Test connection after starting
     } catch (e) {
       console.error("Failed to start Ollama", e);
     } finally {
@@ -824,11 +845,20 @@ pause`;
               } else {
                 let result;
                 if (useOllamaForQueryExpansion) {
-                  result = await rewriteQueryWithOllama(
-                    baseQuery,
-                    ollamaUrl,
-                    ollamaModel,
-                  );
+                  if (localEngine === "ollama") {
+                    result = await rewriteQueryWithOllama(
+                      baseQuery,
+                      ollamaUrl,
+                      ollamaModel,
+                    );
+                  } else {
+                    result = await rewriteQueryWithOpenAICompatible(
+                      baseQuery,
+                      ollamaUrl,
+                      "sk-dummy-key",
+                      ollamaModel,
+                    );
+                  }
                 } else {
                   result = await rewriteQuery(aiProvider, baseQuery, {
                     customBaseUrl,
@@ -917,6 +947,7 @@ pause`;
             ragSearchStrategy,
             ragChunkSize,
             (msg) => setStatus(msg),
+            localEngine
           );
           repoData = { ...repoData, sourceFiles: ragFiles };
 
@@ -937,6 +968,7 @@ pause`;
               ragSearchStrategy,
               ragChunkSize,
               (msg) => setStatus(msg),
+              localEngine
             );
             referenceRepoData = {
               ...referenceRepoData,
@@ -952,26 +984,36 @@ pause`;
 
       let usedOllama = false;
       if (useOllama && ollamaConnected !== false) {
-        setStatus("Summarizing with local Ollama...");
+        setStatus(`Summarizing with ${localEngine === "ollama" ? "local Ollama" : localEngine === "lmstudio" ? "LM Studio" : "Llama.cpp"}...`);
         usedOllama = true;
 
         const summarize = async (text: string) => {
-          return text
-            ? await summarize_with_ollama(
-                text,
+          if (!text) return "";
+          if (localEngine === "ollama") {
+            return await summarize_with_ollama(
+              text,
+              ollamaUrl,
+              ollamaModel,
+              ollamaNumCtx,
+              ollamaSummaryPredict,
+              ollamaTemperature,
+            );
+          } else {
+             const summaryPrompt = `Please summarize the following file content in a few sentences, extracting only the most important information relevant for understanding the architecture, purpose, and key logic of the code. Ignore boilerplate.\n\nContent:\n${text.substring(0, 8000)}`;
+             return await generate_final_prompt_with_openai_compatible(
+                summaryPrompt,
                 ollamaUrl,
+                "sk-dummy-key",
                 ollamaModel,
-                ollamaNumCtx,
-                ollamaSummaryPredict,
                 ollamaTemperature,
-              )
-            : "";
+             );
+          }
         };
 
         const summarizedSourceFiles = [];
         if (repoData.sourceFiles) {
           for (const file of repoData.sourceFiles) {
-            setStatus(`Summarizing ${file.path} with Ollama...`);
+            setStatus(`Summarizing ${file.path} with ${localEngine === "ollama" ? "Ollama" : "Local Engine"}...`);
             const summary = await summarize(file.content);
             summarizedSourceFiles.push({ path: file.path, content: summary });
           }
@@ -1011,9 +1053,10 @@ pause`;
       let fetchedFilesCount: number | undefined = undefined;
       let fetchedFilesDetails: any[] | undefined = undefined;
       const taskInstruction = getSystemPrompt(templateMode, customInstruction);
+      const engineName = localEngine === "ollama" ? "Ollama" : localEngine === "lmstudio" ? "LM Studio" : "Llama.cpp";
 
       if (useOllamaForFinal && ollamaConnected !== false) {
-        setStatus("Generating final prompt with local Ollama...");
+        setStatus(`Generating final prompt with local ${engineName}...`);
         const promptText = buildPromptText(
           repoData,
           taskInstruction,
@@ -1027,7 +1070,7 @@ pause`;
         const inputTokens = Math.ceil(promptText.length / 4);
         const availableTokens = ollamaNumCtx - inputTokens;
 
-        if (availableTokens < ollamaFinalPredict) {
+        if (localEngine === "ollama" && availableTokens < ollamaFinalPredict) {
           const proceed = await new Promise<boolean>((resolve) => {
             setTokenWarning({
               inputTokens,
@@ -1048,16 +1091,26 @@ pause`;
           }
         }
 
-        generatedPrompt = await generate_final_prompt_with_ollama(
-          promptText,
-          ollamaUrl,
-          ollamaModel,
-          ollamaNumCtx,
-          ollamaFinalPredict,
-          ollamaTemperature,
-        );
+        if (localEngine === "ollama") {
+          generatedPrompt = await generate_final_prompt_with_ollama(
+            promptText,
+            ollamaUrl,
+            ollamaModel,
+            ollamaNumCtx,
+            ollamaFinalPredict,
+            ollamaTemperature,
+          );
+        } else {
+          generatedPrompt = await generate_final_prompt_with_openai_compatible(
+            promptText,
+            ollamaUrl,
+            "sk-dummy-key",
+            ollamaModel,
+            ollamaTemperature,
+          );
+        }
 
-        finalModel = `Ollama (${ollamaModel})`;
+        finalModel = `${localEngine === "ollama" ? "Ollama" : localEngine === "lmstudio" ? "LM Studio" : "Llama.cpp"} (${ollamaModel})`;
       } else {
         setStatus(`Generating system prompt with ${aiProvider}...`);
         const result = await generatePrompt(
@@ -1901,7 +1954,7 @@ pause`;
               )}
             </div>
 
-            {/* Ollama Settings */}
+            {/* Local AI Engine Settings */}
             <div className="mt-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
               <div className="flex flex-col gap-3 mb-4">
                 <div className="flex items-center">
@@ -1917,7 +1970,7 @@ pause`;
                     htmlFor="useOllama"
                     className="ml-2 block text-sm font-medium text-slate-700 cursor-pointer"
                   >
-                    Use Local Pre-summarization (Ollama Summary)
+                    Use Local Pre-summarization (Local Summary)
                   </label>
                 </div>
                 <div className="flex items-center">
@@ -1933,7 +1986,7 @@ pause`;
                     htmlFor="useOllamaForFinal"
                     className="ml-2 block text-sm font-medium text-slate-700 cursor-pointer"
                   >
-                    Use Local Model for Final Generation (Bypass Gemini)
+                    Use Local Model for Final Generation (Bypass Gemini/Custom)
                   </label>
                 </div>
                 <div className="flex items-center">
@@ -1981,9 +2034,42 @@ pause`;
               {(useOllama || useOllamaForFinal || useOllamaForQueryExpansion || useRag) && (
                 <div className="space-y-4 pl-6 border-l-2 border-indigo-100 ml-2">
                   <div className="flex flex-col sm:flex-row gap-4">
+                    <div className="w-full sm:w-1/3">
+                      <label className="block text-xs font-medium text-slate-500 mb-1">
+                        Engine
+                      </label>
+                      <select
+                        value={localEngine}
+                        onChange={(e) => {
+                          const newEngine = e.target.value as "ollama" | "lmstudio" | "llamacpp";
+                          setLocalEngine(newEngine);
+                          
+                          // Smart URL auto-config
+                          if (
+                            ollamaUrl === "http://localhost:11434" ||
+                            ollamaUrl === "http://localhost:1234/v1" ||
+                            ollamaUrl === "http://localhost:8080/v1" ||
+                            ollamaUrl === "http://127.0.0.1:11434" ||
+                            ollamaUrl === "http://127.0.0.1:1234/v1" ||
+                            ollamaUrl === "http://127.0.0.1:8080/v1"
+                          ) {
+                            if (newEngine === "ollama") setOllamaUrl("http://localhost:11434");
+                            else if (newEngine === "lmstudio") setOllamaUrl("http://localhost:1234/v1");
+                            else if (newEngine === "llamacpp") setOllamaUrl("http://localhost:8080/v1");
+                          }
+                          setOllamaConnected(null);
+                        }}
+                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
+                        disabled={loading}
+                      >
+                        <option value="ollama">Ollama (Native)</option>
+                        <option value="lmstudio">LM Studio / Oobabooga</option>
+                        <option value="llamacpp">llama.cpp</option>
+                      </select>
+                    </div>
                     <div className="flex-1">
                       <label className="block text-xs font-medium text-slate-500 mb-1">
-                        Ollama URL
+                        API URL
                       </label>
                       <input
                         type="text"
@@ -1994,6 +2080,7 @@ pause`;
                         }}
                         className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
                         disabled={loading}
+                        placeholder={localEngine === "ollama" ? "http://localhost:11434" : "http://localhost:1234/v1"}
                       />
                     </div>
                     {(useOllama || useOllamaForFinal || useOllamaForQueryExpansion) && (
@@ -2196,7 +2283,7 @@ pause`;
                                 className="w-3.5 h-3.5 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
                               />
                               <span className="text-xs text-slate-600">
-                                Use Local Model for Query Expansion (Ollama)
+                                Use Local Model for Query Expansion
                               </span>
                             </label>
                           )}
@@ -2262,29 +2349,31 @@ pause`;
 
                   {(useOllama || useOllamaForFinal || useOllamaForQueryExpansion) && (
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-                      <div>
-                        <label
-                          className="block text-xs font-medium text-slate-500 mb-1"
-                          title="1 token ≈ 4 characters. Increase this if the model complains about missing code."
-                        >
-                          Context Window (Tokens)
-                        </label>
-                        <input
-                          type="number"
-                          value={ollamaNumCtx}
-                          onChange={(e) =>
-                            setOllamaNumCtx(Number(e.target.value))
-                          }
-                          className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                          disabled={loading}
-                          min={1024}
-                          step={1024}
-                        />
-                        <p className="mt-1 text-[10px] text-slate-400 leading-tight">
-                          Increase if model complains about missing code.
-                          Requires more RAM/VRAM.
-                        </p>
-                      </div>
+                      {localEngine === "ollama" && (
+                        <div>
+                          <label
+                            className="block text-xs font-medium text-slate-500 mb-1"
+                            title="1 token ≈ 4 characters. Increase this if the model complains about missing code."
+                          >
+                            Context Window (Tokens)
+                          </label>
+                          <input
+                            type="number"
+                            value={ollamaNumCtx}
+                            onChange={(e) =>
+                              setOllamaNumCtx(Number(e.target.value))
+                            }
+                            className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                            disabled={loading}
+                            min={1024}
+                            step={1024}
+                          />
+                          <p className="mt-1 text-[10px] text-slate-400 leading-tight">
+                            Increase if model complains about missing code.
+                            Requires more RAM/VRAM.
+                          </p>
+                        </div>
+                      )}
                       <div>
                         <label className="block text-xs font-medium text-slate-500 mb-1">
                           Max Tokens (Summary)
@@ -2359,7 +2448,7 @@ pause`;
                   <div className="flex items-center gap-3">
                     <button
                       type="button"
-                      onClick={handleTestOllama}
+                      onClick={handleTestLocalEngine}
                       disabled={testingOllama || loading}
                       className="text-xs px-3 py-1.5 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
                     >
@@ -2373,69 +2462,86 @@ pause`;
                     {ollamaConnected === false && (
                       <span className="text-xs text-red-600">
                         {isTauri()
-                          ? "Connection failed (Is Ollama running?)"
-                          : "Connection failed (Check CORS)"}
+                          ? `Connection failed (Is ${localEngine === "ollama" ? "Ollama" : localEngine === "lmstudio" ? "LM Studio" : "Llama.cpp"} running?)`
+                          : "Connection failed (Check CORS or Server)"}
                       </span>
                     )}
                   </div>
-                  <div className="text-xs text-slate-500 bg-slate-100 p-3 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    {isTauri() ? (
-                      <>
-                        <div>
-                          <p className="font-medium text-slate-700 mb-1">
-                            Ollama Native Control:
-                          </p>
-                          <p>
-                            Start or stop the local Ollama instance directly from the app.
-                          </p>
-                        </div>
-                        <div className="flex gap-2">
-                          {!ollamaNativeRunning ? (
-                            <button
-                              type="button"
-                              onClick={handleStartOllama}
-                              disabled={ollamaNativeLoading}
-                              className="inline-flex items-center px-3 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg hover:bg-emerald-100 transition-colors whitespace-nowrap disabled:opacity-50"
-                            >
-                              {ollamaNativeLoading ? "Starting..." : "Start Ollama"}
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={handleStopOllama}
-                              disabled={ollamaNativeLoading}
-                              className="inline-flex items-center px-3 py-1.5 bg-red-50 text-red-700 border border-red-200 rounded-lg hover:bg-red-100 transition-colors whitespace-nowrap disabled:opacity-50"
-                            >
-                              {ollamaNativeLoading ? "Stopping..." : "Stop Ollama"}
-                            </button>
-                          )}
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <div>
-                          <p className="font-medium text-slate-700 mb-1">
-                            How to enable CORS for Ollama:
-                          </p>
-                          <p>
-                            Ollama blocks cross-origin requests by default. To use
-                            it here, you must start it with{" "}
-                            <code className="bg-slate-200 px-1 py-0.5 rounded">
-                              OLLAMA_ORIGINS="{window.location.origin}"
-                            </code>
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={handleDownloadBat}
-                          className="inline-flex items-center px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors whitespace-nowrap"
-                        >
-                          <Download className="w-3 h-3 mr-1.5" />
-                          Download Windows .bat
-                        </button>
-                      </>
-                    )}
-                  </div>
+
+                  {localEngine === "ollama" ? (
+                    <div className="text-xs text-slate-500 bg-slate-100 p-3 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      {isTauri() ? (
+                        <>
+                          <div>
+                            <p className="font-medium text-slate-700 mb-1">
+                              Ollama Native Control:
+                            </p>
+                            <p>
+                              Start or stop the local Ollama instance directly from the app.
+                            </p>
+                          </div>
+                          <div className="flex gap-2">
+                            {!ollamaNativeRunning ? (
+                              <button
+                                type="button"
+                                onClick={handleStartOllama}
+                                disabled={ollamaNativeLoading}
+                                className="inline-flex items-center px-3 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg hover:bg-emerald-100 transition-colors whitespace-nowrap disabled:opacity-50"
+                              >
+                                {ollamaNativeLoading ? "Starting..." : "Start Ollama"}
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={handleStopOllama}
+                                disabled={ollamaNativeLoading}
+                                className="inline-flex items-center px-3 py-1.5 bg-red-50 text-red-700 border border-red-200 rounded-lg hover:bg-red-100 transition-colors whitespace-nowrap disabled:opacity-50"
+                              >
+                                {ollamaNativeLoading ? "Stopping..." : "Stop Ollama"}
+                              </button>
+                            )}
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div>
+                            <p className="font-medium text-slate-700 mb-1">
+                              How to enable CORS for Ollama:
+                            </p>
+                            <p>
+                              Ollama blocks cross-origin requests by default. To use
+                              it here, you must start it with{" "}
+                              <code className="bg-slate-200 px-1 py-0.5 rounded">
+                                OLLAMA_ORIGINS="{window.location.origin}"
+                              </code>
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleDownloadBat}
+                            className="inline-flex items-center px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors whitespace-nowrap"
+                          >
+                            <Download className="w-3 h-3 mr-1.5" />
+                            Download Windows .bat
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-slate-500 bg-slate-100 p-3 rounded-lg flex flex-col gap-2">
+                      <p className="font-medium text-slate-700 border-b border-slate-200 pb-1">
+                        Manual Server Start Required
+                      </p>
+                      <p>
+                        Selected engine requires manual start. Launch {localEngine === 'lmstudio' ? 'LM Studio / Oobabooga' : 'Llama.cpp'} externally, ensure its API server is listening on the configured URL, and click "Test Connection".
+                      </p>
+                      {!isTauri() && (
+                        <p className="text-amber-700 mt-1">
+                          <strong>Note:</strong> Make sure CORS is enabled in your server settings, otherwise web browsers will block the connection.
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

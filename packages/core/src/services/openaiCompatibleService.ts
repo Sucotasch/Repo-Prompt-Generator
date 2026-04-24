@@ -43,6 +43,30 @@ export async function fetchOpenAICompatibleModels(
       return [];
     }
 
+    const isLocalURL = baseURL.includes('localhost') || baseURL.includes('127.0.0.1');
+
+    if (isLocalURL) {
+      const response = await fetch(`${baseURL}/models`, {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      if (data && data.data && Array.isArray(data.data)) {
+        const models = data.data.map((model: any) => model.id).filter(Boolean);
+        const uniqueModels = Array.from(new Set(models)) as string[];
+        return uniqueModels.sort((a, b) => a.localeCompare(b));
+      }
+      return [];
+    }
+
     const response = await fetch(`/api/openai-compatible/models`, {
       method: "POST",
       headers: {
@@ -131,6 +155,29 @@ export async function generate_final_prompt_with_openai_compatible(
     return data.choices?.[0]?.message?.content || "";
   }
 
+  const isLocalURL = baseURL.includes('localhost') || baseURL.includes('127.0.0.1');
+
+  if (isLocalURL) {
+    const response = await fetch(`${baseURL}/chat/completions`, {
+      method: "POST",
+      headers: {
+         "Authorization": `Bearer ${apiKey}`,
+         "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: modelName,
+        messages: [{ role: "user", content: promptText }],
+        temperature: temperature,
+      }),
+    });
+
+    if (!response.ok) {
+       throw new Error(`OpenAI API Error: ${response.status} ${response.statusText}`);
+    }
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || "";
+  }
+
   const response = await fetch(`/api/openai-compatible/chat`, {
     method: "POST",
     headers: {
@@ -178,7 +225,7 @@ export async function rewriteQueryWithOpenAICompatible(
   modelName: string,
 ): Promise<{ optimizedQuery: string; intent: string }> {
   const systemPrompt = `You are a search query optimizer for a codebase RAG system.
-Given a user's task description, extract the core technical keywords, function names, and concepts that are most likely to be found in the source code.
+Given a user's task description (which will be enclosed in <user_text> tags), extract the core technical keywords, function names, and concepts that are most likely to be found in the source code.
 Output ONLY the optimized search query, nothing else. No explanations.
 
 Also, determine the intent of the query. Is it:
@@ -206,7 +253,7 @@ Return your response in the following JSON format:
         model: modelName,
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: query },
+          { role: "user", content: `<user_text>\n${query}\n</user_text>` },
         ],
         temperature: 0.3,
       }),
@@ -243,6 +290,42 @@ Return your response in the following JSON format:
     };
   }
 
+  const isLocalURL = baseURL.includes('localhost') || baseURL.includes('127.0.0.1');
+
+  if (isLocalURL) {
+    const response = await fetch(`${baseURL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: modelName,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `<user_text>\n${query}\n</user_text>` },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+       throw new Error(`OpenAI API Error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content || "";
+
+    const parsed = safeJsonParse<{optimizedQuery?: string, intent?: string}>(content, {
+      optimizedQuery: content.trim() || query,
+      intent: "GENERAL",
+    });
+
+    return {
+      optimizedQuery: parsed.optimizedQuery || query,
+      intent: parsed.intent || "GENERAL",
+    };
+  }
+
   const response = await fetch(`/api/openai-compatible/chat`, {
     method: "POST",
     headers: {
@@ -255,7 +338,7 @@ Return your response in the following JSON format:
         model: modelName,
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: query },
+          { role: "user", content: `<user_text>\n${query}\n</user_text>` },
         ],
       },
     }),

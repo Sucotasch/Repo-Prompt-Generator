@@ -18,6 +18,7 @@ export async function getEmbedding(
   ollamaUrl: string,
   model: string,
   repoUrl: string,
+  engine: "ollama" | "lmstudio" | "llamacpp" = "ollama"
 ): Promise<number[]> {
   // Try to get from cache first
   const cached = await EmbeddingCacheService.getEmbedding(text, model, repoUrl);
@@ -26,28 +27,73 @@ export async function getEmbedding(
   let embedding: number[];
 
   if (isTauri()) {
-    embedding = await tauriInvoke<number[]>("ollama_embed", {
-      url: ollamaUrl,
-      model,
-      prompt: text,
-    });
-  } else {
-    const res = await fetch(`${ollamaUrl.replace(/\/$/, "")}/api/embeddings`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    if (engine === "ollama") {
+      embedding = await tauriInvoke<number[]>("ollama_embed", {
+        url: ollamaUrl,
         model,
         prompt: text,
-      }),
-    });
+      });
+    } else {
+      const response = await tauriInvoke<any>("ai_network_request", {
+        method: "POST",
+        url: `${ollamaUrl}/embeddings`,
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: model,
+          input: text,
+        }),
+      });
 
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`Embedding failed (${res.status}): ${errText}`);
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(`OpenAI API Error: ${response.status} - ${response.text}`);
+      }
+      const data = JSON.parse(response.text);
+      if (!data.data || !data.data[0] || !data.data[0].embedding) {
+        throw new Error("Invalid embedding response format");
+      }
+      embedding = data.data[0].embedding;
     }
+  } else {
+    if (engine === "ollama") {
+      const res = await fetch(`${ollamaUrl.replace(/\/$/, "")}/api/embeddings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model,
+          prompt: text,
+        }),
+      });
 
-    const data = await res.json();
-    embedding = data.embedding;
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Embedding failed (${res.status}): ${errText}`);
+      }
+
+      const data = await res.json();
+      embedding = data.embedding;
+    } else {
+      const res = await fetch(`${ollamaUrl}/embeddings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model,
+          input: text,
+        }),
+      });
+
+      if (!res.ok) {
+         const errText = await res.text();
+         throw new Error(`Embedding failed (${res.status}): ${errText}`);
+      }
+
+      const data = await res.json();
+      if (!data.data || !data.data[0] || !data.data[0].embedding) {
+         throw new Error("Invalid embedding response format");
+      }
+      embedding = data.data[0].embedding;
+    }
   }
 
   // Save to cache
@@ -100,6 +146,7 @@ export async function performRAG(
   searchStrategy: number = 0.5, // 0 = Pure Vector, 1 = Pure BM25
   chunkSize: number = 30,
   onProgress?: (msg: string) => void,
+  engine: "ollama" | "lmstudio" | "llamacpp" = "ollama"
 ): Promise<{ path: string; content: string }[]> {
   const RAG_SYSTEM_INSTRUCTION = `
 Analyze the provided code snippets. When determining relevance:
@@ -109,7 +156,7 @@ Analyze the provided code snippets. When determining relevance:
 `;
 
   onProgress?.("Generating query embedding...");
-  let queryEmbedding: number[];
+  let queryEmbedding: number[] | null = null;
   try {
     // We don't cache the query embedding as it's dynamic and small
     queryEmbedding = await getEmbedding(
@@ -117,9 +164,10 @@ Analyze the provided code snippets. When determining relevance:
       ollamaUrl,
       model,
       repoUrl,
+      engine
     );
   } catch (e: any) {
-    throw new Error(`Failed to embed query. Details: ${e.message}`);
+    console.warn(`[RAG Warning] Failed to embed query using model '${model}'. Falling back to pure keyword search (BM25). Error details: ${e.message}`);
   }
 
   const allChunks: { path: string; content: string; zone: string; embedding?: number[] }[] =
@@ -145,30 +193,33 @@ Analyze the provided code snippets. When determining relevance:
 
   // 2. Vector Semantic Search
   let processed = 0;
-  for (const chunk of allChunks) {
-    processed++;
-    if (processed % 10 === 0 || processed === 1) {
-      onProgress?.(
-        `Embedding code chunks... (${processed}/${allChunks.length})`,
-      );
-    }
-    try {
-      chunk.embedding = await getEmbedding(
-        chunk.content,
-        ollamaUrl,
-        model,
-        repoUrl,
-      );
-    } catch (e) {
-      console.warn(`Failed to embed chunk from ${chunk.path}`, e);
+  if (queryEmbedding) {
+    for (const chunk of allChunks) {
+      processed++;
+      if (processed % 10 === 0 || processed === 1) {
+        onProgress?.(
+          `Embedding code chunks... (${processed}/${allChunks.length})`,
+        );
+      }
+      try {
+        chunk.embedding = await getEmbedding(
+          chunk.content,
+          ollamaUrl,
+          model,
+          repoUrl,
+          engine
+        );
+      } catch (e) {
+        console.warn(`Failed to embed chunk from ${chunk.path}`, e);
+      }
     }
   }
 
-  onProgress?.("Calculating hybrid scores and reranking...");
+  onProgress?.(queryEmbedding ? "Calculating hybrid scores and reranking..." : "Calculating BM25 fallback scores...");
 
   // Calculate raw scores for both methods
   const chunkScores = allChunks.map((chunk, index) => {
-    let semanticScore = chunk.embedding
+    let semanticScore = (queryEmbedding && chunk.embedding)
       ? cosineSimilarity(queryEmbedding, chunk.embedding)
       : 0;
 
