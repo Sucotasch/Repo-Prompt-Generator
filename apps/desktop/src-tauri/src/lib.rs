@@ -207,6 +207,9 @@ pub struct RepoInfo {
     repo: String,
     default_branch: String,
     description: String,
+    stargazers_count: Option<u32>,
+    topics: Option<Vec<String>>,
+    language: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -258,6 +261,9 @@ async fn fetch_github_repo(
         info_json["default_branch"].as_str().unwrap_or("main").to_string()
     });
     let description = info_json["description"].as_str().unwrap_or("No description.").to_string();
+    let stargazers_count = info_json["stargazers_count"].as_u64().map(|n| n as u32);
+    let topics = info_json["topics"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect());
+    let language = info_json["language"].as_str().map(|s| s.to_string());
 
     // 2. Fetch tree
     let tree_url = format!("https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1", owner, repo, default_branch);
@@ -417,7 +423,7 @@ async fn fetch_github_repo(
     if tree_paths.len() > 1000 { tree_paths.truncate(1000); is_truncated = true; }
 
     Ok(GithubRepoData {
-        info: RepoInfo { owner, repo, default_branch, description },
+        info: RepoInfo { owner, repo, default_branch, description, stargazers_count, topics, language },
         tree: tree_paths, readme, dependencies, source_files, is_truncated,
     })
 }

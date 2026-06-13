@@ -40,7 +40,10 @@ async function startServer() {
           .json({ error: "Invalid request. Branch must be a string." });
       }
 
-      const headers: Record<string, string> = {};
+      const headers: Record<string, string> = {
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "repo-prompt-generator/1.0.0",
+      };
       if (token && typeof token === "string") {
         headers["Authorization"] = `token ${token}`;
       }
@@ -76,6 +79,9 @@ async function startServer() {
       const infoData = await infoRes.json();
       const defaultBranch = infoData.default_branch;
       const description = infoData.description || "No description provided.";
+      const stargazersCount = infoData.stargazers_count;
+      const topics = infoData.topics || [];
+      const language = infoData.language;
 
       const targetBranch = branch || defaultBranch;
       const encodedBranch = encodeURIComponent(targetBranch);
@@ -308,7 +314,16 @@ async function startServer() {
       }
 
       res.json({
-        info: { owner, repo, defaultBranch, branch: targetBranch, description },
+        info: { 
+          owner, 
+          repo, 
+          defaultBranch, 
+          branch: targetBranch, 
+          description,
+          stargazersCount,
+          topics,
+          language
+        },
         tree: treePaths,
         readme,
         dependencies,

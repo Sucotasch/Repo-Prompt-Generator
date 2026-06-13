@@ -35,7 +35,7 @@ export class SemanticChunker {
     
     // Поиск семантических границ: двойной перенос строки ИЛИ начало объявления структуры
     // Используем позитивный просмотр вперед (?=...), чтобы не удалять сами разделители
-    const boundaries = text.split(/(?=\n\n|\n(?:class|function|const|let|var|interface|type|export|import)\s)/g);
+    const boundaries = text.split(/(?=\n\n|\n(?:class|function|def|struct|impl|const|let|var|interface|type|export|import)\s)/g);
     
     let currentChunk = "";
 
@@ -63,15 +63,16 @@ export class SemanticChunker {
       chunks.push(currentChunk.trim());
     }
 
-    // Fallback: Если какой-то чанк получился гигантским (например, минифицированный код),
-    // принудительно дробим его, чтобы не уронить Ollama (OOM / 500 Error).
+    // Fallback: Если какой-то чанк получился гигантским без семантических границ 
+    // (например, минифицированный код, длинный словарь или BASE64),
+    // принудительно дробим его с учетом maxChars, чтобы не уронить Ollama (OOM / 500 Error).
     const finalChunks: string[] = [];
-    const ABSOLUTE_MAX_CHARS = 8000;
+    const stepChars = Math.max(1, maxChars - overlapChars);
     
     for (const chunk of chunks) {
-      if (chunk.length > ABSOLUTE_MAX_CHARS) {
-        for (let j = 0; j < chunk.length; j += ABSOLUTE_MAX_CHARS) {
-          finalChunks.push(chunk.substring(j, j + ABSOLUTE_MAX_CHARS));
+      if (chunk.length > maxChars) {
+        for (let j = 0; j < chunk.length; j += stepChars) {
+          finalChunks.push(chunk.substring(j, j + maxChars));
         }
       } else {
         finalChunks.push(chunk);

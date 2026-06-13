@@ -6,6 +6,9 @@ export interface RepoInfo {
   defaultBranch: string;
   branch?: string;
   description: string;
+  stargazersCount?: number;
+  topics?: string[];
+  language?: string | null;
 }
 
 export interface RepoData {

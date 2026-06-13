@@ -22,7 +22,7 @@ export function buildPromptText(
   if (attachedDocs && attachedDocs.length > 0) {
     prompt += `<EXTERNAL_DOCUMENTS>\n`;
     attachedDocs.forEach((doc) => {
-      prompt += `--- Document: ${doc.name} ---\n${doc.content}\n\n`;
+      prompt += `\n<document name="${doc.name}">\n${doc.content}\n</document>\n`;
     });
     prompt += `</EXTERNAL_DOCUMENTS>\n\n`;
   }
@@ -46,7 +46,7 @@ export function buildPromptText(
   prompt += `README:\n${truncate(repoData.readme)}\n\n`;
   prompt += `Dependencies:\n${truncate(repoData.dependencies)}\n`;
   if (repoData.sourceFiles && repoData.sourceFiles.length > 0) {
-    prompt += `\nKey Source Files:\n${repoData.sourceFiles.map((f) => `--- ${f.path} ---\n${truncate(f.content)}\n`).join("\n")}`;
+    prompt += `\nKey Source Files:\n${repoData.sourceFiles.map((f) => `\n<repository_file_content path="${f.path}">\n${truncate(f.content)}\n</repository_file_content>\n`).join("")}`;
   }
 
   if (referenceRepoData) {
@@ -76,7 +76,7 @@ export function buildPromptText(
       referenceRepoData.sourceFiles &&
       referenceRepoData.sourceFiles.length > 0
     ) {
-      prompt += `\nKey Source Files:\n${referenceRepoData.sourceFiles.map((f) => `--- ${f.path} ---\n${truncate(f.content)}\n`).join("\n")}`;
+      prompt += `\nKey Source Files:\n${referenceRepoData.sourceFiles.map((f) => `\n<repository_file_content path="${f.path}">\n${truncate(f.content)}\n</repository_file_content>\n`).join("")}`;
     }
   }
   prompt += `\n</CODEBASE>\n\n`;
@@ -248,6 +248,11 @@ export async function generateSystemPrompt(
           const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, undefined, referenceRepoData, localFiles, referenceLocalFiles);
           fetchedFilesCount = fetchedFiles.length;
           
+          const secureFetchedFiles = fetchedFiles.map(f => ({
+            path: f.path,
+            content: `\n<repository_file_content path="${f.path}">\n${f.content}\n</repository_file_content>\n`
+          }));
+          
           let instructionText = "";
           if (fetchedFiles.length === 0) {
             if (onStatusUpdate) onStatusUpdate("Failed to fetch files. Generating fallback response...");
@@ -264,7 +269,7 @@ export async function generateSystemPrompt(
               {
                 functionResponse: {
                   name: "request_additional_files",
-                  response: { files: fetchedFiles }
+                  response: { files: secureFetchedFiles }
                 }
               },
               {
@@ -340,6 +345,11 @@ export async function generateSystemPrompt(
           const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, token, referenceRepoData, localFiles, referenceLocalFiles);
           fetchedFilesCount = fetchedFiles.length;
           
+          const secureFetchedFiles = fetchedFiles.map(f => ({
+            path: f.path,
+            content: `\n<repository_file_content path="${f.path}">\n${f.content}\n</repository_file_content>\n`
+          }));
+          
           let instructionText = "";
           if (fetchedFiles.length === 0) {
             if (onStatusUpdate) onStatusUpdate("Failed to fetch files. Generating fallback response...");
@@ -356,7 +366,7 @@ export async function generateSystemPrompt(
               {
                 functionResponse: {
                   name: "request_additional_files",
-                  response: { files: fetchedFiles }
+                  response: { files: secureFetchedFiles }
                 }
               },
               {
