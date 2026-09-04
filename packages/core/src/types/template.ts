@@ -13,7 +13,8 @@ export interface TemplateMetadata {
     | "default"
     | "performance"
     | "refactor"
-    | "architecture";
+    | "architecture"
+    | "tutorial";
 }
 
 export interface TemplateDefinition {

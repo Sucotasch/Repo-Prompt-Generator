@@ -539,7 +539,7 @@ export default function App() {
 color 0A
 echo ==========================================
 echo Starting Ollama with CORS enabled...
-echo You can now use the Gemini Prompt Generator!
+echo You can now use Repo Prompt Generator!
 echo ==========================================
 set OLLAMA_ORIGINS="${origin}"
 echo Closing existing Ollama instances...
@@ -1267,11 +1267,10 @@ pause`;
             <FileText className="w-8 h-8 text-indigo-600" />
           </div>
           <h1 className="text-4xl font-bold tracking-tight text-slate-900 sm:text-5xl mb-4">
-            Gemini Prompt Generator
+            Repo Prompt Generator
           </h1>
           <p className="text-lg text-slate-600 max-w-2xl mx-auto">
-            Generate a comprehensive system prompt for your GitHub repository,
-            ready to be used with Gemini CLI or Antigravity.
+            Intelligent codebase analysis, hybrid RAG retrieval, and context synthesis for Gemini, Claude, Cursor, and local LLMs.
           </p>
         </div>
 

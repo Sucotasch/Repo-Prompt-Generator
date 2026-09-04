@@ -1,5 +1,5 @@
 {
-  "name": "Gemini Prompt Generator",
-  "description": "Generates a system prompt for Gemini CLI or Antigravity based on a GitHub repository.",
+  "name": "Repo Prompt Generator",
+  "description": "Intelligent codebase analysis, hybrid RAG retrieval, and context synthesis for Gemini, Claude, Cursor, and local LLMs.",
   "requestFramePermissions": []
 }

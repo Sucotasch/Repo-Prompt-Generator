@@ -238,8 +238,12 @@ export async function generateSystemPrompt(
         model: modelVersion,
       });
 
-      if (response.candidates && response.candidates[0].content.parts[0].functionCall) {
-        const call = response.candidates[0].content.parts[0].functionCall;
+      const candidateContent = response.candidates?.[0]?.content;
+      const parts = candidateContent?.parts || [];
+      const functionCallPart = parts.find((p: any) => p?.functionCall);
+
+      if (functionCallPart?.functionCall) {
+        const call = functionCallPart.functionCall;
         if (call.name === "request_additional_files") {
           const requestedFiles = call.args.filePaths || [];
           requestedFilesList = requestedFiles;
@@ -292,8 +296,13 @@ export async function generateSystemPrompt(
         let functionCall = null;
         if (candidate.content?.parts) {
           for (const part of candidate.content.parts) {
-            if (part.text) text += part.text;
+            if (part.text && !part.thought) text += part.text;
             if (part.functionCall) functionCall = part.functionCall;
+          }
+          if (!text.trim()) {
+            for (const part of candidate.content.parts) {
+              if (part.text) text += part.text;
+            }
           }
         }
         
@@ -391,8 +400,13 @@ export async function generateSystemPrompt(
         let functionCall = null;
         if (candidate.content?.parts) {
           for (const part of candidate.content.parts) {
-            if (part.text) text += part.text;
+            if (part.text && !part.thought) text += part.text;
             if (part.functionCall) functionCall = part.functionCall;
+          }
+          if (!text.trim()) {
+            for (const part of candidate.content.parts) {
+              if (part.text) text += part.text;
+            }
           }
         }
         

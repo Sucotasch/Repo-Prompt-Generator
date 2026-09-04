@@ -112,6 +112,31 @@ export async function fetchOpenAICompatibleModels(
   }
 }
 
+/**
+ * Safely extracts message content from an OpenAI-compatible choice,
+ * supporting reasoning models (DeepSeek, Qwen, etc.) with reasoning_content or <think> tags.
+ */
+function extractChoiceContent(choice: any): string {
+  if (!choice?.message) return "";
+  const msg = choice.message;
+  let text = msg.content || "";
+
+  // Fallback for models with separate reasoning_content (DeepSeek-R1 / vLLM / OpenRouter)
+  if (!text.trim() && msg.reasoning_content) {
+    text = msg.reasoning_content;
+  }
+
+  // Strip <think>...</think> tags if final answer content follows
+  if (text.includes("<think>")) {
+    const stripped = text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+    if (stripped.length > 0) {
+      text = stripped;
+    }
+  }
+
+  return text;
+}
+
 export async function generate_final_prompt_with_openai_compatible(
   promptText: string,
   baseURL: string,
@@ -152,7 +177,7 @@ export async function generate_final_prompt_with_openai_compatible(
     }
 
     const data = JSON.parse(response.text);
-    return data.choices?.[0]?.message?.content || "";
+    return extractChoiceContent(data.choices?.[0]);
   }
 
   const isLocalURL = baseURL.includes('localhost') || baseURL.includes('127.0.0.1');
@@ -175,7 +200,7 @@ export async function generate_final_prompt_with_openai_compatible(
        throw new Error(`OpenAI API Error: ${response.status} ${response.statusText}`);
     }
     const data = await response.json();
-    return data.choices?.[0]?.message?.content || "";
+    return extractChoiceContent(data.choices?.[0]);
   }
 
   const response = await fetch(`/api/openai-compatible/chat`, {
@@ -215,7 +240,7 @@ export async function generate_final_prompt_with_openai_compatible(
   }
 
   const data = await response.json();
-  return data.choices?.[0]?.message?.content || "";
+  return extractChoiceContent(data.choices?.[0]);
 }
 
 export async function rewriteQueryWithOpenAICompatible(
@@ -277,7 +302,7 @@ Return your response in the following JSON format:
     }
 
     const data = JSON.parse(response.text);
-    const content = data.choices?.[0]?.message?.content || "";
+    const content = extractChoiceContent(data.choices?.[0]);
 
     const parsed = safeJsonParse<{optimizedQuery?: string, intent?: string}>(content, {
       optimizedQuery: content.trim() || query,
@@ -313,7 +338,7 @@ Return your response in the following JSON format:
     }
 
     const data = await response.json();
-    const content = data.choices?.[0]?.message?.content || "";
+    const content = extractChoiceContent(data.choices?.[0]);
 
     const parsed = safeJsonParse<{optimizedQuery?: string, intent?: string}>(content, {
       optimizedQuery: content.trim() || query,
@@ -366,7 +391,7 @@ Return your response in the following JSON format:
   }
 
   const data = await response.json();
-  const content = data.choices?.[0]?.message?.content || "";
+  const content = extractChoiceContent(data.choices?.[0]);
 
   const parsed = safeJsonParse<{optimizedQuery?: string, intent?: string}>(content, {
     optimizedQuery: content.trim() || query,

@@ -294,8 +294,9 @@ Analyze the provided code snippets. When determining relevance:
 
   // 4. Reciprocal Rank Fusion
   // searchStrategy: 0 = Pure Vector, 1 = Pure BM25
-  const vectorWeight = 1 - searchStrategy;
-  const lexicalWeight = searchStrategy;
+  // If query embedding failed, gracefully fallback to 100% BM25 lexical search
+  const vectorWeight = queryEmbedding ? (1 - searchStrategy) : 0;
+  const lexicalWeight = queryEmbedding ? searchStrategy : 1;
 
   const fusedResults = reciprocalRankFusion(
     vectorRanked,
