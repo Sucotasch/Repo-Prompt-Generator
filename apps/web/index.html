@@ -3,6 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem("app_theme");
+          var dark =
+            t === "dark" ||
+            ((t === null || t === "system") &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (dark) document.documentElement.classList.add("theme-dark");
+          if (t === "light") document.documentElement.classList.add("theme-light");
+        } catch (e) {}
+      })();
+    </script>
     <title>Repo Prompt Generator</title>
     <meta name="description" content="Intelligent codebase analysis, hybrid RAG retrieval, and context synthesis for Gemini, Claude, Cursor, and local LLMs." />
   </head>

@@ -11,6 +11,12 @@ import {
   Save,
   Trash2,
   Folder,
+  History,
+  Sun,
+  Moon,
+  Monitor,
+  Eye,
+  EyeOff,
   ChevronDown,
   Database,
   Paperclip,
@@ -34,6 +40,7 @@ import {
   rewriteQuery,
   AIProvider,
   EmbeddingCacheService,
+  HistoryCacheService,
   performRAG,
   getTemplate,
   getAllTemplates,
@@ -44,12 +51,51 @@ import {
   startOllamaNative,
   stopOllamaNative,
 } from "@repo-prompt-generator/core";
-import { open } from "@tauri-apps/plugin-shell";
+import type { HistoryEntryMeta } from "@repo-prompt-generator/core";
 
 interface SavedTemplate {
   id: string;
   name: string;
   content: string;
+}
+
+/** Collapsible section of the config sidebar. State persists via App. */
+function CollapsibleGroup({
+  title,
+  summary,
+  open,
+  onToggle,
+  children,
+}: {
+  title: string;
+  summary?: string;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="border-b border-line-soft">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface-2 transition-colors"
+      >
+        <ChevronDown
+          className={`w-3.5 h-3.5 text-faint shrink-0 transition-transform ${open ? "" : "-rotate-90"}`}
+        />
+        <span className="text-xs font-semibold text-body uppercase tracking-wide">
+          {title}
+        </span>
+        {summary && (
+          <span className="ml-auto text-[11px] text-faint truncate max-w-[45%]">
+            {summary}
+          </span>
+        )}
+      </button>
+      {open && <div className="px-3 pb-3 space-y-2.5">{children}</div>}
+    </div>
+  );
 }
 
 export default function App() {
@@ -206,6 +252,9 @@ export default function App() {
   const [testingOllama, setTestingOllama] = useState(false);
   const [loading, setLoading] = useState(false);
   const abortControllerRef = React.useRef<AbortController | null>(null);
+  // Generation sequence: bumping it marks every in-flight run stale, so a
+  // cancelled run can never write its result to the UI or history.
+  const generationRef = React.useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
@@ -221,6 +270,63 @@ export default function App() {
   const [newTemplateName, setNewTemplateName] = useState("");
   const [isSavingNew, setIsSavingNew] = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  // UI shell state
+  const [showTemplateContent, setShowTemplateContent] = useState(false);
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = localStorage.getItem("gemini_ui_groups");
+      return saved
+        ? JSON.parse(saved)
+        : { source: true, provider: true, engine: true, desktop: false };
+    } catch (e) {
+      return { source: true, provider: true, engine: true, desktop: false };
+    }
+  });
+
+  // Generation history (persisted across sessions)
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyEntries, setHistoryEntries] = useState<HistoryEntryMeta[]>([]);
+  const [restoredAt, setRestoredAt] = useState<number | null>(null);
+  const restoringRef = React.useRef(false);
+
+  // Theme: "system" follows the OS, light/dark force it. The initial class
+  // was already set by the inline bootstrap in index.html.
+  const [theme, setTheme] = useState<"system" | "light" | "dark">(() => {
+    const t = localStorage.getItem("app_theme");
+    return t === "light" || t === "dark" ? t : "system";
+  });
+
+  const applyThemeClass = (setting: "system" | "light" | "dark") => {
+    const root = document.documentElement;
+    root.classList.remove("theme-dark", "theme-light");
+    if (setting === "dark") root.classList.add("theme-dark");
+    if (setting === "light") root.classList.add("theme-light");
+  };
+
+  useEffect(() => {
+    applyThemeClass(theme);
+  }, [theme]);
+
+  // Re-resolve when the OS theme changes while in "system" mode
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => {
+      if (theme === "system") applyThemeClass("system");
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [theme]);
+
+  const setThemeSetting = (value: "system" | "light" | "dark") => {
+    setTheme(value);
+    localStorage.setItem("app_theme", value);
+  };
+
+  // Reveal password-style fields on demand
+  const [showCustomKey, setShowCustomKey] = useState(false);
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
+  const [showGithubToken, setShowGithubToken] = useState(false);
 
   const [tokenWarningResolver, setTokenWarningResolver] = useState<
     ((proceed: boolean) => void) | null
@@ -337,9 +443,113 @@ export default function App() {
       tauriInvoke("set_app_config", {
         gemini_key: geminiApiKey,
         proxy: proxyAddress,
+        custom_base_url: customBaseUrl,
+        ollama_url: ollamaUrl,
       }).catch(console.error);
     }
-  }, [geminiApiKey, proxyAddress]);
+  }, [geminiApiKey, proxyAddress, customBaseUrl, ollamaUrl]);
+
+  // Restore the last generated prompt on startup so it survives restarts
+  useEffect(() => {
+    (async () => {
+      const entries = await HistoryCacheService.listEntries();
+      setHistoryEntries(entries);
+      if (entries.length > 0) {
+        const content = await HistoryCacheService.getContent(entries[0].id);
+        if (content) {
+          restoringRef.current = true;
+          setGeneratedFileName(entries[0].fileName);
+          setUsedModel(entries[0].model || null);
+          setRestoredAt(entries[0].createdAt);
+          setPrompt(content);
+        }
+      }
+    })();
+  }, []);
+
+  // Persist every freshly generated prompt (restored ones are skipped)
+  useEffect(() => {
+    if (!prompt) return;
+    if (restoringRef.current) {
+      restoringRef.current = false;
+      return;
+    }
+    setRestoredAt(null);
+    const sourceLabel =
+      inputMode === "github"
+        ? url || "GitHub"
+        : localFiles && localFiles.length > 0
+          ? `Local: ${localFiles[0].webkitRelativePath.split("/")[0]}`
+          : "Local Folder";
+    const templateName =
+      templateMode === "custom"
+        ? "Custom"
+        : templateMode.startsWith("user_")
+          ? savedTemplates.find((t) => t.id === templateMode)?.name ||
+            templateMode
+          : getTemplate(templateMode)?.metadata.name || templateMode;
+    HistoryCacheService.saveEntry({
+      content: prompt,
+      sourceLabel,
+      templateName,
+      model: usedModel || "",
+      fileName: generatedFileName,
+    })
+      .then(() => HistoryCacheService.listEntries())
+      .then(setHistoryEntries);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prompt]);
+
+  // Close the history popover with Escape
+  useEffect(() => {
+    if (!historyOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setHistoryOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [historyOpen]);
+
+  const handleOpenHistory = async () => {
+    setHistoryEntries(await HistoryCacheService.listEntries());
+    setHistoryOpen((v) => !v);
+  };
+
+  const handleLoadHistoryEntry = async (meta: HistoryEntryMeta) => {
+    const content = await HistoryCacheService.getContent(meta.id);
+    if (!content) return;
+    restoringRef.current = true;
+    setGeneratedFileName(meta.fileName);
+    setUsedModel(meta.model || null);
+    setRestoredAt(meta.createdAt);
+    setPrompt(content);
+    setCopied(false);
+    setHistoryOpen(false);
+  };
+
+  const handleDeleteHistoryEntry = async (id: string) => {
+    await HistoryCacheService.deleteEntry(id);
+    setHistoryEntries(await HistoryCacheService.listEntries());
+  };
+
+  const handleClearHistory = async () => {
+    await HistoryCacheService.clear();
+    setHistoryEntries([]);
+  };
+
+  const toggleGroup = (key: string) => {
+    setOpenGroups((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      localStorage.setItem("gemini_ui_groups", JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const autoGrow = (e: React.FormEvent<HTMLTextAreaElement>) => {
+    const el = e.currentTarget;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+  };
 
   const handleTemplateChange = (mode: string) => {
     setTemplateMode(mode);
@@ -643,6 +853,7 @@ pause`;
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    generationRef.current++;
     setLoading(false);
     setStatus("Generation cancelled by user.");
   };
@@ -675,8 +886,17 @@ pause`;
       abortControllerRef.current.abort();
     }
     abortControllerRef.current = new AbortController();
-    const signal = abortControllerRef.current.signal;
+    const genId = ++generationRef.current;
+    const ensureLive = () => {
+      if (
+        genId !== generationRef.current ||
+        abortControllerRef.current?.signal.aborted
+      ) {
+        throw new Error("__CANCELLED__");
+      }
+    };
 
+    let cancelled = false;
     setLoading(true);
     setError(null);
     setPrompt(null);
@@ -715,6 +935,8 @@ pause`;
           }
         }
       }
+
+      ensureLive();
 
       if (repoData.isTruncated) {
         setIsTruncated(true);
@@ -772,6 +994,8 @@ pause`;
           setIsTruncated(true);
         }
       }
+
+      ensureLive();
 
       let finalUsedRagQuery = "";
       let finalUsedOptimizedQuery = "";
@@ -982,6 +1206,8 @@ pause`;
         }
       }
 
+      ensureLive();
+
       let usedOllama = false;
       if (useOllama && ollamaConnected !== false) {
         setStatus(`Summarizing with ${localEngine === "ollama" ? "local Ollama" : localEngine === "lmstudio" ? "LM Studio" : "Llama.cpp"}...`);
@@ -1046,6 +1272,8 @@ pause`;
           };
         }
       }
+
+      ensureLive();
 
       let generatedPrompt = "";
       let finalModel = "";
@@ -1226,6 +1454,8 @@ pause`;
 
       generatedPrompt = metadata + generatedPrompt;
 
+      ensureLive();
+
       const safeModelName = finalModel
         .replace(/[^a-zA-Z0-9-]/g, "-")
         .replace(/-+/g, "-")
@@ -1237,10 +1467,15 @@ pause`;
       setPrompt(generatedPrompt);
       setUsedModel(finalModel);
     } catch (err: any) {
-      setError(err.message || "An unexpected error occurred.");
+      if (err?.message === "__CANCELLED__") {
+        cancelled = true;
+        setStatus("Generation cancelled.");
+      } else {
+        setError(err.message || "An unexpected error occurred.");
+      }
     } finally {
       setLoading(false);
-      setStatus("");
+      if (!cancelled) setStatus("");
     }
   };
 
@@ -1259,1447 +1494,1763 @@ pause`;
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-indigo-100 selection:text-indigo-900 pb-24">
-      <div className="max-w-4xl mx-auto px-4 py-12 sm:px-6 lg:px-8">
-        {/* Header */}
-        <div className="text-center mb-12">
-          <div className="inline-flex items-center justify-center p-3 bg-indigo-100 rounded-2xl mb-4">
-            <FileText className="w-8 h-8 text-indigo-600" />
-          </div>
-          <h1 className="text-4xl font-bold tracking-tight text-slate-900 sm:text-5xl mb-4">
-            Repo Prompt Generator
-          </h1>
-          <p className="text-lg text-slate-600 max-w-2xl mx-auto">
-            Intelligent codebase analysis, hybrid RAG retrieval, and context synthesis for Gemini, Claude, Cursor, and local LLMs.
-          </p>
-        </div>
+    <div className="h-screen flex flex-col bg-app text-ink font-sans selection:bg-brand-soft-2 selection:text-brand-ink overflow-hidden">
+      <h1 className="sr-only">Repo Prompt Generator</h1>
 
-        {/* Input Form */}
-        <div className="bg-white shadow-sm ring-1 ring-slate-200 rounded-2xl p-6 sm:p-8 mb-8">
-          <div className="flex border-b border-slate-200 mb-6">
+      {/* ===== Top: task panel (source, template, instructions, status) ===== */}
+      <header className="relative shrink-0 bg-surface border-b border-line shadow-sm z-30">
+        {/* Row 1: source + generate */}
+        <form
+          onSubmit={handleGenerate}
+          className="flex items-center gap-2 px-3 pt-2 pb-2"
+        >
+          <div
+            className="flex rounded-lg border border-line p-0.5 shrink-0"
+            aria-label="Source type"
+          >
             <button
               type="button"
-              className={`py-2 px-4 text-sm font-medium border-b-2 transition-colors ${inputMode === "github" ? "border-indigo-500 text-indigo-600" : "border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300"}`}
+              aria-pressed={inputMode === "github"}
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors ${inputMode === "github" ? "bg-brand-fog text-brand-ink" : "text-soft hover:text-body"}`}
               onClick={() => setInputMode("github")}
             >
-              <Github className="w-4 h-4 inline-block mr-2" />
-              GitHub Repository
+              <Github className="w-3.5 h-3.5 inline-block mr-1 -mt-0.5" />
+              GitHub
             </button>
             <button
               type="button"
-              className={`py-2 px-4 text-sm font-medium border-b-2 transition-colors ${inputMode === "local" ? "border-indigo-500 text-indigo-600" : "border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300"}`}
+              aria-pressed={inputMode === "local"}
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors ${inputMode === "local" ? "bg-brand-fog text-brand-ink" : "text-soft hover:text-body"}`}
               onClick={() => setInputMode("local")}
             >
-              <Folder className="w-4 h-4 inline-block mr-2" />
-              Local Folder
+              <Folder className="w-3.5 h-3.5 inline-block mr-1 -mt-0.5" />
+              Local
             </button>
           </div>
 
-          <form onSubmit={handleGenerate} className="flex flex-col gap-4">
-            <div className="flex flex-col sm:flex-row gap-4">
-              {inputMode === "github" ? (
-                <div className="relative flex-grow">
-                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                    <Github className="h-5 w-5 text-slate-400" />
-                  </div>
-                  <input
-                    type="url"
-                    required
-                    placeholder="https://github.com/owner/repo"
-                    className="block w-full pl-10 pr-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow"
-                    value={url}
-                    onChange={(e) => setUrl(e.target.value)}
-                    disabled={loading}
-                  />
-                </div>
-              ) : (
-                <div className="flex-grow">
-                  <input
-                    type="file"
-                    ref={fileInputRef}
-                    // @ts-ignore - webkitdirectory is non-standard but widely supported
-                    webkitdirectory=""
-                    directory=""
-                    multiple
-                    onChange={(e) => {
-                      e.preventDefault(); // Prevent any default behavior
-                      setLocalFiles(e.target.files);
-                    }}
-                    className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
-                    disabled={loading}
-                  />
-                  {localFiles && localFiles.length > 0 && (
-                    <p className="mt-2 text-sm text-slate-600">
-                      Selected {localFiles.length} files from{" "}
-                      {localFiles[0].webkitRelativePath.split("/")[0]}
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {inputMode === "github" && (
-                <div>
-                  <label
-                    htmlFor="githubToken"
-                    className="block text-xs font-medium text-slate-500 mb-1"
-                  >
-                    GitHub Token (Optional)
-                  </label>
-                  <input
-                    type="password"
-                    id="githubToken"
-                    className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                    placeholder="ghp_..."
-                    value={githubToken}
-                    onChange={(e) => setGithubToken(e.target.value)}
-                    disabled={loading}
-                  />
-                </div>
-              )}
-              <div
-                className={
-                  inputMode === "local" ? "col-span-1 sm:col-span-2" : ""
-                }
-              >
-                <label
-                  htmlFor="maxFiles"
-                  className="block text-xs font-medium text-slate-500 mb-1"
-                >
-                  Max Source Files to Fetch
-                </label>
-                <input
-                  type="number"
-                  id="maxFiles"
-                  className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                  value={maxFiles}
-                  onChange={(e) => setMaxFiles(Number(e.target.value))}
-                  disabled={loading}
-                  min={1}
-                  max={inputMode === "local" ? 200 : githubToken ? 200 : 10}
-                />
-                <p className="mt-1 text-xs text-slate-500">
-                  {inputMode === "local"
-                    ? "Limit: 200 files (Local processing is fast)."
-                    : githubToken
-                      ? "Limit: 200 files (Token provided)."
-                      : "Limit: 10 files (Add token to increase up to 200)."}
-                </p>
+          {inputMode === "github" ? (
+            <div className="relative flex-1 min-w-0">
+              <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none">
+                <Github className="h-4 w-4 text-faint" />
               </div>
+              <input
+                type="url"
+                required
+                placeholder="https://github.com/owner/repo"
+                className="block w-full pl-8 pr-2.5 py-1.5 border border-input-line rounded-lg leading-5 bg-raised placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-brand-mid focus:border-brand-mid text-sm transition-shadow"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                disabled={loading}
+              />
             </div>
+          ) : (
+            <div className="flex-1 min-w-0">
+              <input
+                type="file"
+                ref={fileInputRef}
+                // @ts-ignore - webkitdirectory is non-standard but widely supported
+                webkitdirectory=""
+                directory=""
+                multiple
+                onChange={(e) => {
+                  e.preventDefault();
+                  setLocalFiles(e.target.files);
+                }}
+                className="block w-full text-xs text-brand-ink file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-brand-fog file:text-brand-ink hover:file:bg-brand-soft-2 cursor-pointer truncate"
+                disabled={loading}
+              />
+              {localFiles && localFiles.length > 0 && (
+                <p className="text-[11px] text-soft mt-0.5 truncate">
+                  {localFiles.length} files from{" "}
+                  {localFiles[0].webkitRelativePath.split("/")[0]}
+                </p>
+              )}
+            </div>
+          )}
 
-            {(templateMode === "integration" ||
-              ((templateMode === "custom" ||
-                templateMode.startsWith("user_")) &&
-                useReferenceRepo)) && (
-              <div className="mt-4 p-4 bg-slate-50 border border-slate-200 rounded-xl">
-                <h3 className="text-sm font-semibold text-slate-800 mb-3 flex items-center">
-                  <Database className="w-4 h-4 mr-2 text-indigo-500" />
-                  Reference Repository (Source of Truth)
-                </h3>
-                <div className="flex border-b border-slate-200 mb-4">
+          <button
+            type="submit"
+            disabled={
+              loading ||
+              (inputMode === "github"
+                ? !url
+                : !localFiles || localFiles.length === 0)
+            }
+            title={
+              inputMode === "github"
+                ? !url
+                  ? "Enter a repository URL first"
+                  : "Generate the prompt"
+                : !localFiles || localFiles.length === 0
+                  ? "Select a local folder first"
+                  : "Generate the prompt"
+            }
+            className="shrink-0 inline-flex items-center justify-center px-4 py-1.5 border border-transparent text-sm font-medium rounded-lg text-brand-fg bg-brand hover:bg-brand-strong focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-app focus:ring-brand-mid disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {loading ? (
+              <>
+                <Loader2 className="animate-spin -ml-1 mr-1.5 h-4 w-4" />
+                Generating…
+              </>
+            ) : inputMode === "github" &&
+              cachedRepoData &&
+              cacheKey === `${url}-${githubToken}-${maxFiles}` ? (
+              "Regenerate (Cached)"
+            ) : (
+              "Generate Prompt"
+            )}
+          </button>
+        </form>
+
+        {/* Row 2: template */}
+        <div className="px-3 pb-2 flex items-center gap-2">
+          <label
+            htmlFor="templateMode"
+            className="text-xs font-medium text-soft shrink-0"
+          >
+            Template
+          </label>
+          <select
+            id="templateMode"
+            value={templateMode}
+            onChange={(e) => handleTemplateChange(e.target.value)}
+            className="flex-1 min-w-0 px-2 py-1.5 border border-input-line rounded-lg leading-5 bg-raised focus:outline-none focus:ring-2 focus:ring-brand-mid focus:border-brand-mid text-sm transition-shadow"
+          >
+            <optgroup label="Built-in Templates">
+              {getAllTemplates().map((template) => (
+                <option key={template.metadata.id} value={template.metadata.id}>
+                  {template.metadata.name}
+                </option>
+              ))}
+            </optgroup>
+            {savedTemplates.length > 0 && (
+              <optgroup label="Saved Templates">
+                {savedTemplates.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            <optgroup label="Custom">
+              <option value="custom">Custom Prompt</option>
+            </optgroup>
+          </select>
+          <div className="flex gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={handleExportTemplates}
+              className="text-xs text-brand hover:text-brand-strong font-medium"
+            >
+              Export
+            </button>
+            <label className="text-xs text-brand hover:text-brand-strong font-medium cursor-pointer">
+              Import
+              <input
+                type="file"
+                accept=".json"
+                className="hidden"
+                onChange={handleImportTemplates}
+              />
+            </label>
+          </div>
+        </div>
+
+        {getTemplate(templateMode) ? (
+          /* Built-in template: read-only, collapsed by default */
+          <div className="px-3 pb-2">
+            <button
+              type="button"
+              onClick={() => setShowTemplateContent(!showTemplateContent)}
+              aria-expanded={showTemplateContent}
+              className="flex items-center text-xs text-soft hover:text-body transition-colors"
+            >
+              <ChevronDown
+                className={`w-3 h-3 mr-1 transition-transform ${showTemplateContent ? "rotate-180" : ""}`}
+              />
+              Template content ·{" "}
+              {getSystemPrompt(templateMode, customInstruction).length.toLocaleString()}{" "}
+              chars
+            </button>
+            {showTemplateContent && (
+              <pre className="mt-1.5 block w-full px-2.5 py-2 border border-line rounded-lg bg-app text-mid whitespace-pre-wrap max-h-32 overflow-y-auto font-mono text-[11px] leading-4">
+                {getSystemPrompt(templateMode, customInstruction)}
+              </pre>
+            )}
+          </div>
+        ) : (
+          /* Custom / saved template: editable */
+          <div className="px-3 pb-2">
+            <textarea
+              rows={2}
+              onInput={autoGrow}
+              placeholder="Enter your custom system instruction here. The repository context (Tree, README, Dependencies) will be automatically appended to your prompt."
+              className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg leading-5 bg-raised placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-brand-mid focus:border-brand-mid text-sm transition-shadow resize-none overflow-y-auto"
+              value={customInstruction}
+              onChange={(e) => {
+                setCustomInstruction(e.target.value);
+                if (
+                  !templateMode.startsWith("user_") &&
+                  templateMode !== "custom"
+                ) {
+                  setTemplateMode("custom");
+                }
+              }}
+            />
+            <div className="flex items-center justify-between mt-1.5 gap-2">
+              <label className="flex items-center gap-1.5 text-xs text-body cursor-pointer hover:text-brand transition-colors min-w-0">
+                <input
+                  type="checkbox"
+                  className="rounded border-input-line text-brand focus:ring-brand-mid w-3.5 h-3.5 cursor-pointer"
+                  checked={useReferenceRepo}
+                  onChange={(e) => setUseReferenceRepo(e.target.checked)}
+                />
+                <Database className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">
+                  Add Reference Repository (for comparison, porting, etc.)
+                </span>
+              </label>
+              <div className="flex justify-end gap-2 shrink-0">
+                {templateMode.startsWith("user_") && (
                   <button
                     type="button"
-                    className={`py-1.5 px-3 text-xs font-medium border-b-2 transition-colors ${referenceInputMode === "github" ? "border-indigo-500 text-indigo-600" : "border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300"}`}
+                    onClick={handleDeleteTemplate}
+                    className="inline-flex items-center px-2 py-1 text-xs font-medium text-danger-strong bg-danger-soft hover:bg-danger-soft rounded-lg transition-colors"
+                  >
+                    <Trash2 className="w-3 h-3 mr-1" />
+                    Delete
+                  </button>
+                )}
+                {templateMode.startsWith("user_") &&
+                  customInstruction.trim() !== "" && (
+                    <button
+                      type="button"
+                      onClick={handleSaveTemplate}
+                      className="inline-flex items-center px-2 py-1 text-xs font-medium text-brand-ink bg-brand-fog hover:bg-brand-soft-2 border border-brand-line rounded-lg transition-colors"
+                    >
+                      <Save className="w-3 h-3 mr-1" />
+                      Save Changes
+                    </button>
+                  )}
+                {!templateMode.startsWith("user_") &&
+                  customInstruction.trim() !== "" &&
+                  (isSavingNew ? (
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        value={newTemplateName}
+                        onChange={(e) => setNewTemplateName(e.target.value)}
+                        placeholder="Template name…"
+                        className="px-2 py-1 text-xs border border-input-line rounded-lg focus:ring-brand-mid focus:border-brand-mid w-32"
+                        autoFocus
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            confirmSaveTemplate(e);
+                          } else if (e.key === "Escape") {
+                            setIsSavingNew(false);
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={confirmSaveTemplate}
+                        disabled={!newTemplateName.trim()}
+                        className="inline-flex items-center px-2 py-1 text-xs font-medium text-brand-fg bg-brand hover:bg-brand-strong rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIsSavingNew(false)}
+                        className="inline-flex items-center px-2 py-1 text-xs font-medium text-body bg-surface-2 hover:bg-surface-3 rounded-lg transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setIsSavingNew(true)}
+                      className="inline-flex items-center px-2 py-1 text-xs font-medium text-brand-ink bg-brand-fog hover:bg-brand-soft-2 border border-brand-line rounded-lg transition-colors"
+                    >
+                      <Save className="w-3 h-3 mr-1" />
+                      Save as Template
+                    </button>
+                  ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Row 3: task instructions & context */}
+        <div className="px-3 pb-2 flex items-start gap-2">
+          <label
+            htmlFor="additionalContext"
+            className="text-xs font-medium text-soft shrink-0 pt-1.5"
+          >
+            Instructions
+          </label>
+          <div className="flex-1 min-w-0">
+            <textarea
+              id="additionalContext"
+              rows={1}
+              onInput={autoGrow}
+              placeholder={
+                templateMode === "integration"
+                  ? "What do you want to integrate? (Leave empty to let AI discover the best architectural patterns to borrow from the Reference Repo)"
+                  : "e.g., I'm planning to add GPU acceleration support for Nvidia RTX 4xxx series…"
+              }
+              className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg leading-5 bg-raised placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-brand-mid focus:border-brand-mid text-sm transition-shadow resize-none overflow-y-auto"
+              value={additionalContext}
+              onChange={(e) => setAdditionalContext(e.target.value)}
+            />
+            {attachedDocs.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                {attachedDocs.map((doc, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center gap-1 bg-brand-fog text-brand-ink px-2 py-0.5 rounded-md text-xs border border-brand-line"
+                  >
+                    <Paperclip className="w-3 h-3" />
+                    <span className="truncate max-w-[150px]">{doc.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeAttachedDoc(i)}
+                      aria-label={`Remove ${doc.name}`}
+                      className="hover:text-brand-ink ml-0.5"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center justify-between mt-1.5 gap-2">
+              <label
+                htmlFor="analyzeIssues"
+                className="flex items-center gap-1.5 text-xs text-body cursor-pointer min-w-0"
+              >
+                <input
+                  id="analyzeIssues"
+                  type="checkbox"
+                  className="h-3.5 w-3.5 text-brand focus:ring-brand-mid border-input-line rounded cursor-pointer"
+                  checked={analyzeIssues}
+                  onChange={(e) => setAnalyzeIssues(e.target.checked)}
+                />
+                <span className="truncate">
+                  Analyze repository for obvious errors, bugs, and outdated
+                  dependencies
+                </span>
+              </label>
+              <label className="cursor-pointer inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-mid bg-surface-2 hover:bg-surface-3 rounded-lg transition-colors border border-line shrink-0">
+                <Paperclip className="w-3 h-3" />
+                Attach (.md, .txt)
+                <input
+                  type="file"
+                  multiple
+                  accept=".md,.txt,.json,.csv,.log"
+                  className="hidden"
+                  onChange={handleAttachDocs}
+                />
+              </label>
+            </div>
+          </div>
+        </div>
+
+        {/* Conditional: reference repository input */}
+        {(templateMode === "integration" ||
+          ((templateMode === "custom" ||
+            templateMode.startsWith("user_")) &&
+            useReferenceRepo)) && (
+          <div className="px-3 pb-2">
+            <div className="rounded-lg border border-line bg-app p-2">
+              <div className="flex items-center gap-2 mb-1.5">
+                <Database className="w-3.5 h-3.5 text-brand-faint shrink-0" />
+                <span className="text-xs font-semibold text-body">
+                  Reference Repository (Source of Truth)
+                </span>
+                <div className="ml-auto flex rounded-md border border-line bg-raised p-0.5">
+                  <button
+                    type="button"
+                    aria-pressed={referenceInputMode === "github"}
+                    className={`px-2 py-0.5 text-[11px] font-medium rounded transition-colors ${referenceInputMode === "github" ? "bg-brand-fog text-brand-ink" : "text-soft hover:text-body"}`}
                     onClick={() => setReferenceInputMode("github")}
                   >
-                    <Github className="w-3 h-3 inline-block mr-1.5" />
+                    <Github className="w-3 h-3 inline-block mr-0.5 -mt-0.5" />
                     GitHub
                   </button>
                   <button
                     type="button"
-                    className={`py-1.5 px-3 text-xs font-medium border-b-2 transition-colors ${referenceInputMode === "local" ? "border-indigo-500 text-indigo-600" : "border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300"}`}
+                    aria-pressed={referenceInputMode === "local"}
+                    className={`px-2 py-0.5 text-[11px] font-medium rounded transition-colors ${referenceInputMode === "local" ? "bg-brand-fog text-brand-ink" : "text-soft hover:text-body"}`}
                     onClick={() => setReferenceInputMode("local")}
                   >
-                    <Folder className="w-3 h-3 inline-block mr-1.5" />
+                    <Folder className="w-3 h-3 inline-block mr-0.5 -mt-0.5" />
                     Local
                   </button>
                 </div>
-
-                <div className="flex flex-col sm:flex-row gap-4">
-                  {referenceInputMode === "github" ? (
-                    <div className="relative flex-grow">
-                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                        <Github className="h-4 w-4 text-slate-400" />
-                      </div>
-                      <input
-                        type="url"
-                        placeholder="https://github.com/owner/reference-repo"
-                        className="block w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow"
-                        value={referenceUrl}
-                        onChange={(e) => setReferenceUrl(e.target.value)}
-                        disabled={loading}
-                      />
-                    </div>
-                  ) : (
-                    <div className="flex-grow">
-                      <input
-                        type="file"
-                        // @ts-ignore
-                        webkitdirectory=""
-                        directory=""
-                        multiple
-                        onChange={(e) => {
-                          e.preventDefault();
-                          setReferenceLocalFiles(e.target.files);
-                        }}
-                        className="block w-full text-sm text-slate-500 file:mr-4 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer"
-                        disabled={loading}
-                      />
-                      {referenceLocalFiles &&
-                        referenceLocalFiles.length > 0 && (
-                          <p className="mt-1 text-xs text-slate-600">
-                            Selected {referenceLocalFiles.length} files
-                          </p>
-                        )}
-                    </div>
-                  )}
-                  <div className="w-full sm:w-40">
-                    <input
-                      type="number"
-                      placeholder="Max Files"
-                      className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                      value={referenceMaxFiles}
-                      onChange={(e) =>
-                        setReferenceMaxFiles(Number(e.target.value))
-                      }
-                      min={1}
-                      max={
-                        referenceInputMode === "local"
-                          ? 200
-                          : githubToken
-                            ? 200
-                            : 10
-                      }
-                      disabled={loading}
-                      title={
-                        referenceInputMode === "local"
-                          ? "Limit: 200 files"
-                          : githubToken
-                            ? "Limit: 200 files"
-                            : "Limit: 10 files (Add token to increase)"
-                      }
-                    />
-                    <p className="mt-1 text-[10px] text-slate-500 leading-tight">
-                      {referenceInputMode === "local"
-                        ? "Max: 200 (Local)"
-                        : githubToken
-                          ? "Max: 200 (Token)"
-                          : "Max: 10 (No Token)"}
-                    </p>
-                  </div>
-                </div>
               </div>
-            )}
-
-            <div className="mt-4 p-4 bg-indigo-50/50 rounded-xl border border-indigo-100">
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center">
-                  <Settings2 className="w-4 h-4 text-indigo-600 mr-2" />
-                  <label
-                    htmlFor="templateMode"
-                    className="block text-sm font-medium text-slate-700"
-                  >
-                    Task Template
-                  </label>
-                </div>
-                <div className="flex gap-3">
-                  <button
-                    type="button"
-                    onClick={handleExportTemplates}
-                    className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
-                  >
-                    Export
-                  </button>
-                  <label className="text-xs text-indigo-600 hover:text-indigo-800 font-medium cursor-pointer">
-                    Import
+              <div className="flex gap-2">
+                {referenceInputMode === "github" ? (
+                  <div className="relative flex-1 min-w-0">
+                    <div className="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none">
+                      <Github className="h-3.5 w-3.5 text-faint" />
+                    </div>
+                    <input
+                      type="url"
+                      placeholder="https://github.com/owner/reference-repo"
+                      className="block w-full pl-7 pr-2 py-1 border border-input-line rounded-lg leading-5 bg-raised placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-brand-mid focus:border-brand-mid text-xs transition-shadow"
+                      value={referenceUrl}
+                      onChange={(e) => setReferenceUrl(e.target.value)}
+                      disabled={loading}
+                    />
+                  </div>
+                ) : (
+                  <div className="flex-1 min-w-0">
                     <input
                       type="file"
-                      accept=".json"
-                      className="hidden"
-                      onChange={handleImportTemplates}
+                      // @ts-ignore
+                      webkitdirectory=""
+                      directory=""
+                      multiple
+                      onChange={(e) => {
+                        e.preventDefault();
+                        setReferenceLocalFiles(e.target.files);
+                      }}
+                      className="block w-full text-xs text-brand-ink file:mr-2 file:py-1 file:px-2 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-brand-fog file:text-brand-ink hover:file:bg-brand-soft-2 cursor-pointer truncate"
+                      disabled={loading}
                     />
-                  </label>
-                </div>
-              </div>
-              <div className="mb-4">
-                <select
-                  id="templateMode"
-                  value={templateMode}
-                  onChange={(e) => handleTemplateChange(e.target.value)}
-                  className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow"
-                  disabled={loading}
-                >
-                  <optgroup label="Built-in Templates">
-                    {getAllTemplates().map((template) => (
-                      <option
-                        key={template.metadata.id}
-                        value={template.metadata.id}
-                      >
-                        {template.metadata.name} -{" "}
-                        {template.metadata.description}
-                      </option>
-                    ))}
-                  </optgroup>
-                  {savedTemplates.length > 0 && (
-                    <optgroup label="Saved Templates">
-                      {savedTemplates.map((t) => (
-                        <option key={t.id} value={t.id}>
-                          {t.name}
-                        </option>
-                      ))}
-                    </optgroup>
-                  )}
-                  <optgroup label="Custom">
-                    <option value="custom">Custom Prompt</option>
-                  </optgroup>
-                </select>
-              </div>
-
-              {getTemplate(templateMode) ? (
-                <div className="relative">
-                  <label className="block text-xs font-medium text-slate-500 mb-1">
-                    Template Content (Read-only)
-                  </label>
-                  <pre className="block w-full px-3 py-3 border border-slate-200 rounded-xl leading-5 bg-slate-50 text-slate-600 sm:text-sm whitespace-pre-wrap max-h-48 overflow-y-auto font-mono text-xs">
-                    {getSystemPrompt(templateMode, customInstruction)}
-                  </pre>
-                </div>
-              ) : (
-                <div className="relative">
-                  <textarea
-                    rows={6}
-                    placeholder="Enter your custom system instruction here. The repository context (Tree, README, Dependencies) will be automatically appended to your prompt."
-                    className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow resize-y"
-                    value={customInstruction}
-                    onChange={(e) => {
-                      setCustomInstruction(e.target.value);
-                      if (
-                        !templateMode.startsWith("user_") &&
-                        templateMode !== "custom"
-                      ) {
-                        setTemplateMode("custom");
-                      }
-                    }}
-                    disabled={loading}
-                  />
-                  <div className="flex justify-between items-center mt-3">
-                    <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer hover:text-indigo-600 transition-colors">
-                      <input
-                        type="checkbox"
-                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-4 h-4 cursor-pointer"
-                        checked={useReferenceRepo}
-                        onChange={(e) => setUseReferenceRepo(e.target.checked)}
-                        disabled={loading}
-                      />
-                      <Database className="w-4 h-4" />
-                      <span>
-                        Add Reference Repository (for comparison, porting, etc.)
-                      </span>
-                    </label>
-                    <div className="flex justify-end gap-2">
-                      {templateMode.startsWith("user_") && (
-                        <button
-                          type="button"
-                          onClick={handleDeleteTemplate}
-                          disabled={loading}
-                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-50"
-                        >
-                          <Trash2 className="w-4 h-4 mr-1.5" />
-                          Delete
-                        </button>
+                    {referenceLocalFiles &&
+                      referenceLocalFiles.length > 0 && (
+                        <p className="text-[11px] text-soft mt-0.5">
+                          {referenceLocalFiles.length} files selected
+                        </p>
                       )}
-                      {templateMode.startsWith("user_") &&
-                        customInstruction.trim() !== "" && (
-                          <button
-                            type="button"
-                            onClick={handleSaveTemplate}
-                            disabled={loading}
-                            className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors disabled:opacity-50"
-                          >
-                            <Save className="w-4 h-4 mr-1.5" />
-                            Save Changes
-                          </button>
-                        )}
-                      {!templateMode.startsWith("user_") &&
-                        customInstruction.trim() !== "" &&
-                        (isSavingNew ? (
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="text"
-                              value={newTemplateName}
-                              onChange={(e) =>
-                                setNewTemplateName(e.target.value)
-                              }
-                              placeholder="Template name..."
-                              className="px-3 py-1.5 text-sm border border-slate-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                              autoFocus
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  e.preventDefault();
-                                  confirmSaveTemplate(e);
-                                } else if (e.key === "Escape") {
-                                  setIsSavingNew(false);
-                                }
-                              }}
-                            />
-                            <button
-                              type="button"
-                              onClick={confirmSaveTemplate}
-                              disabled={!newTemplateName.trim() || loading}
-                              className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors disabled:opacity-50"
-                            >
-                              Save
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setIsSavingNew(false)}
-                              className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => setIsSavingNew(true)}
-                            disabled={loading}
-                            className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors disabled:opacity-50"
-                          >
-                            <Save className="w-4 h-4 mr-1.5" />
-                            Save as Template
-                          </button>
-                        ))}
-                    </div>
                   </div>
-                </div>
-              )}
-            </div>
-
-            <div className="mt-2">
-              <label
-                htmlFor="additionalContext"
-                className="block text-sm font-medium text-slate-700 mb-2"
-              >
-                Task Instructions & External Context
-              </label>
-              <textarea
-                id="additionalContext"
-                rows={3}
-                placeholder={
-                  templateMode === "integration"
-                    ? "What do you want to integrate? (Leave empty to let AI discover the best architectural patterns to borrow from the Reference Repo)"
-                    : "e.g., I'm planning to add GPU acceleration support for Nvidia RTX 4xxx series..."
-                }
-                className="block w-full px-3 py-3 border border-slate-300 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm transition-shadow resize-y mb-2"
-                value={additionalContext}
-                onChange={(e) => setAdditionalContext(e.target.value)}
-                disabled={loading}
-              />
-
-              {attachedDocs.length > 0 && (
-                <div className="flex flex-wrap gap-2 mb-2">
-                  {attachedDocs.map((doc, i) => (
-                    <div
-                      key={i}
-                      className="flex items-center gap-1 bg-indigo-50 text-indigo-700 px-2 py-1 rounded-md text-sm border border-indigo-100"
-                    >
-                      <Paperclip className="w-3 h-3" />
-                      <span className="truncate max-w-[150px]">{doc.name}</span>
-                      <button
-                        type="button"
-                        onClick={() => removeAttachedDoc(i)}
-                        className="hover:text-indigo-900 ml-1"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="flex items-center justify-between">
-                <p className="text-xs text-slate-500">
-                  {templateMode === "integration"
-                    ? "Describe what exactly you want to integrate or migrate from the Reference Repo."
-                    : "Provide any specific goals, future directions, or constraints you want the AI to know about."}
-                </p>
-                <label className="cursor-pointer inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-200">
-                  <Paperclip className="w-3 h-3" />
-                  Attach Documents (.md, .txt)
-                  <input
-                    type="file"
-                    multiple
-                    accept=".md,.txt,.json,.csv,.log"
-                    className="hidden"
-                    onChange={handleAttachDocs}
-                    disabled={loading}
-                  />
-                </label>
+                )}
+                <input
+                  type="number"
+                  placeholder="Max"
+                  aria-label="Reference max files"
+                  className="block w-16 shrink-0 px-2 py-1 border border-input-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid"
+                  value={referenceMaxFiles}
+                  onChange={(e) =>
+                    setReferenceMaxFiles(Number(e.target.value))
+                  }
+                  min={1}
+                  max={
+                    referenceInputMode === "local"
+                      ? 200
+                      : githubToken
+                        ? 200
+                        : 10
+                  }
+                  disabled={loading}
+                  title={
+                    referenceInputMode === "local"
+                      ? "Limit: 200 files"
+                      : githubToken
+                        ? "Limit: 200 files"
+                        : "Limit: 10 files (add a token to increase)"
+                  }
+                />
               </div>
             </div>
+          </div>
+        )}
 
-            <div className="mt-2 flex items-center">
-              <input
-                id="analyzeIssues"
-                type="checkbox"
-                className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                checked={analyzeIssues}
-                onChange={(e) => setAnalyzeIssues(e.target.checked)}
-                disabled={loading}
-              />
-              <label
-                htmlFor="analyzeIssues"
-                className="ml-2 block text-sm text-slate-700 cursor-pointer"
+        {/* Floating status pill: no reserved space, no layout jumps */}
+        {(error || isTruncated || loading || status) && (
+          <div
+            className="absolute top-full left-3 mt-1.5 z-40 max-w-[calc(100%-24px)]"
+            role="status"
+            aria-live="polite"
+          >
+            {error ? (
+              <div
+                className="flex items-center gap-1.5 bg-danger-soft ring-1 ring-danger-line text-danger-strong text-xs rounded-lg px-2.5 py-1.5 shadow-md min-w-0"
+                title={error}
               >
-                Analyze repository for obvious errors, bugs, and outdated
-                dependencies
-              </label>
-            </div>
-
-            {/* Global Desktop Settings */}
-            {isTauri() && (
-              <div className="mt-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
-                <h3 className="text-sm font-medium text-slate-700 mb-3">Global Desktop Settings</h3>
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-500 mb-1">
-                      Gemini API Key (Optional if set in environment)
-                    </label>
-                    <input
-                      type="password"
-                      value={geminiApiKey}
-                      onChange={(e) => setGeminiApiKey(e.target.value)}
-                      placeholder="AIzaSy..."
-                      className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
-                      disabled={loading}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-500 mb-1">
-                      Global Proxy Address (Optional)
-                    </label>
-                    <input
-                      type="text"
-                      value={proxyAddress}
-                      onChange={(e) => setProxyAddress(e.target.value)}
-                      placeholder="http://127.0.0.1:10809"
-                      className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
-                      disabled={loading}
-                    />
-                  </div>
-                </div>
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">{error}</span>
+              </div>
+            ) : isTruncated ? (
+              <div
+                className="flex items-center gap-1.5 bg-warn-soft ring-1 ring-warn-line text-warn-strong text-xs rounded-lg px-2.5 py-1.5 shadow-md min-w-0"
+                title="The directory tree listing has been truncated to 1000 items to prevent AI context overflow. Your selected source files are still included in full."
+              >
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">
+                  Large repository: directory tree truncated to 1000 items.
+                </span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 bg-surface ring-1 ring-line text-xs rounded-lg px-2.5 py-1.5 shadow-md min-w-0">
+                {loading && (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-brand-faint shrink-0" />
+                )}
+                <span
+                  className={`truncate ${loading ? "text-body" : "text-soft"}`}
+                >
+                  {loading ? (status || "Working…") : status}
+                </span>
+                {loading && (
+                  <button
+                    type="button"
+                    onClick={cancelGeneration}
+                    className="shrink-0 inline-flex items-center px-2 py-0.5 border border-input-line text-xs font-medium rounded-md text-body bg-raised hover:bg-surface-2 transition-colors"
+                  >
+                    <X className="w-3 h-3 mr-1" />
+                    Cancel
+                  </button>
+                )}
               </div>
             )}
+          </div>
+        )}
+      </header>
 
-            {/* AI Provider Settings */}
-            <div className="mt-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                AI Provider
-              </label>
-              <select
-                value={aiProvider}
-                onChange={(e) => setAiProvider(e.target.value as AIProvider)}
-                className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm mb-2"
-                disabled={loading}
+      {/* ===== Body: config sidebar | result pane ===== */}
+      <div className="flex-1 min-h-0 flex">
+        {/* Left: configuration */}
+        <aside
+          aria-label="Configuration"
+          className="w-72 shrink-0 border-r border-line bg-surface overflow-y-auto"
+        >
+          <CollapsibleGroup
+            title="Source"
+            summary={
+              inputMode === "github"
+                ? url
+                  ? url.replace(/^https?:\/\//, "")
+                  : "GitHub"
+                : "Local folder"
+            }
+            open={!!openGroups.source}
+            onToggle={() => toggleGroup("source")}
+          >
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label
+                  htmlFor="githubToken"
+                  className="text-[11px] font-medium text-soft"
+                >
+                  GitHub Token (Optional)
+                </label>
+                <span
+                  className={`text-[11px] font-medium ${githubToken ? "text-ok" : "text-faint"}`}
+                >
+                  {githubToken ? "✓ set" : "not set"}
+                </span>
+              </div>
+              <div className="relative">
+                <input
+                  type={showGithubToken ? "text" : "password"}
+                  id="githubToken"
+                  className="block w-full pr-8 px-2.5 py-1.5 border border-input-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid"
+                  placeholder="ghp_..."
+                  value={githubToken}
+                  onChange={(e) => setGithubToken(e.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowGithubToken((v) => !v)}
+                  aria-label={showGithubToken ? "Hide token" : "Show token"}
+                  title={showGithubToken ? "Hide token" : "Show token"}
+                  className="absolute inset-y-0 right-0 flex items-center px-2 text-faint hover:text-body transition-colors"
+                >
+                  {showGithubToken ? (
+                    <EyeOff className="w-3.5 h-3.5" />
+                  ) : (
+                    <Eye className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </div>
+            </div>
+            <div>
+              <label
+                htmlFor="maxFiles"
+                className="block text-[11px] font-medium text-soft mb-1"
               >
-                <option value="gemini">✨ Gemini (default)</option>
-                <option value="custom">🌐 Custom (OpenAI Compatible)</option>
-              </select>
+                Max Source Files to Fetch
+              </label>
+              <input
+                type="number"
+                id="maxFiles"
+                className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid"
+                value={maxFiles}
+                onChange={(e) => setMaxFiles(Number(e.target.value))}
+                min={1}
+                max={inputMode === "local" ? 200 : githubToken ? 200 : 10}
+              />
+              <p className="mt-1 text-[11px] text-soft leading-tight">
+                {inputMode === "local"
+                  ? "Limit: 200 files (local processing is fast)."
+                  : githubToken
+                    ? "Limit: 200 files (token provided)."
+                    : "Limit: 10 files (add a token to increase up to 200)."}
+              </p>
+            </div>
+          </CollapsibleGroup>
 
-              {aiProvider === "custom" && (
-                <div className="mt-4 p-4 bg-white border border-slate-200 rounded-lg shadow-sm space-y-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <label className="block text-sm font-medium text-slate-700">
-                      Custom Provider Settings
-                    </label>
-                    <select
-                      className="text-xs border border-slate-300 rounded px-2 py-1 bg-slate-50"
-                      onChange={(e) => {
-                        if (e.target.value) {
-                          setCustomBaseUrl(e.target.value);
-                          setCustomProviderConnected(null);
-                        }
-                      }}
-                      defaultValue=""
-                    >
-                      <option value="" disabled>
-                        Load Preset...
-                      </option>
-                      <option value="https://openrouter.ai/api/v1">
-                        OpenRouter
-                      </option>
-                      <option value="https://integrate.api.nvidia.com/v1">
-                        NVIDIA NIM
-                      </option>
-                      <option value="https://api.groq.com/openai/v1">
-                        Groq
-                      </option>
-                      <option value="https://api.x.ai/v1">xAI (Grok)</option>
-                      <option value="https://models.inference.ai.azure.com">
-                        GitHub Models
-                      </option>
-                      <option value="https://api.mistral.ai/v1">Mistral</option>
-                      <option value="https://api.cerebras.ai/v1">
-                        Cerebras
-                      </option>
-                      <option value="https://api.moonshot.cn/v1">
-                        Kimi (Moonshot)
-                      </option>
-                    </select>
-                  </div>
+          <CollapsibleGroup
+            title="AI Provider"
+            summary={
+              aiProvider === "gemini"
+                ? "Gemini"
+                : customModel || customBaseUrl || "Custom"
+            }
+            open={!!openGroups.provider}
+            onToggle={() => toggleGroup("provider")}
+          >
+            <select
+              value={aiProvider}
+              onChange={(e) => setAiProvider(e.target.value as AIProvider)}
+              aria-label="AI provider"
+              className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs bg-raised focus:ring-brand-mid focus:border-brand-mid"
+            >
+              <option value="gemini">✨ Gemini (default)</option>
+              <option value="custom">🌐 Custom (OpenAI Compatible)</option>
+            </select>
 
-                  <div>
-                    <label className="block text-xs font-medium text-slate-500 mb-1">
-                      Base URL (OpenAI Compatible)
-                    </label>
-                    <input
-                      type="text"
-                      value={customBaseUrl}
-                      onChange={(e) => {
+            {aiProvider === "custom" && (
+              <div className="rounded-lg border border-line p-2.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-medium text-body">
+                    Custom Provider
+                  </span>
+                  <select
+                    className="text-[11px] border border-input-line rounded px-1.5 py-1 bg-app max-w-[55%]"
+                    onChange={(e) => {
+                      if (e.target.value) {
                         setCustomBaseUrl(e.target.value);
                         setCustomProviderConnected(null);
-                      }}
-                      placeholder="e.g., https://api.groq.com/openai/v1"
-                      className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                      disabled={loading}
-                    />
-                  </div>
+                      }
+                    }}
+                    defaultValue=""
+                  >
+                    <option value="" disabled>
+                      Load Preset…
+                    </option>
+                    <option value="https://openrouter.ai/api/v1">
+                      OpenRouter
+                    </option>
+                    <option value="https://integrate.api.nvidia.com/v1">
+                      NVIDIA NIM
+                    </option>
+                    <option value="https://api.groq.com/openai/v1">Groq</option>
+                    <option value="https://api.x.ai/v1">xAI (Grok)</option>
+                    <option value="https://models.inference.ai.azure.com">
+                      GitHub Models
+                    </option>
+                    <option value="https://api.mistral.ai/v1">Mistral</option>
+                    <option value="https://api.cerebras.ai/v1">
+                      Cerebras
+                    </option>
+                    <option value="https://api.moonshot.cn/v1">
+                      Kimi (Moonshot)
+                    </option>
+                  </select>
+                </div>
 
-                  <div>
-                    <label className="block text-xs font-medium text-slate-500 mb-1">
+                <div>
+                  <label
+                    htmlFor="customBaseUrl"
+                    className="block text-[11px] font-medium text-soft mb-1"
+                  >
+                    Base URL (OpenAI Compatible)
+                  </label>
+                  <input
+                    type="text"
+                    id="customBaseUrl"
+                    value={customBaseUrl}
+                    onChange={(e) => {
+                      setCustomBaseUrl(e.target.value);
+                      setCustomProviderConnected(null);
+                    }}
+                    placeholder="https://api.groq.com/openai/v1"
+                    className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label
+                      htmlFor="customApiKey"
+                      className="text-[11px] font-medium text-soft"
+                    >
                       API Key
                     </label>
+                    <span
+                      className={`text-[11px] font-medium ${customApiKey ? "text-ok" : "text-faint"}`}
+                    >
+                      {customApiKey ? "✓ set" : "not set"}
+                    </span>
+                  </div>
+                  <div className="relative">
                     <input
-                      type="password"
+                      type={showCustomKey ? "text" : "password"}
+                      id="customApiKey"
                       value={customApiKey}
                       onChange={(e) => {
                         setCustomApiKey(e.target.value);
                         setCustomProviderConnected(null);
                       }}
                       placeholder="sk-..."
-                      className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                      disabled={loading}
+                      className="block w-full pr-8 px-2.5 py-1.5 border border-input-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid"
                     />
-                  </div>
-
-                  <div className="flex items-end gap-3">
-                    <div className="flex-1">
-                      <label className="block text-xs font-medium text-slate-500 mb-1">
-                        Model Name
-                      </label>
-                      <input
-                        type="text"
-                        list="custom-models-list"
-                        value={customModel}
-                        onChange={(e) => setCustomModel(e.target.value)}
-                        placeholder="e.g., llama3-8b-8192"
-                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
-                        disabled={loading}
-                      />
-                      {availableCustomModels.length > 0 && (
-                        <datalist id="custom-models-list">
-                          {availableCustomModels
-                            .filter((m) =>
-                              m
-                                .toLowerCase()
-                                .includes(customModel.toLowerCase()),
-                            )
-                            .slice(0, 300)
-                            .map((m) => (
-                              <option key={m} value={m} />
-                            ))}
-                        </datalist>
-                      )}
-                    </div>
                     <button
                       type="button"
-                      onClick={handleTestCustomProvider}
-                      disabled={testingCustomProvider || loading}
-                      className="text-xs px-3 py-2 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50 h-[38px]"
+                      onClick={() => setShowCustomKey((v) => !v)}
+                      aria-label={showCustomKey ? "Hide API key" : "Show API key"}
+                      title={showCustomKey ? "Hide API key" : "Show API key"}
+                      className="absolute inset-y-0 right-0 flex items-center px-2 text-faint hover:text-body transition-colors"
                     >
-                      {testingCustomProvider ? "Fetching..." : "Fetch Models"}
+                      {showCustomKey ? (
+                        <EyeOff className="w-3.5 h-3.5" />
+                      ) : (
+                        <Eye className="w-3.5 h-3.5" />
+                      )}
                     </button>
                   </div>
-
-                  {customProviderConnected === true && (
-                    <p className="text-xs text-emerald-600 flex items-center mt-2">
-                      <Check className="w-3 h-3 mr-1" /> Successfully connected
-                      to provider
-                    </p>
-                  )}
-                  {customProviderConnected === false && (
-                    <div className="p-3 bg-red-50 border border-red-100 rounded-lg text-xs text-red-600 flex items-start mt-2">
-                      <AlertTriangle className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />
-                      <div>
-                        <strong>Connection failed:</strong>{" "}
-                        {customProviderError || "Check URL and API Key."}
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 flex items-start mt-2">
-                    <AlertTriangle className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />
-                    <p>
-                      <strong>Warning:</strong> Free API providers often have
-                      strict context limits (e.g., 8k or 32k tokens). It is
-                      highly recommended to keep <strong>RAG enabled</strong>{" "}
-                      with a small Top-K to avoid "Context length exceeded"
-                      errors.
-                    </p>
-                  </div>
                 </div>
+
+                <div>
+                  <label
+                    htmlFor="customModel"
+                    className="block text-[11px] font-medium text-soft mb-1"
+                  >
+                    Model Name
+                  </label>
+                  <input
+                    type="text"
+                    id="customModel"
+                    list="custom-models-list"
+                    value={customModel}
+                    onChange={(e) => setCustomModel(e.target.value)}
+                    placeholder="e.g., llama3-8b-8192"
+                    className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid bg-raised"
+                  />
+                  {availableCustomModels.length > 0 && (
+                    <datalist id="custom-models-list">
+                      {availableCustomModels
+                        .filter((m) =>
+                          m.toLowerCase().includes(customModel.toLowerCase()),
+                        )
+                        .slice(0, 300)
+                        .map((m) => (
+                          <option key={m} value={m} />
+                        ))}
+                    </datalist>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleTestCustomProvider}
+                  disabled={testingCustomProvider}
+                  className="w-full text-xs px-2.5 py-1.5 bg-raised border border-input-line rounded-lg hover:bg-surface-2 transition-colors disabled:opacity-50"
+                >
+                  {testingCustomProvider ? "Fetching…" : "Fetch Models"}
+                </button>
+
+                {customProviderConnected === true && (
+                  <p className="text-[11px] text-ok flex items-center">
+                    <Check className="w-3 h-3 mr-1" /> Successfully connected to
+                    provider
+                  </p>
+                )}
+                {customProviderConnected === false && (
+                  <div className="p-2 bg-danger-soft border border-danger-line rounded-lg text-[11px] text-danger flex items-start">
+                    <AlertTriangle className="w-3.5 h-3.5 mr-1.5 mt-0.5 shrink-0" />
+                    <div className="min-w-0">
+                      <strong>Connection failed:</strong>{" "}
+                      {customProviderError || "Check URL and API Key."}
+                    </div>
+                  </div>
+                )}
+
+                <div className="p-2 bg-warn-soft border border-warn-line rounded-lg text-[11px] text-warn-strong flex items-start">
+                  <AlertTriangle className="w-3.5 h-3.5 mr-1.5 mt-0.5 shrink-0" />
+                  <p>
+                    Free API providers often have strict context limits (8k–32k
+                    tokens). Keep <strong>RAG enabled</strong> with a small
+                    Top-K to avoid "Context length exceeded" errors.
+                  </p>
+                </div>
+              </div>
+            )}
+          </CollapsibleGroup>
+
+          <CollapsibleGroup
+            title="Engine & RAG"
+            summary={
+              [
+                useOllama && "Summary",
+                useOllamaForFinal && "Final",
+                useRag && "RAG",
+                isDeepAnalysis && "Deep",
+              ]
+                .filter(Boolean)
+                .join(" + ") || "Off"
+            }
+            open={!!openGroups.engine}
+            onToggle={() => toggleGroup("engine")}
+          >
+            <div className="space-y-2">
+              <label
+                htmlFor="useOllama"
+                className="flex items-center gap-2 text-xs text-body cursor-pointer"
+              >
+                <input
+                  id="useOllama"
+                  type="checkbox"
+                  className="h-3.5 w-3.5 text-brand focus:ring-brand-mid border-input-line rounded cursor-pointer"
+                  checked={useOllama}
+                  onChange={(e) => setUseOllama(e.target.checked)}
+                />
+                Local Pre-summarization
+              </label>
+              <label
+                htmlFor="useOllamaForFinal"
+                className="flex items-center gap-2 text-xs text-body cursor-pointer"
+              >
+                <input
+                  id="useOllamaForFinal"
+                  type="checkbox"
+                  className="h-3.5 w-3.5 text-brand focus:ring-brand-mid border-input-line rounded cursor-pointer"
+                  checked={useOllamaForFinal}
+                  onChange={(e) => setUseOllamaForFinal(e.target.checked)}
+                />
+                Local Model for Final Generation
+              </label>
+              <label
+                htmlFor="useRag"
+                className="flex items-center gap-2 text-xs text-body cursor-pointer"
+              >
+                <input
+                  id="useRag"
+                  type="checkbox"
+                  className="h-3.5 w-3.5 text-brand focus:ring-brand-mid border-input-line rounded cursor-pointer"
+                  checked={useRag}
+                  onChange={(e) => setUseRag(e.target.checked)}
+                />
+                RAG (Smart Context Filter)
+              </label>
+              {aiProvider === "gemini" && (
+                <label
+                  htmlFor="isDeepAnalysis"
+                  className="flex items-center gap-2 text-xs text-body cursor-pointer"
+                >
+                  <input
+                    id="isDeepAnalysis"
+                    type="checkbox"
+                    className="h-3.5 w-3.5 text-brand focus:ring-brand-mid border-input-line rounded cursor-pointer"
+                    checked={isDeepAnalysis}
+                    onChange={(e) => setIsDeepAnalysis(e.target.checked)}
+                  />
+                  <span className="min-w-0">
+                    Agentic RAG (Deep Analysis)
+                    <span
+                      className="ml-1.5 inline-flex items-center px-1 py-0 rounded text-[10px] font-bold bg-warn-soft-2 text-warn-strong border border-warn-line"
+                      title="Warning: This mode sends the full context multiple times, which can triple token usage."
+                    >
+                      ⚠️ Tokens x3
+                    </span>
+                  </span>
+                </label>
               )}
             </div>
 
-            {/* Local AI Engine Settings */}
-            <div className="mt-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
-              <div className="flex flex-col gap-3 mb-4">
-                <div className="flex items-center">
-                  <input
-                    id="useOllama"
-                    type="checkbox"
-                    className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer disabled:opacity-50"
-                    checked={useOllama}
-                    onChange={(e) => setUseOllama(e.target.checked)}
-                    disabled={loading}
-                  />
+            {(useOllama ||
+              useOllamaForFinal ||
+              useOllamaForQueryExpansion ||
+              useRag) && (
+              <div className="space-y-2.5 pt-1 border-t border-line-soft">
+                <div>
                   <label
-                    htmlFor="useOllama"
-                    className="ml-2 block text-sm font-medium text-slate-700 cursor-pointer"
+                    htmlFor="localEngine"
+                    className="block text-[11px] font-medium text-soft mb-1"
                   >
-                    Use Local Pre-summarization (Local Summary)
+                    Engine
                   </label>
+                  <select
+                    id="localEngine"
+                    value={localEngine}
+                    onChange={(e) => {
+                      const newEngine = e.target.value as
+                        | "ollama"
+                        | "lmstudio"
+                        | "llamacpp";
+                      setLocalEngine(newEngine);
+
+                      // Smart URL auto-config
+                      if (
+                        ollamaUrl === "http://localhost:11434" ||
+                        ollamaUrl === "http://localhost:1234/v1" ||
+                        ollamaUrl === "http://localhost:8080/v1" ||
+                        ollamaUrl === "http://127.0.0.1:11434" ||
+                        ollamaUrl === "http://127.0.0.1:1234/v1" ||
+                        ollamaUrl === "http://127.0.0.1:8080/v1"
+                      ) {
+                        if (newEngine === "ollama")
+                          setOllamaUrl("http://localhost:11434");
+                        else if (newEngine === "lmstudio")
+                          setOllamaUrl("http://localhost:1234/v1");
+                        else if (newEngine === "llamacpp")
+                          setOllamaUrl("http://localhost:8080/v1");
+                      }
+                      setOllamaConnected(null);
+                    }}
+                    className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs bg-raised focus:ring-brand-mid focus:border-brand-mid"
+                  >
+                    <option value="ollama">Ollama (Native)</option>
+                    <option value="lmstudio">LM Studio / Oobabooga</option>
+                    <option value="llamacpp">llama.cpp</option>
+                  </select>
                 </div>
-                <div className="flex items-center">
-                  <input
-                    id="useOllamaForFinal"
-                    type="checkbox"
-                    className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer disabled:opacity-50"
-                    checked={useOllamaForFinal}
-                    onChange={(e) => setUseOllamaForFinal(e.target.checked)}
-                    disabled={loading}
-                  />
+
+                <div>
                   <label
-                    htmlFor="useOllamaForFinal"
-                    className="ml-2 block text-sm font-medium text-slate-700 cursor-pointer"
+                    htmlFor="ollamaUrl"
+                    className="block text-[11px] font-medium text-soft mb-1"
                   >
-                    Use Local Model for Final Generation (Bypass Gemini/Custom)
+                    API URL
                   </label>
-                </div>
-                <div className="flex items-center">
                   <input
-                    id="useRag"
-                    type="checkbox"
-                    className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer disabled:opacity-50"
-                    checked={useRag}
-                    onChange={(e) => setUseRag(e.target.checked)}
-                    disabled={loading}
+                    type="text"
+                    id="ollamaUrl"
+                    value={ollamaUrl}
+                    onChange={(e) => {
+                      setOllamaUrl(e.target.value);
+                      setOllamaConnected(null);
+                    }}
+                    className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid"
+                    placeholder={
+                      localEngine === "ollama"
+                        ? "http://localhost:11434"
+                        : "http://localhost:1234/v1"
+                    }
                   />
-                  <label
-                    htmlFor="useRag"
-                    className="ml-2 block text-sm font-medium text-slate-700 cursor-pointer"
-                  >
-                    Use RAG (Smart Context Filter)
-                  </label>
                 </div>
-                {(aiProvider === "gemini") && (
-                  <div className="flex items-center">
-                    <input
-                      id="isDeepAnalysis"
-                      type="checkbox"
-                      className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer disabled:opacity-50"
-                      checked={isDeepAnalysis}
-                      onChange={(e) => setIsDeepAnalysis(e.target.checked)}
-                      disabled={loading}
-                    />
+
+                {(useOllama || useOllamaForFinal || useOllamaForQueryExpansion) && (
+                  <div>
                     <label
-                      htmlFor="isDeepAnalysis"
-                      className="ml-2 flex items-center text-sm font-medium text-slate-700 cursor-pointer"
+                      htmlFor="ollamaModel"
+                      className="block text-[11px] font-medium text-soft mb-1"
                     >
-                      Agentic RAG (Deep Analysis)
-                      <span 
-                        className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200 uppercase tracking-wide"
-                        title="Warning: This mode sends the full context multiple times, which can triple token usage."
-                      >
-                        ⚠️ Tokens x3
-                      </span>
+                      LLM Model Name
                     </label>
+                    {availableModels.length > 0 ? (
+                      <select
+                        id="ollamaModel"
+                        value={ollamaModel}
+                        onChange={(e) => setOllamaModel(e.target.value)}
+                        className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs bg-raised focus:ring-brand-mid focus:border-brand-mid"
+                      >
+                        {availableModels.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={ollamaModel}
+                        onChange={(e) => setOllamaModel(e.target.value)}
+                        placeholder="Test connection to load models"
+                        className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid"
+                      />
+                    )}
                   </div>
                 )}
-              </div>
 
-              {(useOllama || useOllamaForFinal || useOllamaForQueryExpansion || useRag) && (
-                <div className="space-y-4 pl-6 border-l-2 border-indigo-100 ml-2">
-                  <div className="flex flex-col sm:flex-row gap-4">
-                    <div className="w-full sm:w-1/3">
-                      <label className="block text-xs font-medium text-slate-500 mb-1">
-                        Engine
-                      </label>
-                      <select
-                        value={localEngine}
-                        onChange={(e) => {
-                          const newEngine = e.target.value as "ollama" | "lmstudio" | "llamacpp";
-                          setLocalEngine(newEngine);
-                          
-                          // Smart URL auto-config
-                          if (
-                            ollamaUrl === "http://localhost:11434" ||
-                            ollamaUrl === "http://localhost:1234/v1" ||
-                            ollamaUrl === "http://localhost:8080/v1" ||
-                            ollamaUrl === "http://127.0.0.1:11434" ||
-                            ollamaUrl === "http://127.0.0.1:1234/v1" ||
-                            ollamaUrl === "http://127.0.0.1:8080/v1"
-                          ) {
-                            if (newEngine === "ollama") setOllamaUrl("http://localhost:11434");
-                            else if (newEngine === "lmstudio") setOllamaUrl("http://localhost:1234/v1");
-                            else if (newEngine === "llamacpp") setOllamaUrl("http://localhost:8080/v1");
-                          }
-                          setOllamaConnected(null);
-                        }}
-                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
-                        disabled={loading}
+                {useRag && (
+                  <div className="rounded-lg border border-brand-line bg-brand-fog/50 p-2.5 space-y-2.5">
+                    <div>
+                      <label
+                        htmlFor="ragQuery"
+                        className="block text-[11px] font-medium text-brand-ink mb-1"
                       >
-                        <option value="ollama">Ollama (Native)</option>
-                        <option value="lmstudio">LM Studio / Oobabooga</option>
-                        <option value="llamacpp">llama.cpp</option>
-                      </select>
-                    </div>
-                    <div className="flex-1">
-                      <label className="block text-xs font-medium text-slate-500 mb-1">
-                        API URL
+                        Target Components (RAG Search Query)
                       </label>
                       <input
                         type="text"
-                        value={ollamaUrl}
-                        onChange={(e) => {
-                          setOllamaUrl(e.target.value);
-                          setOllamaConnected(null);
-                        }}
-                        className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                        disabled={loading}
-                        placeholder={localEngine === "ollama" ? "http://localhost:11434" : "http://localhost:1234/v1"}
+                        id="ragQuery"
+                        value={ragQuery}
+                        onChange={(e) => setRagQuery(e.target.value)}
+                        placeholder="e.g., authentication flow, payment gateway…"
+                        className="block w-full px-2.5 py-1.5 border border-brand-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid bg-raised"
                       />
+                      <p className="mt-1 text-[11px] text-brand-faint leading-tight">
+                        Leave empty to auto-generate based on the selected
+                        template.
+                      </p>
                     </div>
-                    {(useOllama || useOllamaForFinal || useOllamaForQueryExpansion) && (
-                      <div className="flex-1">
-                        <label className="block text-xs font-medium text-slate-500 mb-1">
-                          LLM Model Name
-                        </label>
-                        {availableModels.length > 0 ? (
-                          <select
-                            value={ollamaModel}
-                            onChange={(e) => setOllamaModel(e.target.value)}
-                            className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
-                            disabled={loading}
-                          >
-                            {availableModels.map((m) => (
-                              <option key={m} value={m}>
-                                {m}
-                              </option>
-                            ))}
-                          </select>
-                        ) : (
-                          <input
-                            type="text"
-                            value={ollamaModel}
-                            onChange={(e) => setOllamaModel(e.target.value)}
-                            placeholder="Test connection to load models"
-                            className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                            disabled={loading}
-                          />
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  {useRag && (
-                    <div className="flex flex-col gap-4 p-3 bg-indigo-50/50 rounded-lg border border-indigo-100">
-                      <div className="w-full">
-                        <label className="block text-xs font-medium text-indigo-700 mb-1">
-                          Target Components (RAG Search Query)
-                        </label>
+                    <div>
+                      <label
+                        htmlFor="ragModel"
+                        className="block text-[11px] font-medium text-brand-ink mb-1"
+                      >
+                        Embedding Model (RAG)
+                      </label>
+                      {availableModels.length > 0 ? (
+                        <select
+                          id="ragModel"
+                          value={ragModel}
+                          onChange={(e) => setRagModel(e.target.value)}
+                          className="block w-full px-2.5 py-1.5 border border-brand-line rounded-lg text-xs bg-raised focus:ring-brand-mid focus:border-brand-mid"
+                        >
+                          <option value="" disabled>
+                            Select an embedding model…
+                          </option>
+                          {availableModels.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
                         <input
                           type="text"
-                          value={ragQuery}
-                          onChange={(e) => setRagQuery(e.target.value)}
-                          placeholder="e.g., authentication flow, database models, payment gateway..."
-                          className="block w-full px-3 py-2 border border-indigo-200 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
-                          disabled={loading}
+                          value={ragModel}
+                          onChange={(e) => setRagModel(e.target.value)}
+                          placeholder="e.g., nomic-embed-text"
+                          className="block w-full px-2.5 py-1.5 border border-brand-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid"
                         />
-                        <p className="mt-1 text-[10px] text-indigo-500">
-                          Leave empty to auto-generate based on the selected
-                          template.
-                        </p>
+                      )}
+                      <p className="mt-1 text-[11px] text-brand-faint leading-tight">
+                        Must be an embedding model (e.g., nomic-embed-text).
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label
+                          htmlFor="ragTopK"
+                          className="block text-[11px] font-medium text-brand-ink mb-1"
+                        >
+                          Top K Chunks
+                        </label>
+                        <input
+                          type="number"
+                          id="ragTopK"
+                          value={ragTopK}
+                          onChange={(e) => setRagTopK(Number(e.target.value))}
+                          className="block w-full px-2.5 py-1.5 border border-brand-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid"
+                          min={1}
+                          max={50}
+                        />
                       </div>
-                      <div className="flex flex-col sm:flex-row gap-4">
-                        <div className="flex-1">
-                          <label className="block text-xs font-medium text-indigo-700 mb-1">
-                            Embedding Model (RAG)
-                          </label>
-                          {availableModels.length > 0 ? (
-                            <select
-                              value={ragModel}
-                              onChange={(e) => setRagModel(e.target.value)}
-                              className="block w-full px-3 py-2 border border-indigo-200 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 bg-white"
-                              disabled={loading}
-                            >
-                              <option value="" disabled>
-                                Select an embedding model...
-                              </option>
-                              {availableModels.map((m) => (
-                                <option key={m} value={m}>
-                                  {m}
-                                </option>
-                              ))}
-                            </select>
-                          ) : (
-                            <input
-                              type="text"
-                              value={ragModel}
-                              onChange={(e) => setRagModel(e.target.value)}
-                              placeholder="e.g., nomic-embed-text"
-                              className="block w-full px-3 py-2 border border-indigo-200 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                              disabled={loading}
-                            />
-                          )}
-                          <p className="mt-1 text-[10px] text-indigo-500">
-                            Must be an embedding model (e.g., nomic-embed-text)
-                          </p>
+                      <div>
+                        <div className="flex justify-between items-center mb-1">
+                          <span className="text-[11px] font-medium text-brand-ink">
+                            Strategy
+                          </span>
+                          <span className="text-[10px] font-mono text-brand-faint bg-brand-soft-2 px-1 rounded">
+                            {ragSearchStrategy < 0.4
+                              ? "🎨 Explore"
+                              : ragSearchStrategy > 0.6
+                                ? "🎯 Precision"
+                                : "⚖️ Balanced"}
+                          </span>
                         </div>
-                        <div className="w-full sm:w-32">
-                          <label className="block text-xs font-medium text-indigo-700 mb-1">
-                            Top K Chunks
-                          </label>
-                          <input
-                            type="number"
-                            value={ragTopK}
-                            onChange={(e) => setRagTopK(Number(e.target.value))}
-                            className="block w-full px-3 py-2 border border-indigo-200 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                            disabled={loading}
-                            min={1}
-                            max={50}
-                          />
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.1"
+                          value={ragSearchStrategy}
+                          onChange={(e) =>
+                            setRagSearchStrategy(parseFloat(e.target.value))
+                          }
+                          aria-label="RAG search strategy"
+                          className="w-full h-2 bg-brand-line rounded-lg appearance-none cursor-pointer accent-brand"
+                        />
+                        <div className="flex justify-between text-[10px] text-brand-faint mt-0.5 uppercase tracking-wide font-semibold">
+                          <span>Ideas</span>
+                          <span>Exact</span>
                         </div>
-                        <div className="flex-1">
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {useRag && (
+                  <div className="pt-1 border-t border-line-soft">
+                    <button
+                      type="button"
+                      onClick={() => setShowAdvancedRag(!showAdvancedRag)}
+                      aria-expanded={showAdvancedRag}
+                      className="flex items-center text-xs font-medium text-soft hover:text-body transition-colors"
+                    >
+                      <Settings2 className="w-3 h-3 mr-1" />
+                      Advanced RAG Settings
+                      <ChevronDown
+                        className={`w-3 h-3 ml-1 transition-transform ${showAdvancedRag ? "rotate-180" : ""}`}
+                      />
+                    </button>
+
+                    {showAdvancedRag && (
+                      <div className="mt-2 space-y-2">
+                        <div>
                           <div className="flex justify-between items-center mb-1">
-                            <label className="block text-xs font-medium text-indigo-700">
-                              Search Strategy
+                            <label
+                              htmlFor="ragChunkSize"
+                              className="text-[11px] font-medium text-brand-ink"
+                            >
+                              Chunk Size (lines)
                             </label>
-                            <span className="text-[10px] font-mono text-indigo-500 bg-indigo-100 px-1.5 py-0.5 rounded">
-                              {ragSearchStrategy < 0.4
-                                ? "🎨 Exploration"
-                                : ragSearchStrategy > 0.6
-                                  ? "🎯 Precision"
-                                  : "⚖️ Balanced"}
+                            <span className="text-[10px] font-mono text-brand-faint bg-brand-soft-2 px-1 rounded">
+                              {ragChunkSize}
                             </span>
                           </div>
                           <input
                             type="range"
-                            min="0"
-                            max="1"
-                            step="0.1"
-                            value={ragSearchStrategy}
+                            id="ragChunkSize"
+                            min="10"
+                            max="100"
+                            step="5"
+                            value={ragChunkSize}
                             onChange={(e) =>
-                              setRagSearchStrategy(parseFloat(e.target.value))
+                              setRagChunkSize(Number(e.target.value))
                             }
-                            className="w-full h-2 bg-indigo-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
-                            disabled={loading}
+                            className="w-full h-2 bg-brand-line rounded-lg appearance-none cursor-pointer accent-brand"
                           />
-                          <div className="flex justify-between text-[9px] text-indigo-400 mt-1 uppercase tracking-wider font-semibold">
-                            <span>Ideas</span>
-                            <span>Exact</span>
+                          <div className="flex justify-between text-[10px] text-brand-faint mt-0.5 uppercase tracking-wide font-semibold">
+                            <span>Fine</span>
+                            <span>Coarse</span>
                           </div>
                         </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {useRag && (
-                    <div className="pt-2 border-t border-slate-100">
-                      <button
-                        type="button"
-                        onClick={() => setShowAdvancedRag(!showAdvancedRag)}
-                        className="flex items-center text-xs font-medium text-slate-500 hover:text-slate-700 transition-colors"
-                      >
-                        <Settings2 className="w-3 h-3 mr-1" />
-                        Advanced RAG Settings
-                        <ChevronDown
-                          className={`w-3 h-3 ml-1 transition-transform ${showAdvancedRag ? "rotate-180" : ""}`}
-                        />
-                      </button>
-
-                      {showAdvancedRag && (
-                        <div className="mt-3 space-y-3 pl-1">
-                          <div className="w-full sm:w-48">
-                            <div className="flex justify-between items-center mb-1">
-                              <label className="block text-xs font-medium text-indigo-700">
-                                Chunk Size (lines)
-                              </label>
-                              <span className="text-[10px] font-mono text-indigo-500 bg-indigo-100 px-1.5 py-0.5 rounded">
-                                {ragChunkSize}
-                              </span>
-                            </div>
-                            <input
-                              type="range"
-                              min="10"
-                              max="100"
-                              step="5"
-                              value={ragChunkSize}
-                              onChange={(e) =>
-                                setRagChunkSize(Number(e.target.value))
-                              }
-                              className="w-full h-2 bg-indigo-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
-                              disabled={loading}
-                            />
-                            <div className="flex justify-between text-[9px] text-indigo-400 mt-1 uppercase tracking-wider font-semibold">
-                              <span>Fine</span>
-                              <span>Coarse</span>
-                            </div>
-                          </div>
-                          <label className="flex items-center space-x-2 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={useQueryExpansion}
-                              onChange={(e) =>
-                                setUseQueryExpansion(e.target.checked)
-                              }
-                              className="w-3.5 h-3.5 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
-                            />
-                            <span className="text-xs text-slate-600">
-                              AI Query Expansion (Expands query with synonyms)
-                            </span>
-                          </label>
-                          {useQueryExpansion && (
-                            <label className="flex items-center space-x-2 cursor-pointer pl-5">
-                              <input
-                                type="checkbox"
-                                checked={useOllamaForQueryExpansion}
-                                onChange={(e) =>
-                                  setUseOllamaForQueryExpansion(e.target.checked)
-                                }
-                                className="w-3.5 h-3.5 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
-                              />
-                              <span className="text-xs text-slate-600">
-                                Use Local Model for Query Expansion
-                              </span>
-                            </label>
-                          )}
-                          <label className="flex items-center space-x-2 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={useIntentReranking}
-                              onChange={(e) =>
-                                setUseIntentReranking(e.target.checked)
-                              }
-                              className="w-3.5 h-3.5 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"
-                            />
-                            <span className="text-xs text-slate-600">
-                              Intent-Aware Reranking (Boosts files based on
-                              context)
-                            </span>
-                          </label>
-                          <div className="pt-2">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                let count = 0;
-                                // Need to collect keys first to avoid modifying while iterating
-                                const keysToRemove = [];
-                                for (let i = 0; i < localStorage.length; i++) {
-                                  const key = localStorage.key(i);
-                                  if (key && key.startsWith("rag_opt_")) {
-                                    keysToRemove.push(key);
-                                  }
-                                }
-                                keysToRemove.forEach((key) => {
-                                  localStorage.removeItem(key);
-                                  count++;
-                                });
-                                setStatus(
-                                  `Cleared ${count} cached RAG queries.`,
-                                );
-                                setTimeout(() => setStatus(""), 3000);
-                              }}
-                              className="text-xs text-red-600 hover:text-red-800 font-medium flex items-center"
-                            >
-                              <Trash2 className="w-3 h-3 mr-1" />
-                              Clear RAG Query Cache
-                            </button>
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                setStatus("Clearing embedding cache...");
-                                await EmbeddingCacheService.clearCache();
-                                setStatus("Embedding cache cleared.");
-                                setTimeout(() => setStatus(""), 3000);
-                              }}
-                              className="text-xs text-red-600 hover:text-red-800 font-medium flex items-center"
-                            >
-                              <Trash2 className="w-3 h-3 mr-1" />
-                              Clear Embedding Cache
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {(useOllama || useOllamaForFinal || useOllamaForQueryExpansion) && (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-                      {localEngine === "ollama" && (
-                        <div>
-                          <label
-                            className="block text-xs font-medium text-slate-500 mb-1"
-                            title="1 token ≈ 4 characters. Increase this if the model complains about missing code."
-                          >
-                            Context Window (Tokens)
-                          </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
                           <input
-                            type="number"
-                            value={ollamaNumCtx}
+                            type="checkbox"
+                            checked={useQueryExpansion}
                             onChange={(e) =>
-                              setOllamaNumCtx(Number(e.target.value))
+                              setUseQueryExpansion(e.target.checked)
                             }
-                            className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                            disabled={loading}
-                            min={1024}
-                            step={1024}
+                            className="w-3.5 h-3.5 text-brand border-input-line rounded focus:ring-brand-mid"
                           />
-                          <p className="mt-1 text-[10px] text-slate-400 leading-tight">
-                            Increase if model complains about missing code.
-                            Requires more RAM/VRAM.
-                          </p>
-                        </div>
-                      )}
-                      <div>
-                        <label className="block text-xs font-medium text-slate-500 mb-1">
-                          Max Tokens (Summary)
+                          <span className="text-[11px] text-mid">
+                            AI Query Expansion (synonyms)
+                          </span>
                         </label>
-                        <input
-                          type="number"
-                          value={ollamaSummaryPredict}
-                          onChange={(e) =>
-                            setOllamaSummaryPredict(Number(e.target.value))
-                          }
-                          className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                          disabled={loading}
-                          min={50}
-                          step={50}
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-slate-500 mb-1">
-                          Max Tokens (Final)
+                        {useQueryExpansion && (
+                          <label className="flex items-center gap-2 cursor-pointer pl-5">
+                            <input
+                              type="checkbox"
+                              checked={useOllamaForQueryExpansion}
+                              onChange={(e) =>
+                                setUseOllamaForQueryExpansion(e.target.checked)
+                              }
+                              className="w-3.5 h-3.5 text-brand border-input-line rounded focus:ring-brand-mid"
+                            />
+                            <span className="text-[11px] text-mid">
+                              Use Local Model for Expansion
+                            </span>
+                          </label>
+                        )}
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={useIntentReranking}
+                            onChange={(e) =>
+                              setUseIntentReranking(e.target.checked)
+                            }
+                            className="w-3.5 h-3.5 text-brand border-input-line rounded focus:ring-brand-mid"
+                          />
+                          <span className="text-[11px] text-mid">
+                            Intent-Aware Reranking
+                          </span>
                         </label>
-                        <input
-                          type="number"
-                          value={ollamaFinalPredict}
-                          onChange={(e) =>
-                            setOllamaFinalPredict(Number(e.target.value))
-                          }
-                          className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                          disabled={loading}
-                          min={250}
-                          step={50}
-                        />
-                      </div>
-                      <div>
-                        <label
-                          className="block text-xs font-medium text-slate-500 mb-1"
-                          title="0 = No limit (Full files). Use 2000-4000 for faster generation when deep code analysis isn't needed."
-                        >
-                          File Truncation (Chars)
-                        </label>
-                        <input
-                          type="number"
-                          value={fileTruncationLimit}
-                          onChange={(e) =>
-                            setFileTruncationLimit(Number(e.target.value))
-                          }
-                          className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                          disabled={loading}
-                          min={0}
-                          step={1000}
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-slate-500 mb-1">
-                          Temperature ({ollamaTemperature})
-                        </label>
-                        <input
-                          type="range"
-                          value={ollamaTemperature}
-                          onChange={(e) =>
-                            setOllamaTemperature(Number(e.target.value))
-                          }
-                          className="block w-full mt-2"
-                          disabled={loading}
-                          min={0}
-                          max={1}
-                          step={0.1}
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={handleTestLocalEngine}
-                      disabled={testingOllama || loading}
-                      className="text-xs px-3 py-1.5 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
-                    >
-                      {testingOllama ? "Testing..." : "Test Connection"}
-                    </button>
-                    {ollamaConnected === true && (
-                      <span className="text-xs text-emerald-600 flex items-center">
-                        <Check className="w-3 h-3 mr-1" /> Connected
-                      </span>
-                    )}
-                    {ollamaConnected === false && (
-                      <span className="text-xs text-red-600">
-                        {isTauri()
-                          ? `Connection failed (Is ${localEngine === "ollama" ? "Ollama" : localEngine === "lmstudio" ? "LM Studio" : "Llama.cpp"} running?)`
-                          : "Connection failed (Check CORS or Server)"}
-                      </span>
-                    )}
-                  </div>
-
-                  {localEngine === "ollama" ? (
-                    <div className="text-xs text-slate-500 bg-slate-100 p-3 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                      {isTauri() ? (
-                        <>
-                          <div>
-                            <p className="font-medium text-slate-700 mb-1">
-                              Ollama Native Control:
-                            </p>
-                            <p>
-                              Start or stop the local Ollama instance directly from the app.
-                            </p>
-                          </div>
-                          <div className="flex gap-2">
-                            {!ollamaNativeRunning ? (
-                              <button
-                                type="button"
-                                onClick={handleStartOllama}
-                                disabled={ollamaNativeLoading}
-                                className="inline-flex items-center px-3 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg hover:bg-emerald-100 transition-colors whitespace-nowrap disabled:opacity-50"
-                              >
-                                {ollamaNativeLoading ? "Starting..." : "Start Ollama"}
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={handleStopOllama}
-                                disabled={ollamaNativeLoading}
-                                className="inline-flex items-center px-3 py-1.5 bg-red-50 text-red-700 border border-red-200 rounded-lg hover:bg-red-100 transition-colors whitespace-nowrap disabled:opacity-50"
-                              >
-                                {ollamaNativeLoading ? "Stopping..." : "Stop Ollama"}
-                              </button>
-                            )}
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <div>
-                            <p className="font-medium text-slate-700 mb-1">
-                              How to enable CORS for Ollama:
-                            </p>
-                            <p>
-                              Ollama blocks cross-origin requests by default. To use
-                              it here, you must start it with{" "}
-                              <code className="bg-slate-200 px-1 py-0.5 rounded">
-                                OLLAMA_ORIGINS="{window.location.origin}"
-                              </code>
-                            </p>
-                          </div>
+                        <div className="flex flex-col items-start gap-1.5 pt-1">
                           <button
                             type="button"
-                            onClick={handleDownloadBat}
-                            className="inline-flex items-center px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors whitespace-nowrap"
+                            onClick={() => {
+                              let count = 0;
+                              // Need to collect keys first to avoid modifying while iterating
+                              const keysToRemove = [];
+                              for (let i = 0; i < localStorage.length; i++) {
+                                const key = localStorage.key(i);
+                                if (key && key.startsWith("rag_opt_")) {
+                                  keysToRemove.push(key);
+                                }
+                              }
+                              keysToRemove.forEach((key) => {
+                                localStorage.removeItem(key);
+                                count++;
+                              });
+                              setStatus(
+                                `Cleared ${count} cached RAG queries.`,
+                              );
+                              setTimeout(() => setStatus(""), 3000);
+                            }}
+                            className="text-[11px] text-danger hover:text-danger-strong font-medium flex items-center"
                           >
-                            <Download className="w-3 h-3 mr-1.5" />
-                            Download Windows .bat
+                            <Trash2 className="w-3 h-3 mr-1" />
+                            Clear RAG Query Cache
                           </button>
-                        </>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="text-xs text-slate-500 bg-slate-100 p-3 rounded-lg flex flex-col gap-2">
-                      <p className="font-medium text-slate-700 border-b border-slate-200 pb-1">
-                        Manual Server Start Required
-                      </p>
-                      <p>
-                        Selected engine requires manual start. Launch {localEngine === 'lmstudio' ? 'LM Studio / Oobabooga' : 'Llama.cpp'} externally, ensure its API server is listening on the configured URL, and click "Test Connection".
-                      </p>
-                      {!isTauri() && (
-                        <p className="text-amber-700 mt-1">
-                          <strong>Note:</strong> Make sure CORS is enabled in your server settings, otherwise web browsers will block the connection.
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setStatus("Clearing embedding cache...");
+                              await EmbeddingCacheService.clearCache();
+                              setStatus("Embedding cache cleared.");
+                              setTimeout(() => setStatus(""), 3000);
+                            }}
+                            className="text-[11px] text-danger hover:text-danger-strong font-medium flex items-center"
+                          >
+                            <Trash2 className="w-3 h-3 mr-1" />
+                            Clear Embedding Cache
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {(useOllama ||
+                  useOllamaForFinal ||
+                  useOllamaForQueryExpansion) && (
+                  <div className="grid grid-cols-2 gap-2">
+                    {localEngine === "ollama" && (
+                      <div>
+                        <label
+                          htmlFor="ollamaNumCtx"
+                          className="block text-[11px] font-medium text-soft mb-1"
+                          title="1 token ≈ 4 characters. Increase this if the model complains about missing code."
+                        >
+                          Context Window (Tokens)
+                        </label>
+                        <input
+                          type="number"
+                          id="ollamaNumCtx"
+                          value={ollamaNumCtx}
+                          onChange={(e) =>
+                            setOllamaNumCtx(Number(e.target.value))
+                          }
+                          className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid"
+                          min={1024}
+                          step={1024}
+                        />
+                        <p className="mt-1 text-[10px] text-faint leading-tight">
+                          More = better code coverage, more RAM/VRAM.
                         </p>
-                      )}
+                      </div>
+                    )}
+                    <div>
+                      <label
+                        htmlFor="ollamaSummaryPredict"
+                        className="block text-[11px] font-medium text-soft mb-1"
+                      >
+                        Max Tokens (Summary)
+                      </label>
+                      <input
+                        type="number"
+                        id="ollamaSummaryPredict"
+                        value={ollamaSummaryPredict}
+                        onChange={(e) =>
+                          setOllamaSummaryPredict(Number(e.target.value))
+                        }
+                        className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid"
+                        min={50}
+                        step={50}
+                      />
                     </div>
+                    <div>
+                      <label
+                        htmlFor="ollamaFinalPredict"
+                        className="block text-[11px] font-medium text-soft mb-1"
+                      >
+                        Max Tokens (Final)
+                      </label>
+                      <input
+                        type="number"
+                        id="ollamaFinalPredict"
+                        value={ollamaFinalPredict}
+                        onChange={(e) =>
+                          setOllamaFinalPredict(Number(e.target.value))
+                        }
+                        className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid"
+                        min={250}
+                        step={50}
+                      />
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="fileTruncationLimit"
+                        className="block text-[11px] font-medium text-soft mb-1"
+                        title="0 = No limit (full files). Use 2000-4000 for faster generation when deep code analysis isn't needed."
+                      >
+                        File Truncation (Chars)
+                      </label>
+                      <input
+                        type="number"
+                        id="fileTruncationLimit"
+                        value={fileTruncationLimit}
+                        onChange={(e) =>
+                          setFileTruncationLimit(Number(e.target.value))
+                        }
+                        className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs focus:ring-brand-mid focus:border-brand-mid"
+                        min={0}
+                        step={1000}
+                      />
+                    </div>
+                    <div className="col-span-2">
+                      <label
+                        htmlFor="ollamaTemperature"
+                        className="block text-[11px] font-medium text-soft mb-1"
+                      >
+                        Temperature ({ollamaTemperature})
+                      </label>
+                      <input
+                        type="range"
+                        id="ollamaTemperature"
+                        value={ollamaTemperature}
+                        onChange={(e) =>
+                          setOllamaTemperature(Number(e.target.value))
+                        }
+                        className="w-full accent-brand"
+                        min={0}
+                        max={1}
+                        step={0.1}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleTestLocalEngine}
+                    disabled={testingOllama}
+                    className="text-xs px-2.5 py-1 bg-raised border border-input-line rounded-lg hover:bg-surface-2 transition-colors disabled:opacity-50"
+                  >
+                    {testingOllama ? "Testing…" : "Test Connection"}
+                  </button>
+                  {ollamaConnected === true && (
+                    <span className="text-[11px] text-ok flex items-center">
+                      <Check className="w-3 h-3 mr-1" /> Connected
+                    </span>
+                  )}
+                  {ollamaConnected === false && (
+                    <span className="text-[11px] text-danger min-w-0 truncate">
+                      {isTauri()
+                        ? `Failed — is ${localEngine === "ollama" ? "Ollama" : localEngine === "lmstudio" ? "LM Studio" : "Llama.cpp"} running?`
+                        : "Failed (check CORS or server)"}
+                    </span>
                   )}
                 </div>
-              )}
-            </div>
-          </form>
 
-          {isTruncated && (
-            <div className="mt-4 p-4 bg-amber-50 rounded-xl border border-amber-200 flex items-start">
-              <AlertTriangle className="w-5 h-5 text-amber-500 mr-3 mt-0.5 flex-shrink-0" />
-              <div>
-                <h4 className="text-sm font-medium text-amber-800">
-                  Large Repository Detected
-                </h4>
-                <p className="text-sm text-amber-700 mt-1">
-                  The repository contains too many files. The{" "}
-                  <strong>directory tree listing</strong> has been truncated to
-                  1000 items to prevent AI context overflow. This does not
-                  affect your {maxFiles} selected source files, which are still
-                  included in full.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {error && (
-            <div className="mt-4 p-4 bg-red-50 rounded-xl border border-red-100">
-              <p className="text-sm text-red-700">{error}</p>
-            </div>
-          )}
-        </div>
-
-        {/* Output Area */}
-        {prompt && (
-          <div className="bg-white shadow-sm ring-1 ring-slate-200 rounded-2xl overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-500">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50/50">
-              <div className="flex items-center space-x-2 flex-wrap gap-y-2">
-                <FileText className="w-5 h-5 text-slate-500" />
-                <h3 className="text-sm font-medium text-slate-900">
-                  {generatedFileName}
-                </h3>
-                {usedModel && (
-                  <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 text-indigo-800">
-                    Model: {usedModel}
-                  </span>
-                )}
-                {lastOptimizedQuery && (
-                  <div className="ml-2 flex items-center space-x-1">
-                    <span
-                      className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-100 text-emerald-800"
-                      title="Detected Intent"
-                    >
-                      {lastOptimizedQuery.intent}
-                    </span>
-                    <span
-                      className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600 truncate max-w-[200px]"
-                      title={`Optimized Query: ${lastOptimizedQuery.query}`}
-                    >
-                      RAG: {lastOptimizedQuery.query}
-                    </span>
+                {localEngine === "ollama" ? (
+                  <div className="text-[11px] text-soft bg-surface-2 p-2 rounded-lg space-y-1.5">
+                    {isTauri() ? (
+                      <>
+                        <p className="font-medium text-body">
+                          Ollama Native Control — start or stop the local
+                          instance directly from the app.
+                        </p>
+                        {!ollamaNativeRunning ? (
+                          <button
+                            type="button"
+                            onClick={handleStartOllama}
+                            disabled={ollamaNativeLoading}
+                            className="inline-flex items-center px-2 py-1 bg-ok-soft text-ok border border-ok-line rounded-lg hover:bg-ok-soft-2 transition-colors disabled:opacity-50"
+                          >
+                            {ollamaNativeLoading ? "Starting…" : "Start Ollama"}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={handleStopOllama}
+                            disabled={ollamaNativeLoading}
+                            className="inline-flex items-center px-2 py-1 bg-danger-soft text-danger-strong border border-danger-line rounded-lg hover:bg-danger-soft transition-colors disabled:opacity-50"
+                          >
+                            {ollamaNativeLoading ? "Stopping…" : "Stop Ollama"}
+                          </button>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <p>
+                          <span className="font-medium text-body">
+                            CORS:
+                          </span>{" "}
+                          start Ollama with{" "}
+                          <code className="bg-surface-3 px-1 py-0.5 rounded">
+                            OLLAMA_ORIGINS="{window.location.origin}"
+                          </code>
+                        </p>
+                        <button
+                          type="button"
+                          onClick={handleDownloadBat}
+                          className="inline-flex items-center px-2 py-1 bg-brand-fog text-brand-ink border border-brand-line rounded-lg hover:bg-brand-soft-2 transition-colors"
+                        >
+                          <Download className="w-3 h-3 mr-1" />
+                          Download Windows .bat
+                        </button>
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-soft bg-surface-2 p-2 rounded-lg space-y-1">
+                    <p className="font-medium text-body">
+                      Manual server start required
+                    </p>
+                    <p>
+                      Launch{" "}
+                      {localEngine === "lmstudio"
+                        ? "LM Studio / Oobabooga"
+                        : "Llama.cpp"}{" "}
+                      externally, ensure its API server is listening on the
+                      configured URL, then click "Test Connection".
+                    </p>
+                    {!isTauri() && (
+                      <p className="text-warn-strong">
+                        CORS must be enabled in your server settings.
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
-              <div className="flex items-center space-x-2">
-                <button
-                  onClick={handleCopy}
-                  className="inline-flex items-center px-3 py-1.5 border border-slate-300 shadow-sm text-xs font-medium rounded-lg text-slate-700 bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+            )}
+          </CollapsibleGroup>
+
+          {isTauri() && (
+            <CollapsibleGroup
+              title="Desktop Settings"
+              summary={geminiApiKey ? "Key set" : "From environment"}
+              open={!!openGroups.desktop}
+              onToggle={() => toggleGroup("desktop")}
+            >
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label
+                    htmlFor="geminiApiKey"
+                    className="text-[11px] font-medium text-soft"
+                  >
+                    Gemini API Key (Optional if set in environment)
+                  </label>
+                  <span
+                    className={`text-[11px] font-medium ${geminiApiKey ? "text-ok" : "text-faint"}`}
+                  >
+                    {geminiApiKey ? "✓ set" : "not set"}
+                  </span>
+                </div>
+                <div className="relative">
+                  <input
+                    type={showGeminiKey ? "text" : "password"}
+                    id="geminiApiKey"
+                    value={geminiApiKey}
+                    onChange={(e) => setGeminiApiKey(e.target.value)}
+                    placeholder="AIzaSy..."
+                    className="block w-full pr-8 px-2.5 py-1.5 border border-input-line rounded-lg text-xs"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowGeminiKey((v) => !v)}
+                    aria-label={showGeminiKey ? "Hide API key" : "Show API key"}
+                    title={showGeminiKey ? "Hide API key" : "Show API key"}
+                    className="absolute inset-y-0 right-0 flex items-center px-2 text-faint hover:text-body transition-colors"
+                  >
+                    {showGeminiKey ? (
+                      <EyeOff className="w-3.5 h-3.5" />
+                    ) : (
+                      <Eye className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label
+                  htmlFor="proxyAddress"
+                  className="block text-[11px] font-medium text-soft mb-1"
                 >
-                  {copied ? (
-                    <>
-                      <Check className="w-4 h-4 mr-1.5 text-emerald-500" />
-                      Copied!
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-4 h-4 mr-1.5 text-slate-400" />
-                      Copy
-                    </>
+                  Global Proxy Address (Optional)
+                </label>
+                <input
+                  type="text"
+                  id="proxyAddress"
+                  value={proxyAddress}
+                  onChange={(e) => setProxyAddress(e.target.value)}
+                  placeholder="http://127.0.0.1:2080"
+                  className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs"
+                />
+                <p className="mt-1 text-[10px] text-faint leading-tight">
+                  Both "127.0.0.1:2080" and "http://127.0.0.1:2080" are
+                  accepted. Leave empty for a guaranteed direct connection.
+                </p>
+              </div>
+            </CollapsibleGroup>
+          )}
+
+          {/* Appearance — rarely used, so it lives in the config sidebar */}
+          <CollapsibleGroup
+            title="Appearance"
+            summary={
+              theme === "system" ? "System" : theme === "light" ? "Light" : "Dark"
+            }
+            open={!!openGroups.appearance}
+            onToggle={() => toggleGroup("appearance")}
+          >
+            <div
+              className="flex rounded-lg border border-input-line p-0.5"
+              role="radiogroup"
+              aria-label="Color theme"
+            >
+              {(
+                [
+                  { value: "system", label: "System", Icon: Monitor },
+                  { value: "light", label: "Light", Icon: Sun },
+                  { value: "dark", label: "Dark", Icon: Moon },
+                ] as const
+              ).map(({ value, label, Icon }) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={theme === value}
+                  title={
+                    value === "system"
+                      ? `Follow the OS (currently: ${
+                          window.matchMedia("(prefers-color-scheme: dark)")
+                            .matches
+                            ? "dark"
+                            : "light"
+                        })`
+                      : undefined
+                  }
+                  onClick={() => setThemeSetting(value)}
+                  className={`flex-1 inline-flex items-center justify-center gap-1 px-1.5 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                    theme === value
+                      ? "bg-brand-fog text-brand-ink"
+                      : "text-soft hover:text-body"
+                  }`}
+                >
+                  <Icon className="w-3.5 h-3.5" />
+                  {label}
+                </button>
+              ))}
+            </div>
+          </CollapsibleGroup>
+
+          {/* Danger zone: settings persist in localStorage across sessions */}
+          <div className="px-3 py-3">
+            <button
+              type="button"
+              onClick={() => {
+                if (
+                  !window.confirm(
+                    "Reset ALL settings to defaults (providers, API keys, engine and RAG options)? This cannot be undone.",
+                  )
+                )
+                  return;
+                localStorage.removeItem("gemini_app_settings");
+                window.location.reload();
+              }}
+              className="text-[11px] font-medium text-danger hover:text-danger-strong transition-colors"
+            >
+              <Trash2 className="w-3 h-3 mr-1 inline-block -mt-0.5" />
+              Reset all settings
+            </button>
+          </div>
+        </aside>
+
+        {/* Right: result */}
+        <section
+          aria-label="Result"
+          className="flex-1 min-w-0 flex flex-col bg-app"
+        >
+          <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-line bg-surface flex-wrap">
+            <FileText className="w-4 h-4 text-faint shrink-0" />
+            <h2 className="text-sm font-medium text-ink truncate max-w-[240px]">
+              {generatedFileName}
+            </h2>
+            {restoredAt && (
+              <span
+                className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-warn-soft-2 text-warn-strong"
+                title="Shown from local history — not a fresh generation"
+              >
+                <History className="w-3 h-3 mr-1" />
+                restored · {new Date(restoredAt).toLocaleString()}
+              </span>
+            )}
+            {usedModel && (
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-brand-soft-2 text-brand-strong truncate max-w-[180px]">
+                {usedModel}
+              </span>
+            )}
+            {lastOptimizedQuery && (
+              <div className="flex items-center gap-1 min-w-0">
+                <span
+                  className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-ok-soft-2 text-ok"
+                  title="Detected Intent"
+                >
+                  {lastOptimizedQuery.intent}
+                </span>
+                <span
+                  className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-surface-2 text-mid truncate max-w-[160px]"
+                  title={`Optimized Query: ${lastOptimizedQuery.query}`}
+                >
+                  RAG: {lastOptimizedQuery.query}
+                </span>
+              </div>
+            )}
+            <div className="ml-auto flex items-center gap-1.5 shrink-0">
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={handleOpenHistory}
+                  aria-expanded={historyOpen}
+                  aria-haspopup="true"
+                  className="inline-flex items-center px-2.5 py-1.5 border border-input-line shadow-sm text-xs font-medium rounded-lg text-body bg-raised hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-app focus:ring-brand-mid transition-colors"
+                >
+                  <History className="w-3.5 h-3.5 mr-1.5 text-faint" />
+                  History
+                  {historyEntries.length > 0 && (
+                    <span className="ml-1 inline-flex items-center justify-center px-1.5 min-w-[16px] h-4 rounded-full bg-surface-3 text-[10px] font-semibold text-mid">
+                      {historyEntries.length}
+                    </span>
                   )}
                 </button>
-                <button
-                  onClick={handleDownload}
-                  className="inline-flex items-center px-3 py-1.5 border border-slate-300 shadow-sm text-xs font-medium rounded-lg text-slate-700 bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
-                >
-                  <Download className="w-4 h-4 mr-1.5 text-slate-400" />
-                  Download
-                </button>
+                {historyOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setHistoryOpen(false)}
+                      aria-hidden="true"
+                    />
+                    <div className="absolute right-0 top-full mt-1 w-80 max-h-96 overflow-y-auto bg-surface rounded-xl shadow-lg ring-1 ring-line z-50 py-1">
+                      {historyEntries.length === 0 ? (
+                        <p className="px-3 py-4 text-center text-xs text-faint">
+                          History is empty — generated prompts are saved here
+                          automatically.
+                        </p>
+                      ) : (
+                        historyEntries.map((meta) => (
+                          <div
+                            key={meta.id}
+                            className="group flex items-start gap-1 px-2 py-1.5 hover:bg-surface-2"
+                          >
+                            <button
+                              type="button"
+                              onClick={() => handleLoadHistoryEntry(meta)}
+                              className="flex-1 min-w-0 text-left"
+                            >
+                              <p className="text-xs font-medium text-ink-2 truncate">
+                                {meta.sourceLabel}
+                              </p>
+                              <p className="text-[11px] text-soft truncate">
+                                {meta.templateName} · {meta.model || "—"} ·{" "}
+                                {new Date(meta.createdAt).toLocaleString()} ·{" "}
+                                {(meta.size / 1024).toFixed(1)} KB
+                              </p>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteHistoryEntry(meta.id)}
+                              aria-label={`Delete history entry for ${meta.sourceLabel}`}
+                              className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1 text-faint hover:text-danger transition-opacity"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))
+                      )}
+                      {historyEntries.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleClearHistory}
+                          className="w-full px-3 py-2 text-left text-[11px] text-danger hover:text-danger-strong hover:bg-danger-soft border-t border-line-soft mt-1"
+                        >
+                          Clear all history
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
+              <button
+                onClick={handleCopy}
+                className="inline-flex items-center px-2.5 py-1.5 border border-input-line shadow-sm text-xs font-medium rounded-lg text-body bg-raised hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-app focus:ring-brand-mid transition-colors"
+              >
+                {copied ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 mr-1.5 text-ok" />
+                    Copied!
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5 mr-1.5 text-faint" />
+                    Copy
+                  </>
+                )}
+              </button>
+              <button
+                onClick={handleDownload}
+                className="inline-flex items-center px-2.5 py-1.5 border border-input-line shadow-sm text-xs font-medium rounded-lg text-body bg-raised hover:bg-surface-2 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-app focus:ring-brand-mid transition-colors"
+              >
+                <Download className="w-3.5 h-3.5 mr-1.5 text-faint" />
+                Download
+              </button>
             </div>
-            <div className="p-6 overflow-x-auto">
-              <pre className="text-sm font-mono text-slate-800 whitespace-pre-wrap break-words">
+          </div>
+
+          <div className="flex-1 overflow-y-auto">
+            {prompt ? (
+              <pre className="p-4 text-sm font-mono text-ink-2 whitespace-pre-wrap break-words">
                 {prompt.length > 50000
                   ? prompt.substring(0, 50000) +
                     '\n\n... [⚠️ PREVIEW TRUNCATED FOR PERFORMANCE ⚠️]\n... [The full prompt is too large to display in the browser without lagging.]\n... [Please use the "Copy" or "Download" buttons above to get the full text.]'
                   : prompt}
               </pre>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Sticky Bottom Action Bar */}
-      <div className="fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-md border-t border-slate-200 p-4 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] z-40">
-        <div className="max-w-4xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex-1 min-w-0">
-            {status && loading && (
-              <p className="text-sm font-medium text-indigo-600 animate-pulse truncate">
-                {status}
-              </p>
-            )}
-          </div>
-          <div className="flex items-center gap-3 shrink-0">
-            {loading && (
-              <button
-                type="button"
-                onClick={cancelGeneration}
-                className="inline-flex items-center justify-center px-4 py-2 border border-slate-300 text-sm font-medium rounded-xl text-slate-700 bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+            ) : (
+              <div
+                className="h-full flex flex-col items-center justify-center text-center p-8"
+                role="status"
               >
-                <X className="-ml-1 mr-2 h-4 w-4" />
-                Cancel
-              </button>
+                {loading ? (
+                  <>
+                    <Loader2 className="w-8 h-8 text-brand-faint animate-spin mb-3" />
+                    <p className="text-sm font-medium text-soft">
+                      Generating…
+                    </p>
+                    <p className="text-xs text-faint mt-1">
+                      Progress is shown in the status bar above. You can keep
+                      editing templates and settings meanwhile.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <FileText className="w-10 h-10 text-faint mb-3" />
+                    <p className="text-sm font-medium text-soft">
+                      The generated prompt will appear here
+                    </p>
+                    <p className="text-xs text-faint mt-1 max-w-xs">
+                      Pick a source and a template above, then press Generate
+                      Prompt. Recent generations are available under History.
+                    </p>
+                  </>
+                )}
+              </div>
             )}
-            <button
-              type="button"
-              onClick={handleGenerate}
-              disabled={
-                loading ||
-                (inputMode === "github"
-                  ? !url
-                  : !localFiles || localFiles.length === 0)
-              }
-              className="inline-flex items-center justify-center px-6 py-2 border border-transparent text-sm font-medium rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="animate-spin -ml-1 mr-2 h-4 w-4" />
-                  Generating...
-                </>
-              ) : inputMode === "github" &&
-                cachedRepoData &&
-                cacheKey === `${url}-${githubToken}-${maxFiles}` ? (
-                "Regenerate (Cached)"
-              ) : (
-                "Generate Prompt"
-              )}
-            </button>
           </div>
-        </div>
+        </section>
       </div>
 
       {/* Token Warning Modal */}
       {tokenWarningResolver && tokenWarning && (
-        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full p-6">
-            <div className="flex items-center gap-3 text-amber-600 mb-4">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-surface rounded-2xl shadow-xl max-w-lg w-full p-6">
+            <div className="flex items-center gap-3 text-warn mb-4">
               <AlertTriangle className="w-6 h-6" />
-              <h3 className="text-lg font-semibold text-slate-900">
+              <h3 className="text-lg font-semibold text-ink">
                 Context Limits Conflict
               </h3>
             </div>
-            <div className="text-sm text-slate-600 space-y-3 mb-6">
+            <div className="text-sm text-mid space-y-3 mb-6">
               <p>
                 Your input prompt (code + instructions) is approximately{" "}
                 <strong>~{tokenWarning.inputTokens} tokens</strong>.
@@ -2713,13 +3264,13 @@ pause`;
                 However, you requested <code>Max Tokens (Final)</code> ={" "}
                 {tokenWarning.requestedTokens}.
               </p>
-              <div className="bg-amber-50 border border-amber-200 p-3 rounded-lg text-amber-800">
+              <div className="bg-warn-soft border border-warn-line p-3 rounded-lg text-warn-strong">
                 If you proceed, Ollama will{" "}
                 <strong>truncate the beginning of your prompt</strong> (the
                 system instructions) to fit the limits, which may cause the
                 model to ignore your formatting rules or task description.
               </div>
-              <p className="font-medium text-slate-900 mt-4">
+              <p className="font-medium text-ink mt-4">
                 Recommendations:
               </p>
               <ul className="list-disc pl-5 space-y-1">
@@ -2735,7 +3286,7 @@ pause`;
                   {Math.max(500, tokenWarning.availableTokens - 200)}.
                 </li>
               </ul>
-              <div className="mt-4 bg-red-50 border border-red-200 p-3 rounded-lg text-red-800 text-xs">
+              <div className="mt-4 bg-danger-soft border border-danger-line p-3 rounded-lg text-danger-strong text-xs">
                 <strong>⚠️ Hardware Warning:</strong> The{" "}
                 <code>Context Window</code> is passed directly to Ollama,
                 overriding its default. Setting it to 20,000+ tokens requires
@@ -2748,13 +3299,13 @@ pause`;
             <div className="flex flex-col-reverse sm:flex-row gap-3 justify-end">
               <button
                 onClick={() => tokenWarningResolver(false)}
-                className="px-4 py-2 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                className="px-4 py-2 text-sm font-medium text-body bg-surface-2 hover:bg-surface-3 rounded-lg transition-colors"
               >
                 Cancel (Change Settings)
               </button>
               <button
                 onClick={() => tokenWarningResolver(true)}
-                className="px-4 py-2 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-lg transition-colors"
+                className="px-4 py-2 text-sm font-medium text-white bg-warn-solid hover:bg-warn-solid-2 rounded-lg transition-colors"
               >
                 Proceed with Truncation
               </button>

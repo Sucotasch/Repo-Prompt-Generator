@@ -403,10 +403,17 @@ async function startServer() {
           "X-Title": "AI Studio Applet",
           "User-Agent": "AI-Studio-Applet/1.0",
         },
+        signal: AbortSignal.timeout(20000),
       });
       const text = await response.text();
       res.status(response.status).send(text);
     } catch (error: any) {
+      if (error.name === "TimeoutError") {
+        res
+          .status(504)
+          .json({ error: "Request timed out after 20s. Check the Base URL and your network/proxy." });
+        return;
+      }
       res.status(500).json({ error: error.message });
     }
   });

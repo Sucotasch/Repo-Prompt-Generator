@@ -7,15 +7,33 @@ export async function fetchOpenAICompatibleModels(
 ): Promise<string[]> {
   try {
     if (isTauri()) {
-      const response = await tauriInvoke<any>("ai_network_request", {
-        method: "GET",
-        url: `${baseURL}/models`,
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: null,
-      });
+      // The Tauri command cannot be aborted from JS; race it against a hard
+      // timeout so the UI never waits forever on an unreachable provider.
+      // (The Rust client also has a 15s connect timeout as the first line
+      // of defense.)
+      const response = await Promise.race([
+        tauriInvoke<any>("ai_network_request", {
+          method: "GET",
+          url: `${baseURL}/models`,
+          headers: {
+            "Authorization": `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: null,
+          timeout_secs: 30,
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  "Request timed out after 40s. Check the Base URL and your network/proxy.",
+                ),
+              ),
+            40000,
+          ),
+        ),
+      ]);
       
       if (response.status < 200 || response.status >= 300) {
         let errorMessage = `HTTP ${response.status}`;
@@ -52,6 +70,7 @@ export async function fetchOpenAICompatibleModels(
           "Authorization": `Bearer ${apiKey}`,
           "Content-Type": "application/json",
         },
+        signal: AbortSignal.timeout(10000),
       });
 
       if (!response.ok) {
@@ -76,6 +95,7 @@ export async function fetchOpenAICompatibleModels(
         baseUrl: baseURL,
         apiKey: apiKey,
       }),
+      signal: AbortSignal.timeout(25000),
     });
 
     if (!response.ok) {

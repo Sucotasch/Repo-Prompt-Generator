@@ -1,17 +1,60 @@
 use isahc::prelude::*;
 use isahc::HttpClient;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
-use std::process::Command;
+use std::process::{Child, Command};
+use std::sync::Mutex;
 use std::time::Duration;
-use std::sync::atomic::{AtomicBool, Ordering};
-use sysinfo::{System, ProcessRefreshKind};
+use sysinfo::System;
 use tauri::{State, RunEvent, Manager};
 use tokio::sync::RwLock;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+
+const DEFAULT_MODEL_FLASH: &str = "gemini-3-flash-preview";
+const DEFAULT_MODEL_PRO: &str = "gemini-3.1-pro-preview";
+const STATIC_ALLOWED_HOSTS: [&str; 2] = [
+    "api.github.com",
+    "generativelanguage.googleapis.com",
+];
+
+/// UTF-8-safe "first 4 + last 4 chars" hint for logs; never panics on
+/// multi-byte characters (a naive byte slice does).
+fn key_hint(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    let head: String = chars.iter().take(4).collect();
+    let tail: String = if chars.len() > 8 {
+        chars[chars.len() - 4..].iter().collect()
+    } else {
+        String::new()
+    };
+    if tail.is_empty() {
+        head
+    } else {
+        format!("{head}...{tail}")
+    }
+}
+
+/// Extracts the lowercase host from a URL, prepending http:// when the
+/// scheme is missing (settings fields accept both forms).
+fn host_of(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let owned = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+    isahc::http::Uri::try_from(owned.as_str())
+        .ok()?
+        .host()
+        .map(|h| h.to_lowercase())
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,51 +67,65 @@ pub struct AppState {
     pub gemini_api_key: RwLock<String>,
     pub http_client: RwLock<HttpClient>,
     pub ollama_client: HttpClient,
-    pub we_started_ollama: AtomicBool,
+    pub ollama_child: Mutex<Option<Child>>,
+    pub allowed_hosts: RwLock<HashSet<String>>,
 }
 
-#[tauri::command]
-async fn set_app_config(state: State<'_, AppState>, gemini_key: Option<String>, proxy: Option<String>) -> Result<(), String> {
+// rename_all: JS passes snake_case keys (gemini_key) — see note on ai_network_request.
+#[tauri::command(rename_all = "snake_case")]
+async fn set_app_config(
+    state: State<'_, AppState>,
+    gemini_key: Option<String>,
+    proxy: Option<String>,
+    custom_base_url: Option<String>,
+    ollama_url: Option<String>,
+) -> Result<(), String> {
     if let Some(key) = gemini_key {
         *state.gemini_api_key.write().await = key.trim().to_string();
     }
 
+    // Provider hosts configurable from the UI join the ai_network_request
+    // allowlist (static GitHub/Gemini hosts are seeded at startup).
+    for url in [custom_base_url.as_deref(), ollama_url.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(host) = host_of(url) {
+            state.allowed_hosts.write().await.insert(host);
+        }
+    }
+
     let proxy_url = proxy.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
-    
-    let client = if let Some(url) = proxy_url {
-        let proxy_uri = if !url.starts_with("http") {
-            format!("http://{}", url)
-        } else {
-            url.to_string()
-        };
-        
-        let old_https = std::env::var("HTTPS_PROXY").ok();
-        let old_http = std::env::var("HTTP_PROXY").ok();
-        
-        std::env::set_var("HTTPS_PROXY", &proxy_uri);
-        std::env::set_var("HTTP_PROXY", &proxy_uri);
-        
-        let c = isahc::HttpClient::builder()
-            .timeout(std::time::Duration::from_secs(3600))
-            .build()
-            .map_err(|e| format!("Failed to create proxy client: {}", e))?;
-            
-        if let Some(old) = old_https {
-            std::env::set_var("HTTPS_PROXY", old);
-        } else {
-            std::env::remove_var("HTTPS_PROXY");
+
+    // Build the client with an EXPLICIT proxy config. The previous
+    // implementation set HTTPS_PROXY env vars around the client build and
+    // restored them — but libcurl resolves the proxy at request time, after
+    // the vars were already restored, so the setting never actually applied.
+    // proxy(None) also explicitly disables env-var proxy detection, making an
+    // empty field mean "direct, guaranteed".
+    let mut builder = isahc::HttpClient::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(3600));
+
+    let client = match proxy_url {
+        Some(url) => {
+            let proxy_uri = if !url.starts_with("http") {
+                format!("http://{}", url)
+            } else {
+                url.to_string()
+            };
+            let uri: isahc::http::Uri = proxy_uri
+                .parse()
+                .map_err(|e| format!("Invalid proxy address '{}': {}", proxy_uri, e))?;
+            builder = builder.proxy(Some(uri));
+            builder
+                .build()
+                .map_err(|e| format!("Failed to create proxy client: {}", e))?
         }
-        if let Some(old) = old_http {
-            std::env::set_var("HTTP_PROXY", old);
-        } else {
-            std::env::remove_var("HTTP_PROXY");
-        }
-        c
-    } else {
-        isahc::HttpClient::builder()
-            .timeout(std::time::Duration::from_secs(3600))
+        None => builder
+            .proxy(None)
             .build()
-            .map_err(|e| format!("Failed to create client: {}", e))?
+            .map_err(|e| format!("Failed to create client: {}", e))?,
     };
 
     *state.http_client.write().await = client;
@@ -83,9 +140,9 @@ async fn call_gemini_secure(state: State<'_, AppState>, prompt: String, model: O
         return Err("Gemini API key is missing. Please enter it in the settings or set the GEMINI_API_KEY environment variable.".to_string());
     }
 
-    println!("[Gemini] Using key: {}... (len: {})", &key[..std::cmp::min(4, key.len())], key.len());
+    println!("[Gemini] key present (len: {})", key.len());
 
-    let model_name = model.unwrap_or_else(|| "gemini-3-flash-preview".to_string());
+    let model_name = model.unwrap_or_else(|| DEFAULT_MODEL_FLASH.to_string());
     let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model_name);
 
     let body = serde_json::json!({
@@ -124,7 +181,7 @@ async fn call_gemini_advanced(state: State<'_, AppState>, contents: serde_json::
         return Err("Gemini API key is missing. Please enter it in the settings or set the GEMINI_API_KEY environment variable.".to_string());
     }
 
-    let model_name = model.unwrap_or_else(|| "gemini-3.1-pro-preview".to_string());
+    let model_name = model.unwrap_or_else(|| DEFAULT_MODEL_PRO.to_string());
     let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model_name);
 
     let mut body_map = serde_json::Map::new();
@@ -145,7 +202,7 @@ async fn call_gemini_advanced(state: State<'_, AppState>, contents: serde_json::
     let client = state.http_client.read().await.clone();
     let mut response = client.send_async(request).await.map_err(|e| e.to_string())?;
 
-    let response_body = response.text_async().await.map_err(|e| e.to_string())?;
+    let response_body = response.text().await.map_err(|e| e.to_string())?;
 
     if !response.status().is_success() {
         return Err(format!("Gemini API error: {} - {}", response.status(), response_body));
@@ -153,51 +210,6 @@ async fn call_gemini_advanced(state: State<'_, AppState>, contents: serde_json::
 
     let json: serde_json::Value = serde_json::from_str(&response_body).map_err(|e| e.to_string())?;
     Ok(json)
-}
-
-#[tauri::command]
-async fn scan_local_repository(path: String) -> Result<Vec<FileEntry>, String> {
-    use tokio::task::JoinSet;
-    let mut files = Vec::new();
-    let mut set = JoinSet::new();
-
-    let walker = walkdir::WalkDir::new(path)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            let is_hidden = name.starts_with(".git") || name == ".venv" || name == ".idea" || name == ".vscode";
-            let is_heavy = name == "node_modules" || name == "target" || name == "venv" || name == "build" || name == "__pycache__";
-            !is_hidden && !is_heavy
-        });
-
-    for entry in walker.filter_map(|e| e.ok()) {
-        if entry.file_type().is_file() {
-            if let Ok(metadata) = entry.metadata() {
-                if metadata.len() > 1_000_000 {
-                    continue; // Skip files > 1MB
-                }
-            }
-            
-            let file_path = entry.path().to_path_buf();
-            set.spawn_blocking(move || {
-                match fs::read_to_string(&file_path) {
-                    Ok(content) => Some(FileEntry {
-                        path: file_path.display().to_string(),
-                        content,
-                    }),
-                    Err(_) => None,
-                }
-            });
-        }
-    }
-
-    while let Some(result) = set.join_next().await {
-        if let Ok(Some(file_entry)) = result {
-            files.push(file_entry);
-        }
-    }
-
-    Ok(files)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -243,6 +255,7 @@ async fn fetch_github_repo(
     let mut builder = isahc::Request::builder()
         .method("GET")
         .uri(&info_url)
+        .timeout(Duration::from_secs(30))
         .header("Accept", "application/vnd.github.v3+json")
         .header("User-Agent", "Tauri/Prompt-Generator");
 
@@ -270,6 +283,7 @@ async fn fetch_github_repo(
     let mut tree_builder = isahc::Request::builder()
         .method("GET")
         .uri(&tree_url)
+        .timeout(Duration::from_secs(30))
         .header("Accept", "application/vnd.github.v3+json")
         .header("User-Agent", "Tauri/Prompt-Generator");
 
@@ -278,6 +292,17 @@ async fn fetch_github_repo(
     }
 
     let mut tree_res = client.send_async(tree_builder.body("".to_string()).unwrap()).await.map_err(|e| e.to_string())?;
+    if !tree_res.status().is_success() {
+        let status = tree_res.status();
+        let body = tree_res.text().await.unwrap_or_default();
+        let msg = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|j| j["message"].as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        return Err(format!(
+            "GitHub API error {status} fetching the file tree: {msg} (rate limit? unauthenticated GitHub allows 60 requests/hour — add a token)",
+        ));
+    }
     let tree_text = tree_res.text().await.map_err(|e| e.to_string())?;
     let tree_json: serde_json::Value = serde_json::from_str(&tree_text).map_err(|e| e.to_string())?;
     let mut tree_paths: Vec<String> = tree_json["tree"]
@@ -296,6 +321,7 @@ async fn fetch_github_repo(
     join_set.spawn(async move {
         let mut b = isahc::Request::builder()
             .uri(&readme_url)
+            .timeout(Duration::from_secs(30))
             .header("Accept", "application/vnd.github.v3+json")
             .header("User-Agent", "Tauri/Prompt-Generator");
         if !token_c.is_empty() { b = b.header("Authorization", format!("token {}", *token_c)); }
@@ -327,6 +353,7 @@ async fn fetch_github_repo(
             join_set.spawn(async move {
                 let mut b = isahc::Request::builder()
                     .uri(&file_url)
+                    .timeout(Duration::from_secs(30))
                     .header("Accept", "application/vnd.github.v3+json")
                     .header("User-Agent", "Tauri/Prompt-Generator");
                 if !token_c.is_empty() { b = b.header("Authorization", format!("token {}", *token_c)); }
@@ -392,6 +419,7 @@ async fn fetch_github_repo(
         source_join_set.spawn(async move {
             let mut b = isahc::Request::builder()
                 .uri(&file_url)
+                .timeout(Duration::from_secs(30))
                 .header("Accept", "application/vnd.github.v3+json")
                 .header("User-Agent", "Tauri/Prompt-Generator");
             if !token_c.is_empty() { b = b.header("Authorization", format!("token {}", *token_c)); }
@@ -456,8 +484,8 @@ async fn start_ollama(state: State<'_, AppState>) -> Result<String, String> {
         .spawn();
 
     match child {
-        Ok(_) => {
-            state.we_started_ollama.store(true, Ordering::SeqCst);
+        Ok(child) => {
+            *state.ollama_child.lock().unwrap() = Some(child);
             Ok("Ollama started successfully".to_string())
         }
         Err(e) => Err(format!("Failed to start Ollama: {}", e)),
@@ -474,34 +502,23 @@ async fn save_text_file(path: String, content: String) -> Result<String, String>
 
 #[tauri::command]
 async fn stop_ollama(state: State<'_, AppState>) -> Result<String, String> {
-    let we_started_it = state.we_started_ollama.swap(false, Ordering::SeqCst);
-
-    if we_started_it {
-        let mut s = System::new();
-        s.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, ProcessRefreshKind::everything());
-        let mut killed = 0;
-        
-        for process in s.processes_by_exact_name(OsStr::new("ollama.exe")) {
-            process.kill();
-            killed += 1;
-        }
-        for process in s.processes_by_exact_name(OsStr::new("ollama")) {
-            process.kill();
-            killed += 1;
-        }
-        
-        if killed > 0 {
-            return Ok(format!("Stopped {} Ollama processes", killed));
-        }
-        Ok("Process not found. It may have exited.".to_string())
-    } else {
-        Ok("No Ollama process was started by this application.".to_string())
+    // Kill only the instance this application spawned — never a user-started one.
+    let child = state.ollama_child.lock().unwrap().take();
+    match child {
+        Some(mut child) => match child.kill() {
+            Ok(_) => {
+                let _ = child.wait();
+                Ok("Stopped the Ollama instance started by this application.".to_string())
+            }
+            Err(e) => Err(format!("Failed to stop Ollama: {}", e)),
+        },
+        None => Ok("No Ollama process was started by this application.".to_string()),
     }
 }
 
 #[tauri::command]
 async fn ollama_check_connection(state: State<'_, AppState>, url: String) -> Result<bool, String> {
-    let url = url.replace("localhost", "127.0.0.1");
+    let url = url.replacen("://localhost", "://127.0.0.1", 1);
     let endpoint = format!("{}/api/tags", url);
     let res = state.ollama_client.get_async(&endpoint).await;
     match res {
@@ -515,7 +532,7 @@ async fn ollama_check_connection(state: State<'_, AppState>, url: String) -> Res
 
 #[tauri::command]
 async fn ollama_fetch_models(state: State<'_, AppState>, url: String) -> Result<Vec<String>, String> {
-    let url = url.replace("localhost", "127.0.0.1");
+    let url = url.replacen("://localhost", "://127.0.0.1", 1);
     let endpoint = format!("{}/api/tags", url);
     let mut res = state.ollama_client.get_async(&endpoint).await.map_err(|e| {
         eprintln!("Ollama fetch models error for {}: {}", endpoint, e);
@@ -523,8 +540,7 @@ async fn ollama_fetch_models(state: State<'_, AppState>, url: String) -> Result<
     })?;
     
     if !res.status().is_success() {
-        eprintln!("Ollama fetch models failed with status: {}", res.status());
-        return Ok(Vec::new());
+        return Err(format!("Ollama models: HTTP {}", res.status()));
     }
 
     let data_text = res.text().await.map_err(|e| e.to_string())?;
@@ -552,7 +568,7 @@ async fn ollama_generate(
     temperature: Option<f32>,
     format: Option<String>,
 ) -> Result<String, String> {
-    let url = url.replace("localhost", "127.0.0.1");
+    let url = url.replacen("://localhost", "://127.0.0.1", 1);
     let endpoint = format!("{}/api/generate", url);
     
     let mut options = serde_json::Map::new();
@@ -602,7 +618,7 @@ async fn ollama_embed(
     model: String,
     prompt: String,
 ) -> Result<Vec<f32>, String> {
-    let url = url.replace("localhost", "127.0.0.1");
+    let url = url.replacen("://localhost", "://127.0.0.1", 1);
     let endpoint = format!("{}/api/embeddings", url);
     
     let body = serde_json::json!({
@@ -642,18 +658,47 @@ async fn ollama_embed(
     Ok(embedding)
 }
 
-#[tauri::command]
+// rename_all: Tauri v2 expects camelCase JS keys by default; the JS side of
+// this codebase passes snake_case (timeout_secs) — without this attribute the
+// argument is silently dropped and the per-request timeout never applies.
+#[tauri::command(rename_all = "snake_case")]
 async fn ai_network_request(
     state: State<'_, AppState>,
     method: String,
     url: String,
     headers: std::collections::HashMap<String, String>,
-    body: Option<String>
+    body: Option<String>,
+    timeout_secs: Option<u64>,
 ) -> Result<serde_json::Value, String> {
-    let url = url.replace("localhost", "127.0.0.1");
+    let url = url.replacen("://localhost", "://127.0.0.1", 1);
+
+    // Host allowlist: the webview may only reach GitHub, Gemini, and hosts
+    // configured in settings (custom provider Base URL / local engine API URL).
+    let host = isahc::http::Uri::try_from(url.as_str())
+        .ok()
+        .and_then(|u| u.host().map(|h| h.to_lowercase()));
+    let mut is_allowed = matches!(
+        host.as_deref(),
+        Some("127.0.0.1") | Some("localhost") | Some("::1")
+    );
+    if !is_allowed {
+        if let Some(h) = host.as_deref() {
+            is_allowed = state.allowed_hosts.read().await.contains(h);
+        }
+    }
+    if !is_allowed {
+        return Err(format!(
+            "Host not allowed by the desktop security policy: {url}. Configure it via the provider Base URL / API URL settings."
+        ));
+    }
+
+    // Per-request total timeout: short for metadata calls (/models), the
+    // client default (1h) for long LLM generations.
+    let timeout_secs = timeout_secs.unwrap_or(3600);
     let mut builder = isahc::Request::builder()
         .method(method.as_str())
-        .uri(&url);
+        .uri(&url)
+        .timeout(Duration::from_secs(timeout_secs));
 
     for (k, v) in headers {
         builder = builder.header(k, v);
@@ -666,7 +711,16 @@ async fn ai_network_request(
     };
 
     let client = state.http_client.read().await.clone();
-    let mut res = client.send_async(request).await.map_err(|e| e.to_string())?;
+    let mut res = client.send_async(request).await.map_err(|e| {
+        if e.is_timeout() {
+            format!(
+                "Request timed out after {}s. The host did not respond — if you use a proxy (Global Proxy Address), check that it can reach this endpoint.",
+                timeout_secs
+            )
+        } else {
+            e.to_string()
+        }
+    })?;
     
     let mut res_headers = serde_json::Map::new();
     for (name, value) in res.headers() {
@@ -688,17 +742,17 @@ async fn ai_network_request(
 async fn get_gemini_key_source(state: State<'_, AppState>) -> Result<String, String> {
     let app_key = state.gemini_api_key.read().await.clone();
     if !app_key.is_empty() {
-        return Ok(format!("app_state:{}...{}", &app_key[..std::cmp::min(4, app_key.len())], &app_key[app_key.len().saturating_sub(4)..]));
+        return Ok(format!("app_state:{}", key_hint(&app_key)));
     }
 
     let env_key = std::env::var("GEMINI_API_KEY")
         .or_else(|_| std::env::var("VITE_GEMINI_API_KEY"))
         .unwrap_or_default();
-    
+
     if env_key.is_empty() || env_key == "YOUR_GEMINI_API_KEY_HERE" {
         Ok("none".to_string())
     } else {
-        Ok(format!("env:{}...{}", &env_key[..std::cmp::min(4, env_key.len())], &env_key[env_key.len().saturating_sub(4)..]))
+        Ok(format!("env:{}", key_hint(&env_key)))
     }
 }
 
@@ -711,30 +765,39 @@ pub fn run() {
         .trim()
         .to_string();
 
-    println!("[Init] Gemini API key from env: {} (len: {})",
-        if gemini_api_key.is_empty() { "NOT FOUND" } else { &gemini_api_key[..std::cmp::min(4, gemini_api_key.len())] },
+    println!(
+        "[Init] Gemini API key from env: {} (len: {})",
+        if gemini_api_key.is_empty() { "NOT FOUND" } else { "present" },
         gemini_api_key.len()
     );
 
+    let allowed_hosts: HashSet<String> = STATIC_ALLOWED_HOSTS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
     let client = HttpClient::builder()
+        .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(120))
         .build()
         .expect("Failed to create HTTP client");
 
     let ollama_client = HttpClient::builder()
+        .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(3600))
         .build()
         .expect("Failed to create Ollama client");
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        // Persist window size/position/maximized state across restarts
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(AppState {
             gemini_api_key: RwLock::new(gemini_api_key),
             http_client: RwLock::new(client),
             ollama_client,
-            we_started_ollama: AtomicBool::new(false),
+            ollama_child: Mutex::new(None),
+            allowed_hosts: RwLock::new(allowed_hosts),
         })
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -749,7 +812,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             call_gemini_secure,
             call_gemini_advanced,
-            scan_local_repository,
             fetch_github_repo,
             is_ollama_running,
             start_ollama,
@@ -767,19 +829,15 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(move |app_handle, event| {
             if let RunEvent::Exit = event {
-                let we_started_it = {
+                // Stop only the Ollama instance this application spawned.
+                let child = {
                     let state = app_handle.state::<AppState>();
-                    state.we_started_ollama.swap(false, Ordering::SeqCst)
+                    let mut guard = state.ollama_child.lock().unwrap();
+                    guard.take()
                 };
-                if we_started_it {
-                    let mut s = System::new();
-                    s.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, ProcessRefreshKind::everything());
-                    for process in s.processes_by_exact_name(OsStr::new("ollama.exe")) {
-                        let _ = process.kill();
-                    }
-                    for process in s.processes_by_exact_name(OsStr::new("ollama")) {
-                        let _ = process.kill();
-                    }
+                if let Some(mut child) = child {
+                    let _ = child.kill();
+                    let _ = child.wait();
                 }
             }
         });

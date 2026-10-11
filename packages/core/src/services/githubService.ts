@@ -125,6 +125,7 @@ async function fetchFilesFromRepo(
             url,
             headers,
             body: null,
+            timeout_secs: 30,
           });
 
           if (response && response.content) {
