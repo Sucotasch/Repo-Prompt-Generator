@@ -22,6 +22,7 @@ export async function rewriteQuery(
     customModel?: string;
     geminiApiKey?: string;
     proxyAddress?: string;
+    geminiModel?: string;
   },
 ): Promise<{
   optimizedQuery: string;
@@ -45,6 +46,7 @@ export async function rewriteQuery(
       query,
       options?.geminiApiKey,
       options?.proxyAddress,
+      options?.geminiModel,
     );
   }
 }
@@ -66,6 +68,7 @@ export async function generatePrompt(
     customModel?: string;
     geminiApiKey?: string;
     proxyAddress?: string;
+    geminiModel?: string;
     fileTruncationLimit?: number;
     isDeepAnalysis?: boolean;
     onStatusUpdate?: (status: string) => void;
@@ -119,7 +122,8 @@ export async function generatePrompt(
       options?.isDeepAnalysis,
       options?.onStatusUpdate,
       options?.localFiles,
-      options?.referenceLocalFiles
+      options?.referenceLocalFiles,
+      options?.geminiModel
     );
   }
 }

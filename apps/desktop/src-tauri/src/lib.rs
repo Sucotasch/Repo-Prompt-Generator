@@ -136,6 +136,58 @@ async fn set_app_config(
     Ok(())
 }
 
+/// One POST generateContent attempt; returns (status, body text).
+async fn gemini_generate_once(
+    client: &HttpClient,
+    key: &str,
+    model: &str,
+    body: &serde_json::Value,
+) -> Result<(u16, String), String> {
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    );
+    let request = isahc::Request::builder()
+        .method("POST")
+        .uri(&url)
+        .timeout(Duration::from_secs(600))
+        .header("Content-Type", "application/json")
+        .header("x-goog-api-key", key)
+        .body(body.to_string())
+        .map_err(|e| e.to_string())?;
+    let mut response = client.send_async(request).await.map_err(|e| e.to_string())?;
+    let status = response.status().as_u16();
+    let text = response.text().await.unwrap_or_default();
+    Ok((status, text))
+}
+
+/// POST with retries on transient server errors (500/502/503/504) so a fresh
+/// model's "high demand" spike does not waste the whole generation run.
+/// 429 is a definitive quota state and is NOT retried.
+async fn gemini_generate_with_retry(
+    client: &HttpClient,
+    key: &str,
+    model: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let mut last_err = String::new();
+    for attempt in 0..3u32 {
+        let (status, text) = gemini_generate_once(client, key, model, body).await?;
+        if (200..300).contains(&status) {
+            return serde_json::from_str(&text)
+                .map_err(|e| format!("Gemini response parse error: {}", e));
+        }
+        let snippet: String = text.chars().take(300).collect();
+        last_err = format!("Gemini API error {status}: {snippet}");
+        if [500u16, 502, 503, 504].contains(&status) && attempt < 2 {
+            let wait = 2 * (attempt as u64 + 1) * (attempt as u64 + 1); // 2s, 8s
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            continue;
+        }
+        return Err(last_err);
+    }
+    Err(last_err)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 async fn call_gemini_secure(state: State<'_, AppState>, prompt: String, model: Option<String>) -> Result<String, String> {
     let key = state.gemini_api_key.read().await.clone();
@@ -147,34 +199,13 @@ async fn call_gemini_secure(state: State<'_, AppState>, prompt: String, model: O
     println!("[Gemini] key present (len: {})", key.len());
 
     let model_name = model.unwrap_or_else(|| GEMINI_QUERY_MODEL.to_string());
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model_name);
-
     let body = serde_json::json!({
         "contents": [{ "parts": [{ "text": prompt }] }]
     });
 
-    let request = isahc::Request::builder()
-        .method("POST")
-        .uri(url)
-        .header("Content-Type", "application/json")
-        .header("x-goog-api-key", &key)
-        .body(serde_json::to_string(&body).unwrap())
-        .map_err(|e| e.to_string())?;
-
     let client = state.http_client.read().await.clone();
-    let mut response = client
-        .send_async(request)
-        .await
-        .map_err(|e| format!("Gemini API connection error: {}", e))?;
-
-    let status = response.status();
-    let res_text = response.text().await.unwrap_or_else(|_| "Could not read response body".to_string());
-
-    if !status.is_success() {
-        return Err(format!("Gemini API error ({}): {}", status, res_text));
-    }
-
-    Ok(res_text)
+    let json = gemini_generate_with_retry(&client, &key, &model_name, &body).await?;
+    Ok(json.to_string())
 }
 
 #[tauri::command]
@@ -186,7 +217,6 @@ async fn call_gemini_advanced(state: State<'_, AppState>, contents: serde_json::
     }
 
     let model_name = model.unwrap_or_else(|| GEMINI_FINAL_MODEL.to_string());
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model_name);
 
     let mut body_map = serde_json::Map::new();
     body_map.insert("contents".to_string(), contents);
@@ -195,26 +225,63 @@ async fn call_gemini_advanced(state: State<'_, AppState>, contents: serde_json::
     }
     let body = serde_json::Value::Object(body_map);
 
-    let request = isahc::Request::builder()
-        .method("POST")
-        .uri(url)
-        .header("Content-Type", "application/json")
-        .header("x-goog-api-key", &key)
-        .body(body.to_string())
-        .map_err(|e| e.to_string())?;
-
     let client = state.http_client.read().await.clone();
-    let mut response = client.send_async(request).await.map_err(|e| e.to_string())?;
-
-    let response_body = response.text().await.map_err(|e| e.to_string())?;
-
-    if !response.status().is_success() {
-        return Err(format!("Gemini API error: {} - {}", response.status(), response_body));
-    }
-
-    let json: serde_json::Value = serde_json::from_str(&response_body).map_err(|e| e.to_string())?;
+    let json = gemini_generate_with_retry(&client, &key, &model_name, &body).await?;
     Ok(json)
 }
+
+// Model picker support: list generateContent-capable text models for the key.
+#[tauri::command]
+async fn gemini_list_models(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let key = state.gemini_api_key.read().await.clone();
+    if key.is_empty() {
+        return Err("Gemini API key is not set (field or GEMINI_API_KEY env).".to_string());
+    }
+    let request = isahc::Request::builder()
+        .method("GET")
+        .uri("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000")
+        .timeout(Duration::from_secs(15))
+        .header("x-goog-api-key", &key)
+        .body(String::new())
+        .map_err(|e| e.to_string())?;
+    let client = state.http_client.read().await.clone();
+    let mut res = client.send_async(request).await.map_err(|e| e.to_string())?;
+    let status = res.status().as_u16();
+    let text = res.text().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        let snippet: String = text.chars().take(200).collect();
+        return Err(format!("Gemini API error {status}: {snippet}"));
+    }
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let mut names: Vec<String> = json["models"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    let name = m["name"].as_str()?;
+                    let methods = m["supportedGenerationMethods"].as_array()?;
+                    if !methods.iter().any(|x| x.as_str() == Some("generateContent")) {
+                        return None;
+                    }
+                    let id = name.strip_prefix("models/")?;
+                    if [
+                        "tts", "image", "live", "transcribe", "embedding",
+                        "native-audio", "veo", "computer-use", "customtools",
+                    ]
+                    .iter()
+                    .any(|k| id.contains(k))
+                    {
+                        return None;
+                    }
+                    Some(id.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    Ok(names)
+}
+
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -816,6 +883,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             call_gemini_secure,
             call_gemini_advanced,
+            gemini_list_models,
             fetch_github_repo,
             is_ollama_running,
             start_ollama,

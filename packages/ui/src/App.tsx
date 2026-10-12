@@ -241,9 +241,50 @@ export default function App() {
   const [geminiApiKey, setGeminiApiKey] = useState(
     initialSettings.geminiApiKey || "",
   );
+  const [geminiModel, setGeminiModel] = useState(
+    initialSettings.geminiModel || "",
+  );
+  const [geminiModels, setGeminiModels] = useState<string[]>([]);
   const [proxyAddress, setProxyAddress] = useState(
     initialSettings.proxyAddress || "",
   );
+
+  // Model picker: list generateContent-capable models for the active key
+  const fetchGeminiModels = async () => {
+    try {
+      if (isTauri()) {
+        const models = await tauriInvoke<string[]>("gemini_list_models", {});
+        setGeminiModels(models);
+      } else if (geminiApiKey) {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000&key=${encodeURIComponent(geminiApiKey)}`,
+        );
+        const data: any = await res.json();
+        const models = (data.models || [])
+          .filter((m: any) =>
+            (m.supportedGenerationMethods || []).includes("generateContent"),
+          )
+          .map((m: any) => String(m.name || "").replace("models/", ""))
+          .filter(
+            (id: string) =>
+              ![
+                "tts", "image", "live", "transcribe", "embedding",
+                "native-audio", "veo", "computer-use", "customtools",
+              ].some((k) => id.includes(k)),
+          )
+          .sort();
+        setGeminiModels(models);
+      }
+    } catch (e) {
+      // The list is a convenience; generation falls back to the default model
+    }
+  };
+
+  useEffect(() => {
+    if (aiProvider !== "gemini") return;
+    fetchGeminiModels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiProvider, geminiApiKey]);
 
   const [showAdvancedRag, setShowAdvancedRag] = useState(false);
 
@@ -439,6 +480,7 @@ export default function App() {
       customApiKey,
       customModel,
       geminiApiKey,
+      geminiModel,
       proxyAddress,
     };
     localStorage.setItem("gemini_app_settings", JSON.stringify(settings));
@@ -470,6 +512,7 @@ export default function App() {
     customModel,
     ragSearchStrategy,
     geminiApiKey,
+    geminiModel,
     proxyAddress,
   ]);
 
@@ -1135,6 +1178,7 @@ pause`;
                     customModel,
                     geminiApiKey,
                     proxyAddress,
+                    geminiModel,
                   });
                 }
 
@@ -1405,6 +1449,7 @@ pause`;
             customModel,
             fileTruncationLimit,
             geminiApiKey,
+            geminiModel,
             proxyAddress,
             isDeepAnalysis,
             onStatusUpdate: setStatus,
@@ -2267,6 +2312,47 @@ pause`;
                     Active key: {geminiKeySource}
                   </p>
                 )}
+              </div>
+            )}
+
+            {aiProvider === "gemini" && (
+              <div>
+                <label
+                  htmlFor="geminiModel"
+                  className="block text-[11px] font-medium text-soft mb-1"
+                >
+                  Model
+                </label>
+                {geminiModels.length > 0 ? (
+                  <select
+                    id="geminiModel"
+                    value={geminiModel || "gemini-3.8-flash"}
+                    onChange={(e) => setGeminiModel(e.target.value)}
+                    className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs bg-raised focus:ring-brand-mid focus:border-brand-mid"
+                  >
+                    {geminiModel && !geminiModels.includes(geminiModel) && (
+                      <option value={geminiModel}>{geminiModel}</option>
+                    )}
+                    {geminiModels.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    id="geminiModel"
+                    value={geminiModel}
+                    onChange={(e) => setGeminiModel(e.target.value)}
+                    placeholder="gemini-3.8-flash (default)"
+                    className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg text-xs"
+                  />
+                )}
+                <p className="mt-1 text-[10px] text-faint leading-tight">
+                  The list loads from your API key. Transient server errors
+                  (5xx) are retried automatically; quota errors (429) are not.
+                </p>
               </div>
             )}
 

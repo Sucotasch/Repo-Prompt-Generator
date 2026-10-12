@@ -95,10 +95,39 @@ export function buildPromptText(
   return prompt;
 }
 
+// Default Gemini model, kept in sync with GEMINI_QUERY_MODEL/GEMINI_FINAL_MODEL
+// in apps/desktop/src-tauri/src/lib.rs. Verified against the free tier
+// 2026-10-12 (gemini-3.1-pro-preview has zero quota there).
+export const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
+
+// Retry transient server errors (500/502/503/504) so a fresh model's
+// "high demand" spike does not waste the whole generation run. 429 is a
+// definitive quota state and is not retried.
+async function withTransientRetry<T>(fn: () => Promise<T>): Promise<T> {
+  let lastErr: any;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await fn();
+    } catch (e: any) {
+      lastErr = e;
+      const status = e?.status ?? e?.error?.code;
+      if ([500, 502, 503, 504].includes(status) && attempt < 2) {
+        await new Promise((r) =>
+          setTimeout(r, 2000 * (attempt + 1) * (attempt + 1)),
+        );
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
+}
+
 export async function rewriteQueryWithGemini(
   query: string,
   geminiApiKey?: string,
   proxyAddress?: string,
+  geminiModel?: string,
 ): Promise<{ optimizedQuery: string; intent: string }> {
   if (!query || query.trim() === "")
     return { optimizedQuery: query, intent: "GENERAL" };
@@ -126,7 +155,7 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
     if (isTauri()) {
       const responseText = await tauriInvoke<string>("call_gemini_secure", {
         prompt,
-        model: "gemini-3.8-flash",
+        model: geminiModel || DEFAULT_GEMINI_MODEL,
       });
       
       const cleanText = responseText.trim();
@@ -144,13 +173,15 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
     const ai = new GoogleGenAI({
       apiKey: geminiApiKey || (typeof process !== 'undefined' ? process.env.GEMINI_API_KEY : undefined) || import.meta.env.VITE_GEMINI_API_KEY || "",
     });
-    const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-      },
-    });
+    const response = await withTransientRetry(() =>
+      ai.models.generateContent({
+        model: geminiModel || DEFAULT_GEMINI_MODEL,
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+        },
+      }),
+    );
 
     const text = response.text || "{}";
     const cleanText = text.trim();
@@ -185,7 +216,8 @@ export async function generateSystemPrompt(
   isDeepAnalysis: boolean = false,
   onStatusUpdate?: (status: string) => void,
   localFiles?: FileList | null,
-  referenceLocalFiles?: FileList | null
+  referenceLocalFiles?: FileList | null,
+  geminiModel?: string
 ): Promise<{ text: string; modelVersion: string; requestedFiles?: string[]; fetchedFilesCount?: number }> {
   const prompt = buildPromptText(
     repoData,
@@ -198,7 +230,7 @@ export async function generateSystemPrompt(
   );
 
   let finalPrompt = "Failed to generate prompt.";
-  let modelVersion = "gemini-3.8-flash";
+  let modelVersion = geminiModel || DEFAULT_GEMINI_MODEL;
   let requestedFilesList: string[] = [];
   let fetchedFilesCount: number | undefined = undefined;
 
@@ -327,13 +359,15 @@ export async function generateSystemPrompt(
       });
 
       if (onStatusUpdate) onStatusUpdate("Analyzing project structure...");
-      let response = await ai.models.generateContent({
-        model: modelVersion,
-        contents,
-        config: {
-          tools,
-        },
-      });
+      let response = await withTransientRetry(() =>
+        ai.models.generateContent({
+          model: modelVersion,
+          contents,
+          config: {
+            tools,
+          },
+        }),
+      );
 
       if (response.functionCalls && response.functionCalls.length > 0) {
         const call = response.functionCalls[0];
@@ -384,13 +418,15 @@ export async function generateSystemPrompt(
             ]
           });
 
-          response = await ai.models.generateContent({
-            model: modelVersion,
-            contents,
-            config: {
-              tools,
-            },
-          });
+          response = await withTransientRetry(() =>
+            ai.models.generateContent({
+              model: modelVersion,
+              contents,
+              config: {
+                tools,
+              },
+            }),
+          );
         }
       }
 

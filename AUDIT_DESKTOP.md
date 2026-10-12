@@ -3,7 +3,7 @@
 **Дата:** 2026-10-12 · **Скоуп:** `apps/desktop/src-tauri` (Rust, конфиги, capabilities) + десктоп-специфичные пути общих пакетов
 **Метод:** полное чтение lib.rs (803 строки) и всех файлов скоупа; инструментальная проверка контрактов команд `.unlazy/audit/contract-check.mjs` (15 команд / 15 зарегистрировано / 17 call-sites, негативный контроль срабатывает); ручная трассировка Cancel-флоу и прокси.
 
-**Итог: findings_total=25 — все закрыты** (19 из кодового аудита + 4 + 2 из раундов ручных тестов, Errors.txt). Главный системный вывод: оба класса ошибок, которые мы ловили вручную (молча съеденные аргументы команд и неработающий прокси), теперь закрыты и покрыты проверяемым инструментом.
+**Итог: findings_total=27 — все закрыты** (19 из кодового аудита + 4 + 2 + 2 из раундов ручных тестов и пользовательских запросов). Главный системный вывод: оба класса ошибок, которые мы ловили вручную (молча съеденные аргументы команд и неработающий прокси), теперь закрыты и покрыты проверяемым инструментом.
 
 **Прочитано полностью (скоуп аудита):** `apps/desktop/src-tauri/src/lib.rs`, `apps/desktop/src-tauri/tauri.conf.json`, `apps/desktop/src-tauri/Cargo.toml`, `apps/desktop/src-tauri/capabilities/default.json`, `apps/desktop/package.json`, `apps/desktop/src/main.tsx`, `packages/core/src/utils/tauriAdapter.ts`, `packages/core/src/utils/tauriFetch.ts`, `packages/core/src/utils/fileSystem.ts`, `packages/core/src/services/openaiCompatibleService.ts`, `packages/core/src/services/ollamaService.ts`, `packages/core/src/services/geminiService.ts`, `packages/core/src/services/ragService.ts`, `packages/ui/src/App.tsx` (десктоп-ветки).
 
@@ -150,3 +150,12 @@
 | F-26 | ИСПРАВЛЕНО | «Не выбран ни один файл» рядом с кнопкой выбора файлов — это СОБСТВЕННАЯ подпись нативного виджета Chromium внутри input, она не отражала состояние React (данные при этом передавались — успешная генерация «Target Repository: Local Folder» из того же теста это доказывает). Решение: нативный input спрятан (hidden), вместо него кнопка «Choose folder» + наша строка статуса «N files · <корень>» / «no folder selected» — состояние всегда честное (в т.ч. осознанное сбрасывание выбора после генерации на репозиториях >1000 файлов для освобождения памяти). |
 
 Верификация: tsc web/desktop чисто; cargo check чисто; MSI/NSIS пересобраны; smoke живого приложения — запуск, автотест Ollama, корректное закрытие.
+
+## Раунд 3 (2026-10-12, по запросу пользователя — оба исправлены)
+
+| ID | Статус | Находка и решение |
+|----|--------|-------------------|
+| F-27 | ИСПРАВЛЕНО | Хардкод модели Gemini. Решение: выбор модели в UI — в блоке Gemini (AI Provider) появился пикер, список подгружается из ListModels по активному ключу (desktop — новая команда `gemini_list_models` с фильтром generateContent-способных текстовых моделей; web — прямой fetch по ключу из поля); без списка — поле ввода с дефолтом. Выбор проходит сквозным параметром `geminiModel` через aiAdapter → generateSystemPrompt/rewriteQueryWithGemini → Rust-команды (model), сохраняется в настройках. Дефолт — gemini-3.8-flash (константы DEFAULT_GEMINI_MODEL в TS и GEMINI_QUERY_MODEL/GEMINI_FINAL_MODEL в Rust, синхронизированы комментарием). |
+| F-28 | ИСПРАВЛЕНО | Отсутствие retry при transient-ошибках заставляло перезапускать всю генерацию. Решение: автоматический retry (3 попытки, пауза 2с → 8с) на 500/502/503/504 — в Rust (gemini_generate_with_retry для call_gemini_secure и call_gemini_advanced) и в JS для web-ветки (@google/genai обёрнут в withTransientRetry); 429 НЕ ретраится — это окончательная квота, а не перегрузка. Retry происходит внутри одного запроса — RAG/суммаризация не гоняются заново. |
+
+Верификация: tsc web/desktop чисто; cargo check чисто; contract-check INVENTORY OK (15 команд / 19 вызовов); MSI/NSIS пересобраны; smoke живого приложения прошёл.
