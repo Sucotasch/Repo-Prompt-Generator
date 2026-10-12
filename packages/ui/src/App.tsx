@@ -52,6 +52,7 @@ import {
   stopOllamaNative,
 } from "@repo-prompt-generator/core";
 import type { HistoryEntryMeta } from "@repo-prompt-generator/core";
+import { getVersion } from "@tauri-apps/api/app";
 
 interface SavedTemplate {
   id: string;
@@ -415,6 +416,14 @@ export default function App() {
     return () => clearInterval(iv);
   }, [loading]);
 
+  // Build version, shown in Desktop Settings so the running binary is
+  // always identifiable (the user launches target/release/app.exe directly)
+  const [appVersion, setAppVersion] = useState<string>("");
+  useEffect(() => {
+    if (!isTauri()) return;
+    getVersion().then(setAppVersion).catch(() => setAppVersion("?"));
+  }, []);
+
   // Which Gemini key the desktop actually uses (env var vs UI field)
   const [geminiKeySource, setGeminiKeySource] = useState<string>("");
   useEffect(() => {
@@ -697,10 +706,16 @@ export default function App() {
     });
   };
 
-  const autoGrow = (e: React.FormEvent<HTMLTextAreaElement>) => {
-    const el = e.currentTarget;
-    el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+  // High-frequency status updates (per-file summarize, per-chunk RAG) each
+  // cost a full-App render; coalescing them keeps UI-responsive typing
+  // while a generation runs. Instant statuses (start of a phase) pass through.
+  const statusThrottleRef = React.useRef(0);
+  const setStatusThrottled = (msg: string) => {
+    const now = Date.now();
+    if (now - statusThrottleRef.current > 250) {
+      statusThrottleRef.current = now;
+      setStatus(msg);
+    }
   };
 
   const handleTemplateChange = (mode: string) => {
@@ -1402,7 +1417,7 @@ pause`;
           const total = repoData.sourceFiles.length;
           for (let i = 0; i < total; i++) {
             const file = repoData.sourceFiles[i];
-            setStatus(`Summarizing ${i + 1}/${total}: ${file.path} (${localEngine === "ollama" ? "Ollama" : "Local Engine"})...`);
+            setStatusThrottled(`Summarizing ${i + 1}/${total}: ${file.path} (${localEngine === "ollama" ? "Ollama" : "Local Engine"})...`);
             const summary = await summarize(file.content);
             summarizedSourceFiles.push({ path: file.path, content: summary });
           }
@@ -1421,7 +1436,7 @@ pause`;
             const refTotal = referenceRepoData.sourceFiles.length;
             for (let i = 0; i < refTotal; i++) {
               const file = referenceRepoData.sourceFiles[i];
-              setStatus(`Summarizing reference ${i + 1}/${refTotal}: ${file.path}...`);
+              setStatusThrottled(`Summarizing reference ${i + 1}/${refTotal}: ${file.path}...`);
               const summary = await summarize(file.content);
               refSummarizedSourceFiles.push({
                 path: file.path,
@@ -1860,9 +1875,8 @@ pause`;
           <div className="px-3 pb-2">
             <DeferredTextarea
               rows={2}
-              onInput={autoGrow}
               placeholder="Enter your custom system instruction here. The repository context (Tree, README, Dependencies) will be automatically appended to your prompt."
-              className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg leading-5 bg-raised placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-brand-mid focus:border-brand-mid text-sm transition-shadow resize-none overflow-y-auto"
+              className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg leading-5 bg-raised placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-brand-mid focus:border-brand-mid text-sm resize-none overflow-y-auto [field-sizing:content] max-h-40"
               value={customInstruction}
               onCommit={setCustomInstruction}
             />
@@ -1964,13 +1978,12 @@ pause`;
             <DeferredTextarea
               id="additionalContext"
               rows={1}
-              onInput={autoGrow}
               placeholder={
                 templateMode === "integration"
                   ? "What do you want to integrate? (Leave empty to let AI discover the best architectural patterns to borrow from the Reference Repo)"
                   : "e.g., I'm planning to add GPU acceleration support for Nvidia RTX 4xxx series…"
               }
-              className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg leading-5 bg-raised placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-brand-mid focus:border-brand-mid text-sm transition-shadow resize-none overflow-y-auto"
+              className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg leading-5 bg-raised placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-brand-mid focus:border-brand-mid text-sm resize-none overflow-y-auto [field-sizing:content] max-h-40"
               value={additionalContext}
               onCommit={setAdditionalContext}
             />
@@ -3200,7 +3213,7 @@ pause`;
           {isTauri() && (
             <CollapsibleGroup
               title="Desktop Settings"
-              summary={proxyAddress ? "Proxy set" : "Direct connection"}
+              summary={`v${appVersion || "?"} · ${proxyAddress ? "Proxy set" : "Direct"}`}
               open={!!openGroups.desktop}
               onToggle={() => toggleGroup("desktop")}
             >
