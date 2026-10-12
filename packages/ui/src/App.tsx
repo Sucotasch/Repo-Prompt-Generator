@@ -60,11 +60,12 @@ interface SavedTemplate {
 }
 
 /**
- * Controlled-from-the-parent, instant-from-the-user textarea. Keystrokes
- * re-render only this tiny component — the whole-App re-render cost
- * (~34ms/keystroke, measured) is what made typing lag. The parent state
- * catches up on a 400ms debounce and on blur, so Generate always sees
- * the full text (blur fires synchronously before the click on a button).
+ * Controlled-from-the-parent, instant-from-the-user textarea. While the
+ * field is focused, typing re-renders ONLY this tiny component — the
+ * whole-App render (~34ms) must never interleave with keystrokes (it ate
+ * the first letters of fast-typed words). The parent state is committed
+ * on blur and on unmount; the echo of our own commit is recognized via
+ * `committed` and never overwrites newer local text.
  */
 function DeferredTextarea({
   id,
@@ -84,21 +85,34 @@ function DeferredTextarea({
   onInput?: (e: React.FormEvent<HTMLTextAreaElement>) => void;
 }) {
   const [local, setLocal] = useState(value);
-  const latest = useRef(local);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latest = useRef(value);
+  const committed = useRef(value);
 
+  // External resets (e.g. loading a saved template) win; the parent echoing
+  // back what we just committed must NOT clobber newer local keystrokes.
   useEffect(() => {
-    // External resets (e.g. loading a saved template) always win.
-    setLocal(value);
-    latest.current = value;
+    if (value !== committed.current) {
+      setLocal(value);
+      latest.current = value;
+    }
+    committed.current = value;
   }, [value]);
 
+  // Unmount safety (e.g. the template switcher hides this field).
   useEffect(
     () => () => {
-      if (timer.current) clearTimeout(timer.current);
+      if (latest.current !== committed.current) onCommit(latest.current);
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
+
+  const commit = () => {
+    if (latest.current !== committed.current) {
+      onCommit(latest.current);
+    }
+    committed.current = latest.current;
+  };
 
   return (
     <textarea
@@ -109,16 +123,10 @@ function DeferredTextarea({
       onInput={onInput}
       value={local}
       onChange={(e) => {
-        const v = e.target.value;
-        setLocal(v);
-        latest.current = v;
-        if (timer.current) clearTimeout(timer.current);
-        timer.current = setTimeout(() => onCommit(v), 400);
+        setLocal(e.target.value);
+        latest.current = e.target.value;
       }}
-      onBlur={() => {
-        if (timer.current) clearTimeout(timer.current);
-        onCommit(latest.current);
-      }}
+      onBlur={commit}
     />
   );
 }
