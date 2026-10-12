@@ -7,7 +7,7 @@ use std::fs;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::Duration;
-use sysinfo::System;
+use sysinfo::{System, ProcessRefreshKind};
 use tauri::{State, RunEvent, Manager};
 use tokio::sync::RwLock;
 
@@ -571,18 +571,59 @@ async fn save_text_file(path: String, content: String) -> Result<String, String>
     }
 }
 
+/// Kill every descendant of the given PID. Ollama's `serve` spawns an
+/// internal `llama-server.exe` worker per loaded model — killing only the
+/// direct child leaves that worker orphaned (observed: PID 17832 dead,
+/// llama-server still running). Returns the number of processes killed.
+fn kill_descendants(root_pid: u32) -> usize {
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
+    let mut to_kill = std::collections::HashSet::new();
+    let mut frontier = vec![root_pid];
+    while let Some(pid) = frontier.pop() {
+        for p in system.processes().values() {
+            if p.parent() == Some(sysinfo::Pid::from_u32(pid))
+                && to_kill.insert(p.pid().as_u32())
+            {
+                frontier.push(p.pid().as_u32());
+            }
+        }
+    }
+    let mut killed = 0;
+    for pid in to_kill {
+        if let Some(p) = system.process(sysinfo::Pid::from_u32(pid)) {
+            if p.kill() {
+                killed += 1;
+            }
+        }
+    }
+    killed
+}
+
 #[tauri::command]
 async fn stop_ollama(state: State<'_, AppState>) -> Result<String, String> {
     // Kill only the instance this application spawned — never a user-started one.
     let child = state.ollama_child.lock().unwrap().take();
     match child {
-        Some(mut child) => match child.kill() {
-            Ok(_) => {
-                let _ = child.wait();
-                Ok("Stopped the Ollama instance started by this application.".to_string())
+        Some(mut child) => {
+            let helpers = kill_descendants(child.id());
+            match child.kill() {
+                Ok(_) => {
+                    let _ = child.wait();
+                    let suffix = if helpers > 0 {
+                        format!(" (+ {helpers} helper process{})", if helpers > 1 { "es" } else { "" })
+                    } else {
+                        String::new()
+                    };
+                    Ok(format!("Stopped the Ollama instance started by this application{suffix}."))
+                }
+                Err(e) => Err(format!("Failed to stop Ollama: {}", e)),
             }
-            Err(e) => Err(format!("Failed to stop Ollama: {}", e)),
-        },
+        }
         None => Ok("No Ollama process was started by this application.".to_string()),
     }
 }
@@ -908,6 +949,7 @@ pub fn run() {
                     guard.take()
                 };
                 if let Some(mut child) = child {
+                    let _ = kill_descendants(child.id());
                     let _ = child.kill();
                     let _ = child.wait();
                 }

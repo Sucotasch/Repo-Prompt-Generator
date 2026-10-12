@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Github,
   FileText,
@@ -57,6 +57,70 @@ interface SavedTemplate {
   id: string;
   name: string;
   content: string;
+}
+
+/**
+ * Controlled-from-the-parent, instant-from-the-user textarea. Keystrokes
+ * re-render only this tiny component — the whole-App re-render cost
+ * (~34ms/keystroke, measured) is what made typing lag. The parent state
+ * catches up on a 400ms debounce and on blur, so Generate always sees
+ * the full text (blur fires synchronously before the click on a button).
+ */
+function DeferredTextarea({
+  id,
+  value,
+  onCommit,
+  rows,
+  placeholder,
+  className,
+  onInput,
+}: {
+  id?: string;
+  value: string;
+  onCommit: (v: string) => void;
+  rows?: number;
+  placeholder?: string;
+  className?: string;
+  onInput?: (e: React.FormEvent<HTMLTextAreaElement>) => void;
+}) {
+  const [local, setLocal] = useState(value);
+  const latest = useRef(local);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    // External resets (e.g. loading a saved template) always win.
+    setLocal(value);
+    latest.current = value;
+  }, [value]);
+
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  return (
+    <textarea
+      id={id}
+      rows={rows}
+      placeholder={placeholder}
+      className={className}
+      onInput={onInput}
+      value={local}
+      onChange={(e) => {
+        const v = e.target.value;
+        setLocal(v);
+        latest.current = v;
+        if (timer.current) clearTimeout(timer.current);
+        timer.current = setTimeout(() => onCommit(v), 400);
+      }}
+      onBlur={() => {
+        if (timer.current) clearTimeout(timer.current);
+        onCommit(latest.current);
+      }}
+    />
+  );
 }
 
 /** Collapsible section of the config sidebar. State persists via App. */
@@ -1786,21 +1850,13 @@ pause`;
         ) : (
           /* Custom / saved template: editable */
           <div className="px-3 pb-2">
-            <textarea
+            <DeferredTextarea
               rows={2}
               onInput={autoGrow}
               placeholder="Enter your custom system instruction here. The repository context (Tree, README, Dependencies) will be automatically appended to your prompt."
               className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg leading-5 bg-raised placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-brand-mid focus:border-brand-mid text-sm transition-shadow resize-none overflow-y-auto"
               value={customInstruction}
-              onChange={(e) => {
-                setCustomInstruction(e.target.value);
-                if (
-                  !templateMode.startsWith("user_") &&
-                  templateMode !== "custom"
-                ) {
-                  setTemplateMode("custom");
-                }
-              }}
+              onCommit={setCustomInstruction}
             />
             <div className="flex items-center justify-between mt-1.5 gap-2">
               <label className="flex items-center gap-1.5 text-xs text-body cursor-pointer hover:text-brand transition-colors min-w-0">
@@ -1897,7 +1953,7 @@ pause`;
             Instructions
           </label>
           <div className="flex-1 min-w-0">
-            <textarea
+            <DeferredTextarea
               id="additionalContext"
               rows={1}
               onInput={autoGrow}
@@ -1908,7 +1964,7 @@ pause`;
               }
               className="block w-full px-2.5 py-1.5 border border-input-line rounded-lg leading-5 bg-raised placeholder:text-faint focus:outline-none focus:ring-2 focus:ring-brand-mid focus:border-brand-mid text-sm transition-shadow resize-none overflow-y-auto"
               value={additionalContext}
-              onChange={(e) => setAdditionalContext(e.target.value)}
+              onCommit={setAdditionalContext}
             />
             {attachedDocs.length > 0 && (
               <div className="flex flex-wrap gap-1.5 mt-1.5">
