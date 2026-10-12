@@ -265,8 +265,7 @@ export default function App() {
   const [generatedFileName, setGeneratedFileName] =
     useState<string>("gemini.md");
   const [copied, setCopied] = useState(false);
-  const [status, setStatus] = useState("");
-  const [isTruncated, setIsTruncated] = useState(false);
+  const [status, setStatus] = useState<string>("");
   const [newTemplateName, setNewTemplateName] = useState("");
   const [isSavingNew, setIsSavingNew] = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -289,6 +288,31 @@ export default function App() {
   const [historyEntries, setHistoryEntries] = useState<HistoryEntryMeta[]>([]);
   const [restoredAt, setRestoredAt] = useState<number | null>(null);
   const restoringRef = React.useRef(false);
+
+  // Elapsed generation time for the status bar
+  const [elapsedSec, setElapsedSec] = useState(0);
+  useEffect(() => {
+    if (!loading) return;
+    setElapsedSec(0);
+    const t0 = Date.now();
+    const iv = setInterval(
+      () => setElapsedSec(Math.floor((Date.now() - t0) / 1000)),
+      1000,
+    );
+    return () => clearInterval(iv);
+  }, [loading]);
+
+  // Which Gemini key the desktop actually uses (env var vs UI field)
+  const [geminiKeySource, setGeminiKeySource] = useState<string>("");
+  useEffect(() => {
+    if (!isTauri()) return;
+    const t = setTimeout(() => {
+      tauriInvoke<string>("get_gemini_key_source", {})
+        .then(setGeminiKeySource)
+        .catch(() => {});
+    }, 300);
+    return () => clearTimeout(t);
+  }, [geminiApiKey]);
 
   // Theme: "system" follows the OS, light/dark force it. The initial class
   // was already set by the inline bootstrap in index.html.
@@ -349,6 +373,17 @@ export default function App() {
       });
     }
   }, []);
+
+  // Auto-check the local engine on startup and whenever the engine or its
+  // URL changes (debounced) — replaces the manual "Test Connection" button.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const t = setTimeout(() => {
+      handleTestLocalEngine();
+    }, 800);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localEngine, ollamaUrl]);
 
   // Auto-clear RAG query optimization cache when repo or template changes
   // AND Prune unused embedding caches
@@ -441,7 +476,9 @@ export default function App() {
   useEffect(() => {
     if (isTauri()) {
       tauriInvoke("set_app_config", {
-        gemini_key: geminiApiKey,
+        // null when the UI field is empty — never overwrite the env-provided
+        // key with an empty string (Rust keeps the previous value on None).
+        gemini_key: geminiApiKey || null,
         proxy: proxyAddress,
         custom_base_url: customBaseUrl,
         ollama_url: ollamaUrl,
@@ -903,7 +940,15 @@ pause`;
     setUsedModel(null);
     setLastOptimizedQuery(null);
     setCopied(false);
-    setIsTruncated(false);
+
+    // Truncation is a transient notice, not a persistent state (the old
+    // persistent warning used to cover the progress in the status bar).
+    const warnTruncated = () => {
+      setStatus("Large repository: directory tree truncated to 1000 items.");
+      setTimeout(() => setStatus((s) =>
+        s === "Large repository: directory tree truncated to 1000 items." ? "" : s,
+      ), 8000);
+    };
 
     try {
       let repoData;
@@ -939,7 +984,7 @@ pause`;
       ensureLive();
 
       if (repoData.isTruncated) {
-        setIsTruncated(true);
+        warnTruncated();
       }
 
       // Generate file name base
@@ -991,7 +1036,7 @@ pause`;
         }
 
         if (referenceRepoData && referenceRepoData.isTruncated) {
-          setIsTruncated(true);
+          warnTruncated();
         }
       }
 
@@ -1238,8 +1283,10 @@ pause`;
 
         const summarizedSourceFiles = [];
         if (repoData.sourceFiles) {
-          for (const file of repoData.sourceFiles) {
-            setStatus(`Summarizing ${file.path} with ${localEngine === "ollama" ? "Ollama" : "Local Engine"}...`);
+          const total = repoData.sourceFiles.length;
+          for (let i = 0; i < total; i++) {
+            const file = repoData.sourceFiles[i];
+            setStatus(`Summarizing ${i + 1}/${total}: ${file.path} (${localEngine === "ollama" ? "Ollama" : "Local Engine"})...`);
             const summary = await summarize(file.content);
             summarizedSourceFiles.push({ path: file.path, content: summary });
           }
@@ -1255,8 +1302,10 @@ pause`;
         if (referenceRepoData) {
           const refSummarizedSourceFiles = [];
           if (referenceRepoData.sourceFiles) {
-            for (const file of referenceRepoData.sourceFiles) {
-              setStatus(`Summarizing reference ${file.path} with Ollama...`);
+            const refTotal = referenceRepoData.sourceFiles.length;
+            for (let i = 0; i < refTotal; i++) {
+              const file = referenceRepoData.sourceFiles[i];
+              setStatus(`Summarizing reference ${i + 1}/${refTotal}: ${file.path}...`);
               const summary = await summarize(file.content);
               refSummarizedSourceFiles.push({
                 path: file.path,
@@ -1843,17 +1892,68 @@ pause`;
                   dependencies
                 </span>
               </label>
-              <label className="cursor-pointer inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-mid bg-surface-2 hover:bg-surface-3 rounded-lg transition-colors border border-line shrink-0">
-                <Paperclip className="w-3 h-3" />
-                Attach (.md, .txt)
-                <input
-                  type="file"
-                  multiple
-                  accept=".md,.txt,.json,.csv,.log"
-                  className="hidden"
-                  onChange={handleAttachDocs}
-                />
-              </label>
+              <div className="flex items-center gap-2 shrink-0">
+                {isTauri() && (
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={handleTestLocalEngine}
+                      disabled={testingOllama}
+                      title={`Local engine status — click to re-check. ${ollamaConnected === true ? "Connected" : ollamaConnected === false ? "Not reachable" : "Unknown"}`}
+                      className={`flex items-center gap-1.5 text-xs font-medium px-1.5 py-1 rounded-md hover:bg-surface-2 transition-colors disabled:opacity-50 ${
+                        ollamaConnected === true
+                          ? "text-ok"
+                          : ollamaConnected === false
+                            ? "text-danger"
+                            : "text-soft"
+                      }`}
+                    >
+                      <span
+                        className={`w-2 h-2 rounded-full shrink-0 ${
+                          testingOllama
+                            ? "bg-brand-mid animate-pulse"
+                            : ollamaConnected === true
+                              ? "bg-ok"
+                              : ollamaConnected === false
+                                ? "bg-danger"
+                                : "bg-faint"
+                        }`}
+                      />
+                      {testingOllama ? "Checking…" : "Ollama"}
+                    </button>
+                    {!ollamaNativeRunning ? (
+                      <button
+                        type="button"
+                        onClick={handleStartOllama}
+                        disabled={ollamaNativeLoading}
+                        className="text-xs px-2 py-1 bg-ok-soft text-ok border border-ok-line rounded-md hover:bg-ok-soft-2 transition-colors disabled:opacity-50"
+                      >
+                        {ollamaNativeLoading ? "Starting…" : "Start"}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleStopOllama}
+                        disabled={ollamaNativeLoading}
+                        className="text-xs px-2 py-1 bg-danger-soft text-danger border border-danger-line rounded-md hover:bg-danger-soft transition-colors disabled:opacity-50"
+                      >
+                        {ollamaNativeLoading ? "Stopping…" : "Stop"}
+                      </button>
+                    )}
+                  </div>
+                )}
+                <label className="cursor-pointer inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-mid bg-surface-2 hover:bg-surface-3 rounded-lg transition-colors border border-line shrink-0">
+                  <Paperclip className="w-3 h-3" />
+                  Attach (.md, .txt)
+                  <input
+                    type="file"
+                    multiple
+                    accept=".md,.txt,.json,.csv,.log"
+                    className="hidden"
+                    onChange={handleAttachDocs}
+                  />
+                </label>
+              </div>
             </div>
           </div>
         </div>
@@ -1960,55 +2060,44 @@ pause`;
           </div>
         )}
 
-        {/* Floating status pill: no reserved space, no layout jumps */}
-        {(error || isTruncated || loading || status) && (
-          <div
-            className="absolute top-full left-3 mt-1.5 z-40 max-w-[calc(100%-24px)]"
-            role="status"
-            aria-live="polite"
-          >
-            {error ? (
-              <div
-                className="flex items-center gap-1.5 bg-danger-soft ring-1 ring-danger-line text-danger-strong text-xs rounded-lg px-2.5 py-1.5 shadow-md min-w-0"
-                title={error}
+        {/* Reserved status bar: progress with elapsed timer, transient
+            notices, errors — fixed height, never overlaps content below */}
+        <div
+          className="shrink-0 h-7 px-3 flex items-center gap-2 border-t border-line-soft text-xs overflow-hidden"
+          role="status"
+          aria-live="polite"
+        >
+          {error ? (
+            <>
+              <AlertTriangle className="w-3.5 h-3.5 text-danger shrink-0" />
+              <span className="text-danger truncate" title={error}>
+                {error}
+              </span>
+            </>
+          ) : loading ? (
+            <>
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-brand-faint shrink-0" />
+              <span className="text-body truncate flex-1">
+                {status || "Working…"}
+              </span>
+              <span className="text-soft tabular-nums shrink-0" title="Elapsed">
+                {Math.floor(elapsedSec / 60)}:{String(elapsedSec % 60).padStart(2, "0")}
+              </span>
+              <button
+                type="button"
+                onClick={cancelGeneration}
+                className="shrink-0 inline-flex items-center px-2 py-0.5 border border-input-line text-xs font-medium rounded-md text-body bg-raised hover:bg-surface-2 transition-colors"
               >
-                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">{error}</span>
-              </div>
-            ) : isTruncated ? (
-              <div
-                className="flex items-center gap-1.5 bg-warn-soft ring-1 ring-warn-line text-warn-strong text-xs rounded-lg px-2.5 py-1.5 shadow-md min-w-0"
-                title="The directory tree listing has been truncated to 1000 items to prevent AI context overflow. Your selected source files are still included in full."
-              >
-                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">
-                  Large repository: directory tree truncated to 1000 items.
-                </span>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2 bg-surface ring-1 ring-line text-xs rounded-lg px-2.5 py-1.5 shadow-md min-w-0">
-                {loading && (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-brand-faint shrink-0" />
-                )}
-                <span
-                  className={`truncate ${loading ? "text-body" : "text-soft"}`}
-                >
-                  {loading ? (status || "Working…") : status}
-                </span>
-                {loading && (
-                  <button
-                    type="button"
-                    onClick={cancelGeneration}
-                    className="shrink-0 inline-flex items-center px-2 py-0.5 border border-input-line text-xs font-medium rounded-md text-body bg-raised hover:bg-surface-2 transition-colors"
-                  >
-                    <X className="w-3 h-3 mr-1" />
-                    Cancel
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        )}
+                <X className="w-3 h-3 mr-1" />
+                Cancel
+              </button>
+            </>
+          ) : status ? (
+            <span className="text-soft truncate" title={status}>
+              {status}
+            </span>
+          ) : null}
+        </div>
       </header>
 
       {/* ===== Body: config sidebar | result pane ===== */}
@@ -2113,6 +2202,62 @@ pause`;
               <option value="gemini">✨ Gemini (default)</option>
               <option value="custom">🌐 Custom (OpenAI Compatible)</option>
             </select>
+
+            {aiProvider === "gemini" && (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label
+                    htmlFor="geminiApiKey"
+                    className="text-[11px] font-medium text-soft"
+                  >
+                    Gemini API Key
+                  </label>
+                  <span
+                    className={`text-[11px] font-medium ${
+                      geminiApiKey
+                        ? "text-ok"
+                        : isTauri() && geminiKeySource && geminiKeySource !== "none"
+                          ? "text-ok"
+                          : "text-faint"
+                    }`}
+                  >
+                    {geminiApiKey
+                      ? "✓ set"
+                      : isTauri() && geminiKeySource && geminiKeySource !== "none"
+                        ? "from env"
+                        : "not set"}
+                  </span>
+                </div>
+                <div className="relative">
+                  <input
+                    type={showGeminiKey ? "text" : "password"}
+                    id="geminiApiKey"
+                    value={geminiApiKey}
+                    onChange={(e) => setGeminiApiKey(e.target.value)}
+                    placeholder="AIzaSy… (or set GEMINI_API_KEY env var)"
+                    className="block w-full pr-8 px-2.5 py-1.5 border border-input-line rounded-lg text-xs"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowGeminiKey((v) => !v)}
+                    aria-label={showGeminiKey ? "Hide API key" : "Show API key"}
+                    title={showGeminiKey ? "Hide API key" : "Show API key"}
+                    className="absolute inset-y-0 right-0 flex items-center px-2 text-faint hover:text-body transition-colors"
+                  >
+                    {showGeminiKey ? (
+                      <EyeOff className="w-3.5 h-3.5" />
+                    ) : (
+                      <Eye className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
+                {isTauri() && geminiKeySource && (
+                  <p className="mt-1 text-[10px] text-faint leading-tight truncate">
+                    Active key: {geminiKeySource}
+                  </p>
+                )}
+              </div>
+            )}
 
             {aiProvider === "custom" && (
               <div className="rounded-lg border border-line p-2.5 space-y-2.5">
@@ -2821,80 +2966,52 @@ pause`;
                   </div>
                 )}
 
-                <div className="flex items-center gap-2 flex-wrap">
-                  <button
-                    type="button"
-                    onClick={handleTestLocalEngine}
-                    disabled={testingOllama}
-                    className="text-xs px-2.5 py-1 bg-raised border border-input-line rounded-lg hover:bg-surface-2 transition-colors disabled:opacity-50"
-                  >
-                    {testingOllama ? "Testing…" : "Test Connection"}
-                  </button>
-                  {ollamaConnected === true && (
-                    <span className="text-[11px] text-ok flex items-center">
-                      <Check className="w-3 h-3 mr-1" /> Connected
-                    </span>
-                  )}
-                  {ollamaConnected === false && (
-                    <span className="text-[11px] text-danger min-w-0 truncate">
-                      {isTauri()
-                        ? `Failed — is ${localEngine === "ollama" ? "Ollama" : localEngine === "lmstudio" ? "LM Studio" : "Llama.cpp"} running?`
-                        : "Failed (check CORS or server)"}
-                    </span>
-                  )}
-                </div>
-
-                {localEngine === "ollama" ? (
-                  <div className="text-[11px] text-soft bg-surface-2 p-2 rounded-lg space-y-1.5">
-                    {isTauri() ? (
-                      <>
-                        <p className="font-medium text-body">
-                          Ollama Native Control — start or stop the local
-                          instance directly from the app.
-                        </p>
-                        {!ollamaNativeRunning ? (
-                          <button
-                            type="button"
-                            onClick={handleStartOllama}
-                            disabled={ollamaNativeLoading}
-                            className="inline-flex items-center px-2 py-1 bg-ok-soft text-ok border border-ok-line rounded-lg hover:bg-ok-soft-2 transition-colors disabled:opacity-50"
-                          >
-                            {ollamaNativeLoading ? "Starting…" : "Start Ollama"}
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={handleStopOllama}
-                            disabled={ollamaNativeLoading}
-                            className="inline-flex items-center px-2 py-1 bg-danger-soft text-danger-strong border border-danger-line rounded-lg hover:bg-danger-soft transition-colors disabled:opacity-50"
-                          >
-                            {ollamaNativeLoading ? "Stopping…" : "Stop Ollama"}
-                          </button>
-                        )}
-                      </>
-                    ) : (
-                      <>
-                        <p>
-                          <span className="font-medium text-body">
-                            CORS:
-                          </span>{" "}
-                          start Ollama with{" "}
-                          <code className="bg-surface-3 px-1 py-0.5 rounded">
-                            OLLAMA_ORIGINS="{window.location.origin}"
-                          </code>
-                        </p>
-                        <button
-                          type="button"
-                          onClick={handleDownloadBat}
-                          className="inline-flex items-center px-2 py-1 bg-brand-fog text-brand-ink border border-brand-line rounded-lg hover:bg-brand-soft-2 transition-colors"
-                        >
-                          <Download className="w-3 h-3 mr-1" />
-                          Download Windows .bat
-                        </button>
-                      </>
+                {/* Web keeps a manual test (CORS makes auto-checks misleading);
+                    desktop auto-checks via the Ollama chip in the top panel */}
+                {!isTauri() && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={handleTestLocalEngine}
+                      disabled={testingOllama}
+                      className="text-xs px-2.5 py-1 bg-raised border border-input-line rounded-lg hover:bg-surface-2 transition-colors disabled:opacity-50"
+                    >
+                      {testingOllama ? "Testing…" : "Test Connection"}
+                    </button>
+                    {ollamaConnected === true && (
+                      <span className="text-[11px] text-ok flex items-center">
+                        <Check className="w-3 h-3 mr-1" /> Connected
+                      </span>
+                    )}
+                    {ollamaConnected === false && (
+                      <span className="text-[11px] text-danger min-w-0 truncate">
+                        Failed (check CORS or server)
+                      </span>
                     )}
                   </div>
-                ) : (
+                )}
+
+                {localEngine === "ollama" && !isTauri() && (
+                  <div className="text-[11px] text-soft bg-surface-2 p-2 rounded-lg space-y-1.5">
+                    <p>
+                      <span className="font-medium text-body">CORS:</span>{" "}
+                      start Ollama with{" "}
+                      <code className="bg-surface-3 px-1 py-0.5 rounded">
+                        OLLAMA_ORIGINS="{window.location.origin}"
+                      </code>
+                    </p>
+                    <button
+                      type="button"
+                      onClick={handleDownloadBat}
+                      className="inline-flex items-center px-2 py-1 bg-brand-fog text-brand-ink border border-brand-line rounded-lg hover:bg-brand-soft-2 transition-colors"
+                    >
+                      <Download className="w-3 h-3 mr-1" />
+                      Download Windows .bat
+                    </button>
+                  </div>
+                )}
+
+                {localEngine !== "ollama" && (
                   <div className="text-[11px] text-soft bg-surface-2 p-2 rounded-lg space-y-1">
                     <p className="font-medium text-body">
                       Manual server start required
@@ -2904,8 +3021,9 @@ pause`;
                       {localEngine === "lmstudio"
                         ? "LM Studio / Oobabooga"
                         : "Llama.cpp"}{" "}
-                      externally, ensure its API server is listening on the
-                      configured URL, then click "Test Connection".
+                      externally and make sure its API server is listening on
+                      the configured URL — the status chip in the top panel
+                      re-checks it automatically.
                     </p>
                     {!isTauri() && (
                       <p className="text-warn-strong">
@@ -2921,48 +3039,10 @@ pause`;
           {isTauri() && (
             <CollapsibleGroup
               title="Desktop Settings"
-              summary={geminiApiKey ? "Key set" : "From environment"}
+              summary={proxyAddress ? "Proxy set" : "Direct connection"}
               open={!!openGroups.desktop}
               onToggle={() => toggleGroup("desktop")}
             >
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label
-                    htmlFor="geminiApiKey"
-                    className="text-[11px] font-medium text-soft"
-                  >
-                    Gemini API Key (Optional if set in environment)
-                  </label>
-                  <span
-                    className={`text-[11px] font-medium ${geminiApiKey ? "text-ok" : "text-faint"}`}
-                  >
-                    {geminiApiKey ? "✓ set" : "not set"}
-                  </span>
-                </div>
-                <div className="relative">
-                  <input
-                    type={showGeminiKey ? "text" : "password"}
-                    id="geminiApiKey"
-                    value={geminiApiKey}
-                    onChange={(e) => setGeminiApiKey(e.target.value)}
-                    placeholder="AIzaSy..."
-                    className="block w-full pr-8 px-2.5 py-1.5 border border-input-line rounded-lg text-xs"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowGeminiKey((v) => !v)}
-                    aria-label={showGeminiKey ? "Hide API key" : "Show API key"}
-                    title={showGeminiKey ? "Hide API key" : "Show API key"}
-                    className="absolute inset-y-0 right-0 flex items-center px-2 text-faint hover:text-body transition-colors"
-                  >
-                    {showGeminiKey ? (
-                      <EyeOff className="w-3.5 h-3.5" />
-                    ) : (
-                      <Eye className="w-3.5 h-3.5" />
-                    )}
-                  </button>
-                </div>
-              </div>
               <div>
                 <label
                   htmlFor="proxyAddress"
