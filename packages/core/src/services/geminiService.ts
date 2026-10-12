@@ -126,7 +126,7 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
     if (isTauri()) {
       const responseText = await tauriInvoke<string>("call_gemini_secure", {
         prompt,
-        model: "gemini-3-flash-preview",
+        model: "gemini-3.8-flash",
       });
       
       const cleanText = responseText.trim();
@@ -145,7 +145,7 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
       apiKey: geminiApiKey || (typeof process !== 'undefined' ? process.env.GEMINI_API_KEY : undefined) || import.meta.env.VITE_GEMINI_API_KEY || "",
     });
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-3.8-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -198,7 +198,7 @@ export async function generateSystemPrompt(
   );
 
   let finalPrompt = "Failed to generate prompt.";
-  let modelVersion = "gemini-3.1-pro-preview";
+  let modelVersion = "gemini-3.8-flash";
   let requestedFilesList: string[] = [];
   let fetchedFilesCount: number | undefined = undefined;
 

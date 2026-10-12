@@ -1593,25 +1593,36 @@ pause`;
               />
             </div>
           ) : (
-            <div className="flex-1 min-w-0">
-              <input
-                type="file"
-                ref={fileInputRef}
-                // @ts-ignore - webkitdirectory is non-standard but widely supported
-                webkitdirectory=""
-                directory=""
-                multiple
-                onChange={(e) => {
-                  e.preventDefault();
-                  setLocalFiles(e.target.files);
-                }}
-                className="block w-full text-xs text-brand-ink file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-brand-fog file:text-brand-ink hover:file:bg-brand-soft-2 cursor-pointer truncate"
-                disabled={loading}
-              />
-              {localFiles && localFiles.length > 0 && (
-                <p className="text-[11px] text-soft mt-0.5 truncate">
-                  {localFiles.length} files from{" "}
-                  {localFiles[0].webkitRelativePath.split("/")[0]}
+            <div className="flex-1 min-w-0 flex items-center gap-2">
+              <label className="cursor-pointer inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-brand-ink bg-brand-fog border border-brand-line hover:bg-brand-soft-2 rounded-lg transition-colors shrink-0">
+                <Folder className="w-3.5 h-3.5" />
+                Choose folder
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  // @ts-ignore - webkitdirectory is non-standard but widely supported
+                  webkitdirectory=""
+                  directory=""
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    e.preventDefault();
+                    setLocalFiles(e.target.files);
+                  }}
+                  disabled={loading}
+                />
+              </label>
+              {localFiles && localFiles.length > 0 ? (
+                <p
+                  className="text-xs text-body truncate min-w-0"
+                  title={`${localFiles.length} files from ${localFiles[0].webkitRelativePath.split("/")[0]}`}
+                >
+                  <span className="font-semibold">{localFiles.length}</span>{" "}
+                  files · {localFiles[0].webkitRelativePath.split("/")[0]}
+                </p>
+              ) : (
+                <p className="text-xs text-faint truncate">
+                  no folder selected
                 </p>
               )}
             </div>

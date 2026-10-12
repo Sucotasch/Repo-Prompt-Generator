@@ -3,7 +3,7 @@
 **Дата:** 2026-10-12 · **Скоуп:** `apps/desktop/src-tauri` (Rust, конфиги, capabilities) + десктоп-специфичные пути общих пакетов
 **Метод:** полное чтение lib.rs (803 строки) и всех файлов скоупа; инструментальная проверка контрактов команд `.unlazy/audit/contract-check.mjs` (15 команд / 15 зарегистрировано / 17 call-sites, негативный контроль срабатывает); ручная трассировка Cancel-флоу и прокси.
 
-**Итог: findings_total=23 — все закрыты** (19 из кодового аудита + 4 из раунда ручных тестов, Errors.txt). Главный системный вывод: оба класса ошибок, которые мы ловили вручную (молча съеденные аргументы команд и неработающий прокси), теперь закрыты и покрыты проверяемым инструментом.
+**Итог: findings_total=25 — все закрыты** (19 из кодового аудита + 4 + 2 из раундов ручных тестов, Errors.txt). Главный системный вывод: оба класса ошибок, которые мы ловили вручную (молча съеденные аргументы команд и неработающий прокси), теперь закрыты и покрыты проверяемым инструментом.
 
 **Прочитано полностью (скоуп аудита):** `apps/desktop/src-tauri/src/lib.rs`, `apps/desktop/src-tauri/tauri.conf.json`, `apps/desktop/src-tauri/Cargo.toml`, `apps/desktop/src-tauri/capabilities/default.json`, `apps/desktop/package.json`, `apps/desktop/src/main.tsx`, `packages/core/src/utils/tauriAdapter.ts`, `packages/core/src/utils/tauriFetch.ts`, `packages/core/src/utils/fileSystem.ts`, `packages/core/src/services/openaiCompatibleService.ts`, `packages/core/src/services/ollamaService.ts`, `packages/core/src/services/geminiService.ts`, `packages/core/src/services/ragService.ts`, `packages/ui/src/App.tsx` (десктоп-ветки).
 
@@ -141,3 +141,12 @@
 | F-24 | ИСПРАВЛЕНО | Ключ Gemini лежал в Desktop Settings рядом с прокси. Решение: поле (с глазком и индикатором) переехало в AI Provider — показывается при выборе провайдера «Gemini (default)», симметрично полям Custom; в Desktop Settings остался только прокси. Добавлен чип «Active key: env:AIza…x9» (get_gemini_key_source) — сразу видно, чей ключ активен, что напрямую закрывает путаницу из F-23. |
 
 Верификация: tsc web/desktop чисто; MSI/NSIS пересобраны; smoke живого desktop-приложения: env-ключ в логе, стартовый автотест Ollama сработал, корректное закрытие.
+
+## Раунд ручных тестов 2 (Errors.txt, 2026-10-12 — оба исправлены)
+
+| ID | Статус | Находка и решение |
+|----|--------|-------------------|
+| F-25 | ИСПРАВЛЕНО | 429 «quota exceeded, limit: 0, model: gemini-3.1-pro» — у модели 3.1-pro-preview нулевая квота free-tier, финальная генерация по умолчанию обречена. Решение: живые пробы ListModels + generateContent по ключу: gemini-3.1-pro-preview → 429 (лимит 0), gemini-3-flash-preview → 200 (стабильно), **gemini-3.6/3.7/3.8-flash → 200** (интермиттентный 503 «high demand» — модель только выложена, перегрузка временная; подтверждено повторами). ID-написание подтверждено листингом API: `gemini-3.8-flash`. Все четыре зашитых имени переведены на gemini-3.8-flash (Rust-константы GEMINI_QUERY_MODEL/GEMINI_FINAL_MODEL + три хардкода geminiService.ts). |
+| F-26 | ИСПРАВЛЕНО | «Не выбран ни один файл» рядом с кнопкой выбора файлов — это СОБСТВЕННАЯ подпись нативного виджета Chromium внутри input, она не отражала состояние React (данные при этом передавались — успешная генерация «Target Repository: Local Folder» из того же теста это доказывает). Решение: нативный input спрятан (hidden), вместо него кнопка «Choose folder» + наша строка статуса «N files · <корень>» / «no folder selected» — состояние всегда честное (в т.ч. осознанное сбрасывание выбора после генерации на репозиториях >1000 файлов для освобождения памяти). |
+
+Верификация: tsc web/desktop чисто; cargo check чисто; MSI/NSIS пересобраны; smoke живого приложения — запуск, автотест Ollama, корректное закрытие.

@@ -14,8 +14,12 @@ use tokio::sync::RwLock;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-const DEFAULT_MODEL_FLASH: &str = "gemini-3-flash-preview";
-const DEFAULT_MODEL_PRO: &str = "gemini-3.1-pro-preview";
+// Verified against the key's free tier 2026-10-12: gemini-3.1-pro-preview
+// has zero free quota (429 limit:0); gemini-3.8-flash serves generateContent
+// (may return transient 503 "high demand" — retry). geminiService.ts hardcodes
+// the same names for the web paths.
+const GEMINI_QUERY_MODEL: &str = "gemini-3.8-flash";
+const GEMINI_FINAL_MODEL: &str = "gemini-3.8-flash";
 const STATIC_ALLOWED_HOSTS: [&str; 2] = [
     "api.github.com",
     "generativelanguage.googleapis.com",
@@ -142,7 +146,7 @@ async fn call_gemini_secure(state: State<'_, AppState>, prompt: String, model: O
 
     println!("[Gemini] key present (len: {})", key.len());
 
-    let model_name = model.unwrap_or_else(|| DEFAULT_MODEL_FLASH.to_string());
+    let model_name = model.unwrap_or_else(|| GEMINI_QUERY_MODEL.to_string());
     let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model_name);
 
     let body = serde_json::json!({
@@ -181,7 +185,7 @@ async fn call_gemini_advanced(state: State<'_, AppState>, contents: serde_json::
         return Err("Gemini API key is missing. Please enter it in the settings or set the GEMINI_API_KEY environment variable.".to_string());
     }
 
-    let model_name = model.unwrap_or_else(|| DEFAULT_MODEL_PRO.to_string());
+    let model_name = model.unwrap_or_else(|| GEMINI_FINAL_MODEL.to_string());
     let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model_name);
 
     let mut body_map = serde_json::Map::new();
