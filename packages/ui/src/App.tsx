@@ -191,7 +191,17 @@ export default function App() {
   const [inputMode, setInputMode] = useState<"github" | "local">(
     initialSettings.inputMode || "github",
   );
-  const [localFiles, setLocalFiles] = useState<FileList | null>(null);
+  // The picked FileList lives in a ref — NEVER in React state or in the
+  // DOM: a 25k-file <input webkitdirectory> left in the tree freezes the
+  // desktop WebView2 (UIA/IME walks it on every focus change). The input
+  // element is unmounted right after the pick and replaced with a fresh
+  // empty one (pickerKey); state carries only count+root for the label.
+  const localFilesRef = React.useRef<FileList | null>(null);
+  const [localFilesMeta, setLocalFilesMeta] = useState<{
+    count: number;
+    root: string;
+  } | null>(null);
+  const [pickerKey, setPickerKey] = useState(0);
 
   // Reference Repository State
   const [referenceInputMode, setReferenceInputMode] = useState<
@@ -639,8 +649,8 @@ export default function App() {
     const sourceLabel =
       inputMode === "github"
         ? url || "GitHub"
-        : localFiles && localFiles.length > 0
-          ? `Local: ${localFiles[0].webkitRelativePath.split("/")[0]}`
+        : localFilesMeta
+          ? `Local: ${localFilesMeta.root}`
           : "Local Folder";
     const templateName =
       templateMode === "custom"
@@ -1039,7 +1049,7 @@ pause`;
   const handleGenerate = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (inputMode === "github" && !url) return;
-    if (inputMode === "local" && (!localFiles || localFiles.length === 0))
+    if (inputMode === "local" && (!localFilesRef.current || localFilesRef.current.length === 0))
       return;
 
     if (useRag && !ragModel) {
@@ -1097,17 +1107,19 @@ pause`;
         }
       } else {
         setStatus("Processing local files...");
-        repoData = await processLocalFolder(localFiles!, maxFiles);
+        repoData = await processLocalFolder(localFilesRef.current!, maxFiles);
         // Do not cache local files in state to save memory, they are fast to read anyway
         setCachedRepoData(null);
         setCacheKey("");
 
         // Free up memory by clearing the file selection if it's very large, unless we need it for deep analysis
-        if (localFiles && localFiles.length > 1000 && !isDeepAnalysis) {
-          setLocalFiles(null);
-          if (fileInputRef.current) {
-            fileInputRef.current.value = "";
-          }
+        if (
+          localFilesRef.current &&
+          localFilesRef.current.length > 1000 &&
+          !isDeepAnalysis
+        ) {
+          localFilesRef.current = null;
+          setLocalFilesMeta(null);
         }
       }
 
@@ -1540,7 +1552,7 @@ pause`;
             proxyAddress,
             isDeepAnalysis,
             onStatusUpdate: setStatus,
-            localFiles: inputMode === "local" ? localFiles : undefined,
+            localFiles: inputMode === "local" ? localFilesRef.current : undefined,
             referenceLocalFiles: referenceInputMode === "local" ? referenceLocalFiles : undefined,
           },
         );
@@ -1728,8 +1740,9 @@ pause`;
             <div className="flex-1 min-w-0 flex items-center gap-2">
               <label className="cursor-pointer inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-brand-ink bg-brand-fog border border-brand-line hover:bg-brand-soft-2 rounded-lg transition-colors shrink-0">
                 <Folder className="w-3.5 h-3.5" />
-                Choose folder
+                {localFilesMeta ? "Choose another" : "Choose folder"}
                 <input
+                  key={pickerKey}
                   type="file"
                   ref={fileInputRef}
                   // @ts-ignore - webkitdirectory is non-standard but widely supported
@@ -1739,18 +1752,30 @@ pause`;
                   className="hidden"
                   onChange={(e) => {
                     e.preventDefault();
-                    setLocalFiles(e.target.files);
+                    const files = e.target.files;
+                    localFilesRef.current = files;
+                    const first = files && files.length > 0 ? files[0] : null;
+                    setLocalFilesMeta({
+                      count: files ? files.length : 0,
+                      root: first
+                        ? first.webkitRelativePath.split("/")[0]
+                        : "",
+                    });
+                    // Unmount the input that carries the picked files: a
+                    // 25k-file directory input left in the DOM freezes the
+                    // desktop WebView2. A fresh empty picker takes its place.
+                    setPickerKey((k) => k + 1);
                   }}
                   disabled={loading}
                 />
               </label>
-              {localFiles && localFiles.length > 0 ? (
+              {localFilesMeta && localFilesMeta.count > 0 ? (
                 <p
                   className="text-xs text-body truncate min-w-0"
-                  title={`${localFiles.length} files from ${localFiles[0].webkitRelativePath.split("/")[0]}`}
+                  title={`${localFilesMeta.count} files from ${localFilesMeta.root}`}
                 >
-                  <span className="font-semibold">{localFiles.length}</span>{" "}
-                  files · {localFiles[0].webkitRelativePath.split("/")[0]}
+                  <span className="font-semibold">{localFilesMeta.count}</span>{" "}
+                  files · {localFilesMeta.root}
                 </p>
               ) : (
                 <p className="text-xs text-faint truncate">
@@ -1766,14 +1791,14 @@ pause`;
               loading ||
               (inputMode === "github"
                 ? !url
-                : !localFiles || localFiles.length === 0)
+                : !localFilesRef.current || localFilesRef.current.length === 0)
             }
             title={
               inputMode === "github"
                 ? !url
                   ? "Enter a repository URL first"
                   : "Generate the prompt"
-                : !localFiles || localFiles.length === 0
+                : !localFilesRef.current || localFilesRef.current.length === 0
                   ? "Select a local folder first"
                   : "Generate the prompt"
             }
