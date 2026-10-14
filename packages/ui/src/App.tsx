@@ -1121,6 +1121,12 @@ pause`;
           repoData = await processLocalFolder(localFilesRef.current!, maxFiles);
           setCachedRepoData(repoData);
           setCacheKey(currentCacheKey);
+          if (repoData.unreadableFiles && repoData.unreadableFiles.length > 0) {
+            setStatus(
+              `Skipped ${repoData.unreadableFiles.length} unreadable file(s) — see the result metadata for the list.`,
+            );
+            setTimeout(() => setStatus(""), 8000);
+          }
         }
       }
 
@@ -1592,6 +1598,13 @@ pause`;
       }
       if (usedOllama)
         metadata += `> - **Pre-processing:** Local LLM (Ollama)\n`;
+
+      if (repoData.unreadableFiles && repoData.unreadableFiles.length > 0) {
+        metadata += `> - **⚠️ Unreadable files skipped** (${repoData.unreadableFiles.length}):\n`;
+        for (const f of repoData.unreadableFiles.slice(0, 20)) {
+          metadata += `>   - \`${f}\`\n`;
+        }
+      }
 
       if (requestedFiles && requestedFiles.length > 0) {
         if (fetchedFilesCount !== undefined) {

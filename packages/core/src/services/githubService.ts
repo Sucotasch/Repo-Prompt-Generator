@@ -18,6 +18,10 @@ export interface RepoData {
   dependencies: string;
   sourceFiles?: { path: string; content: string }[];
   isTruncated?: boolean;
+  /** Files the picker referenced but that could not be read (locked by
+   *  another process, removed, or transiently unavailable). Surfaced so the
+   *  result can honestly report its own completeness. */
+  unreadableFiles?: string[];
 }
 
 export async function fetchRepoData(

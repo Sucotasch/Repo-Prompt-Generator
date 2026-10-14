@@ -62,12 +62,37 @@ export async function processLocalFolder(
 
   const treePaths = filteredFiles.map((f) => f.webkitRelativePath || f.name);
 
+  // A file can be transiently unreadable (real-time antivirus scan of a
+  // freshly written file, a momentary lock by a build running inside the
+  // analyzed project) or deleted after the pick. One bad file must never
+  // kill the whole run — and the result must honestly report what was
+  // excluded, so skips are collected and surfaced, never silent.
+  const unreadableFiles: string[] = [];
+  const safeRead = async (f: File, attempt = 0): Promise<string | null> => {
+    try {
+      return await f.text();
+    } catch (e) {
+      // One retry absorbs transient scans/locks; a second failure is real.
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 300));
+        return safeRead(f, 1);
+      }
+      const rel = f.webkitRelativePath || f.name;
+      unreadableFiles.push(rel);
+      console.warn(
+        `[LocalFolder] Could not read "${rel}" after a retry — skipped, reported in the result.`,
+        e,
+      );
+      return null;
+    }
+  };
+
   let readme = "";
   const readmeFile = filteredFiles.find((f) =>
     (f.webkitRelativePath || f.name).toLowerCase().endsWith("readme.md"),
   );
   if (readmeFile) {
-    readme = await readmeFile.text();
+    readme = (await safeRead(readmeFile)) ?? "";
   }
 
   let dependencies = "";
@@ -76,7 +101,10 @@ export async function processLocalFolder(
       (f.webkitRelativePath || f.name).endsWith(depName),
     );
     if (depFile) {
-      dependencies += `\n--- ${depName} ---\n${await depFile.text()}\n`;
+      const content = await safeRead(depFile);
+      if (content !== null) {
+        dependencies += `\n--- ${depName} ---\n${content}\n`;
+      }
     }
   }
 
@@ -101,12 +129,24 @@ export async function processLocalFolder(
   const limit = Math.min(Math.max(1, Number(maxFiles) || 5), 200);
   filesToFetch = filesToFetch.slice(0, limit);
 
-  const finalSourceFiles = await Promise.all(
-    filesToFetch.map(async (f) => ({
-      path: f.webkitRelativePath || f.name,
-      content: await f.text(),
-    })),
+  const readResults = await Promise.all(
+    filesToFetch.map(async (f) => {
+      const content = await safeRead(f);
+      return content === null
+        ? null
+        : { path: f.webkitRelativePath || f.name, content };
+    }),
   );
+  const finalSourceFiles = readResults.filter(
+    (r): r is { path: string; content: string } => r !== null,
+  );
+
+  if (filesToFetch.length > 0 && finalSourceFiles.length === 0) {
+    throw new Error(
+      "None of the selected source files could be read — the folder is locked by another process (a running build?). Stop it or re-pick the folder.",
+    );
+  }
+
 
   let finalTreePaths = treePaths;
   let isTruncated = false;
@@ -133,5 +173,6 @@ export async function processLocalFolder(
     dependencies,
     sourceFiles: finalSourceFiles,
     isTruncated,
+    unreadableFiles: unreadableFiles.length > 0 ? unreadableFiles : undefined,
   };
 }
