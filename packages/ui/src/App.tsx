@@ -1106,20 +1106,21 @@ pause`;
           setCacheKey(currentCacheKey);
         }
       } else {
-        setStatus("Processing local files...");
-        repoData = await processLocalFolder(localFilesRef.current!, maxFiles);
-        // Do not cache local files in state to save memory, they are fast to read anyway
-        setCachedRepoData(null);
-        setCacheKey("");
+        // Local mode caches processed repo data by folder identity, so
+        // re-generating with another template/provider reuses it instead of
+        // re-reading the folder. The FileList itself stays in the ref — it is
+        // only lightweight File metadata (contents are read lazily), and
+        // since F-31 it lives outside the DOM, so holding it is free.
+        const currentCacheKey = `local:${localFilesMeta?.root ?? ""}:${localFilesMeta?.count ?? 0}:${maxFiles}`;
 
-        // Free up memory by clearing the file selection if it's very large, unless we need it for deep analysis
-        if (
-          localFilesRef.current &&
-          localFilesRef.current.length > 1000 &&
-          !isDeepAnalysis
-        ) {
-          localFilesRef.current = null;
-          setLocalFilesMeta(null);
+        if (cachedRepoData && cacheKey === currentCacheKey) {
+          setStatus("Using cached repository data...");
+          repoData = cachedRepoData;
+        } else {
+          setStatus("Processing local files...");
+          repoData = await processLocalFolder(localFilesRef.current!, maxFiles);
+          setCachedRepoData(repoData);
+          setCacheKey(currentCacheKey);
         }
       }
 
