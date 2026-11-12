@@ -13,30 +13,71 @@ export interface RagChunk {
  * Fetches an embedding for a piece of text from Ollama.
  * Uses local caching to avoid redundant API calls.
  */
+function normalizeUrl(url: string): string {
+  return url.trim().replace(/\/+$/, "");
+}
+
+function assertValidEmbedding(embedding: unknown, context: string): number[] {
+  if (
+    !Array.isArray(embedding) ||
+    embedding.length === 0 ||
+    typeof embedding[0] !== "number"
+  ) {
+    throw new Error(
+      `Invalid or empty embedding returned (${context}). Ensure an embedding model is selected.`,
+    );
+  }
+  return embedding as number[];
+}
+
+function withTimeoutSignal(ms: number, externalSignal?: AbortSignal): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(ms);
+  if (!externalSignal) return timeoutSignal;
+  if (typeof (AbortSignal as any).any === "function") {
+    return (AbortSignal as any).any([timeoutSignal, externalSignal]);
+  }
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (externalSignal.aborted || timeoutSignal.aborted) {
+    controller.abort();
+  } else {
+    externalSignal.addEventListener("abort", onAbort, { once: true });
+    timeoutSignal.addEventListener("abort", onAbort, { once: true });
+  }
+  return controller.signal;
+}
+
 export async function getEmbedding(
   text: string,
   ollamaUrl: string,
   model: string,
   repoUrl: string,
-  engine: "ollama" | "lmstudio" | "llamacpp" = "ollama"
+  engine: "ollama" | "lmstudio" | "llamacpp" = "ollama",
+  signal?: AbortSignal,
 ): Promise<number[]> {
+  if (signal?.aborted) {
+    throw new DOMException("Generation cancelled", "AbortError");
+  }
+
   // Try to get from cache first
   const cached = await EmbeddingCacheService.getEmbedding(text, model, repoUrl);
   if (cached) return cached;
 
+  const cleanUrl = normalizeUrl(ollamaUrl);
   let embedding: number[];
 
   if (isTauri()) {
     if (engine === "ollama") {
-      embedding = await tauriInvoke<number[]>("ollama_embed", {
-        url: ollamaUrl,
+      const raw = await tauriInvoke<number[]>("ollama_embed", {
+        url: cleanUrl,
         model,
         prompt: text,
       });
+      embedding = assertValidEmbedding(raw, "Tauri Ollama");
     } else {
       const response = await tauriInvoke<any>("ai_network_request", {
         method: "POST",
-        url: `${ollamaUrl}/embeddings`,
+        url: `${cleanUrl}/embeddings`,
         headers: {
           "Content-Type": "application/json",
         },
@@ -50,16 +91,14 @@ export async function getEmbedding(
         throw new Error(`OpenAI API Error: ${response.status} - ${response.text}`);
       }
       const data = JSON.parse(response.text);
-      if (!data.data || !data.data[0] || !data.data[0].embedding) {
-        throw new Error("Invalid embedding response format");
-      }
-      embedding = data.data[0].embedding;
+      embedding = assertValidEmbedding(data?.data?.[0]?.embedding, "Tauri OpenAI-compatible");
     }
   } else {
     if (engine === "ollama") {
-      const res = await fetch(`${ollamaUrl.replace(/\/$/, "")}/api/embeddings`, {
+      const res = await fetch(`${cleanUrl}/api/embeddings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: withTimeoutSignal(30000, signal),
         body: JSON.stringify({
           model,
           prompt: text,
@@ -72,11 +111,12 @@ export async function getEmbedding(
       }
 
       const data = await res.json();
-      embedding = data.embedding;
+      embedding = assertValidEmbedding(data?.embedding, "Web Ollama");
     } else {
-      const res = await fetch(`${ollamaUrl}/embeddings`, {
+      const res = await fetch(`${cleanUrl}/embeddings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: withTimeoutSignal(30000, signal),
         body: JSON.stringify({
           model,
           input: text,
@@ -89,10 +129,7 @@ export async function getEmbedding(
       }
 
       const data = await res.json();
-      if (!data.data || !data.data[0] || !data.data[0].embedding) {
-         throw new Error("Invalid embedding response format");
-      }
-      embedding = data.data[0].embedding;
+      embedding = assertValidEmbedding(data?.data?.[0]?.embedding, "Web OpenAI-compatible");
     }
   }
 
@@ -106,6 +143,9 @@ export async function getEmbedding(
  * Calculates cosine similarity between two vectors.
  */
 function cosineSimilarity(a: number[], b: number[]): number {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length === 0 || a.length !== b.length) {
+    return 0;
+  }
   let dotProduct = 0;
   let normA = 0;
   let normB = 0;
@@ -114,8 +154,8 @@ function cosineSimilarity(a: number[], b: number[]): number {
     normA += a[i] * a[i];
     normB += b[i] * b[i];
   }
-  if (normA === 0 || normB === 0) return 0;
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dotProduct / denom;
 }
 
 /**
@@ -146,8 +186,13 @@ export async function performRAG(
   searchStrategy: number = 0.5, // 0 = Pure Vector, 1 = Pure BM25
   chunkSize: number = 30,
   onProgress?: (msg: string) => void,
-  engine: "ollama" | "lmstudio" | "llamacpp" = "ollama"
+  engine: "ollama" | "lmstudio" | "llamacpp" = "ollama",
+  signal?: AbortSignal,
 ): Promise<{ path: string; content: string }[]> {
+  if (signal?.aborted) {
+    throw new DOMException("Generation cancelled", "AbortError");
+  }
+
   const RAG_SYSTEM_INSTRUCTION = `
 Analyze the provided code snippets. When determining relevance:
 1. Focus on "Concrete Identifiers" (Variable names, Exported Classes, Route Definitions).
@@ -164,9 +209,13 @@ Analyze the provided code snippets. When determining relevance:
       ollamaUrl,
       model,
       repoUrl,
-      engine
+      engine,
+      signal,
     );
   } catch (e: any) {
+    if (e?.name === "AbortError" || signal?.aborted) {
+      throw new DOMException("Generation cancelled", "AbortError");
+    }
     console.warn(`[RAG Warning] Failed to embed query using model '${model}'. Falling back to pure keyword search (BM25). Error details: ${e.message}`);
   }
 
@@ -195,6 +244,9 @@ Analyze the provided code snippets. When determining relevance:
   let processed = 0;
   if (queryEmbedding) {
     for (const chunk of allChunks) {
+      if (signal?.aborted) {
+        throw new DOMException("Generation cancelled", "AbortError");
+      }
       processed++;
       if (processed % 10 === 0 || processed === 1) {
         onProgress?.(
@@ -207,15 +259,27 @@ Analyze the provided code snippets. When determining relevance:
           ollamaUrl,
           model,
           repoUrl,
-          engine
+          engine,
+          signal,
         );
-      } catch (e) {
+      } catch (e: any) {
+        if (e?.name === "AbortError" || signal?.aborted) {
+          throw new DOMException("Generation cancelled", "AbortError");
+        }
         console.warn(`Failed to embed chunk from ${chunk.path}`, e);
       }
     }
   }
 
-  onProgress?.(queryEmbedding ? "Calculating hybrid scores and reranking..." : "Calculating BM25 fallback scores...");
+  const hasVectorEmbeddings =
+    Boolean(queryEmbedding) &&
+    allChunks.some((c) => Array.isArray(c.embedding) && c.embedding.length > 0);
+
+  onProgress?.(
+    hasVectorEmbeddings
+      ? "Calculating hybrid scores and reranking..."
+      : "Calculating BM25 fallback scores...",
+  );
 
   // Calculate raw scores for both methods
   const chunkScores = allChunks.map((chunk, index) => {
@@ -224,7 +288,7 @@ Analyze the provided code snippets. When determining relevance:
       : 0;
 
     // Apply Intent-Aware Reranking Multipliers to Semantic Score
-    const pathLower = chunk.path.toLowerCase();
+    const pathLower = chunk.path.replace(/\s+\(Part \d+\)$/i, "").toLowerCase();
     const contentLower = chunk.content.toLowerCase();
 
     if (intent === "BUG_HUNT") {
@@ -237,7 +301,7 @@ Analyze the provided code snippets. When determining relevance:
       )
         semanticScore += 0.1;
     } else if (intent === "ARCHITECTURE") {
-      if (pathLower.endsWith(".md") || pathLower.includes("docs/"))
+      if (pathLower.endsWith(".md") || pathLower.endsWith(".mdx") || pathLower.includes("docs/"))
         semanticScore += 0.2;
       if (pathLower.includes("types") || pathLower.includes("interfaces"))
         semanticScore += 0.1;
@@ -251,6 +315,9 @@ Analyze the provided code snippets. When determining relevance:
       if (
         pathLower.endsWith(".tsx") ||
         pathLower.endsWith(".jsx") ||
+        pathLower.endsWith(".vue") ||
+        pathLower.endsWith(".svelte") ||
+        pathLower.endsWith(".html") ||
         pathLower.endsWith(".css") ||
         pathLower.endsWith(".scss")
       )
@@ -264,6 +331,7 @@ Analyze the provided code snippets. When determining relevance:
     } else if (intent === "DATA") {
       if (
         pathLower.endsWith(".sql") ||
+        pathLower.endsWith(".prisma") ||
         pathLower.includes("db/") ||
         pathLower.includes("models/")
       )
@@ -294,9 +362,9 @@ Analyze the provided code snippets. When determining relevance:
 
   // 4. Reciprocal Rank Fusion
   // searchStrategy: 0 = Pure Vector, 1 = Pure BM25
-  // If query embedding failed, gracefully fallback to 100% BM25 lexical search
-  const vectorWeight = queryEmbedding ? (1 - searchStrategy) : 0;
-  const lexicalWeight = queryEmbedding ? searchStrategy : 1;
+  // If query or all chunk embeddings failed, gracefully fallback to 100% BM25 lexical search
+  const vectorWeight = hasVectorEmbeddings ? (1 - searchStrategy) : 0;
+  const lexicalWeight = hasVectorEmbeddings ? searchStrategy : 1;
 
   const fusedResults = reciprocalRankFusion(
     vectorRanked,

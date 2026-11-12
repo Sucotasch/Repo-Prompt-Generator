@@ -44,7 +44,17 @@ import {
   startOllamaNative,
   stopOllamaNative,
 } from "@repo-prompt-generator/core";
-import { open } from "@tauri-apps/plugin-shell";
+
+function wrapMarkdownBlockquoteFence(text: string, lang: string = "text"): string {
+  const matches = text.match(/`+/g);
+  const maxRun = matches ? Math.max(...matches.map((m) => m.length)) : 0;
+  const fence = "`".repeat(Math.max(4, maxRun + 1));
+  const lines = text
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n");
+  return `> ${fence}${lang}\n${lines}\n> ${fence}\n`;
+}
 
 interface SavedTemplate {
   id: string;
@@ -206,6 +216,7 @@ export default function App() {
   const [testingOllama, setTestingOllama] = useState(false);
   const [loading, setLoading] = useState(false);
   const abortControllerRef = React.useRef<AbortController | null>(null);
+  const runIdRef = React.useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
@@ -220,6 +231,7 @@ export default function App() {
   const [isTruncated, setIsTruncated] = useState(false);
   const [newTemplateName, setNewTemplateName] = useState("");
   const [isSavingNew, setIsSavingNew] = useState(false);
+  const [confirmDeleteTemplateId, setConfirmDeleteTemplateId] = useState<string | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const [tokenWarningResolver, setTokenWarningResolver] = useState<
@@ -245,7 +257,6 @@ export default function App() {
   }, []);
 
   // Auto-clear RAG query optimization cache when repo or template changes
-  // AND Prune unused embedding caches
   useEffect(() => {
     const keysToRemove: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
@@ -260,13 +271,6 @@ export default function App() {
       );
       keysToRemove.forEach((key) => localStorage.removeItem(key));
     }
-
-    // Prune unused embedding caches (surgical cleanup)
-    const activeRepos = [url];
-    if (useReferenceRepo && referenceUrl) {
-      activeRepos.push(referenceUrl);
-    }
-    EmbeddingCacheService.pruneUnusedCaches(activeRepos);
   }, [url, templateMode, referenceUrl, useReferenceRepo]);
 
   useEffect(() => {
@@ -335,13 +339,14 @@ export default function App() {
   useEffect(() => {
     if (isTauri()) {
       tauriInvoke("set_app_config", {
-        gemini_key: geminiApiKey,
+        geminiKey: geminiApiKey,
         proxy: proxyAddress,
       }).catch(console.error);
     }
   }, [geminiApiKey, proxyAddress]);
 
   const handleTemplateChange = (mode: string) => {
+    setConfirmDeleteTemplateId(null);
     setTemplateMode(mode);
     if (mode === "custom") {
       setCustomInstruction("");
@@ -385,19 +390,23 @@ export default function App() {
   const handleDeleteTemplate = (e: React.MouseEvent) => {
     e.preventDefault();
     if (!templateMode.startsWith("user_")) return;
-    if (!window.confirm("Are you sure you want to delete this template?"))
+    if (confirmDeleteTemplateId !== templateMode) {
+      setConfirmDeleteTemplateId(templateMode);
       return;
+    }
     const updated = savedTemplates.filter((t) => t.id !== templateMode);
     setSavedTemplates(updated);
     localStorage.setItem("gemini_custom_templates", JSON.stringify(updated));
+    setConfirmDeleteTemplateId(null);
     handleTemplateChange("default");
   };
 
   const handleExportTemplates = () => {
     if (savedTemplates.length === 0) {
-      alert("No custom templates to export.");
+      setError("No custom templates to export.");
       return;
     }
+    setError(null);
     const dataStr =
       "data:text/json;charset=utf-8," +
       encodeURIComponent(JSON.stringify(savedTemplates, null, 2));
@@ -431,12 +440,14 @@ export default function App() {
             "gemini_custom_templates",
             JSON.stringify(newTemplates),
           );
-          alert(`Successfully imported ${added} templates.`);
+          setError(null);
+          setStatus(`Successfully imported ${added} template(s).`);
+          setTimeout(() => setStatus((prev) => (prev.startsWith("Successfully imported") ? "" : prev)), 4000);
         } else {
-          alert("Invalid templates file format.");
+          setError("Invalid templates file format.");
         }
       } catch (err) {
-        alert("Failed to parse templates file.");
+        setError("Failed to parse templates file.");
       }
     };
     reader.readAsText(file);
@@ -474,8 +485,9 @@ export default function App() {
   };
 
   const handleTestCustomProvider = async () => {
-    if (!customBaseUrl || !customApiKey) {
-      alert("Please enter both Base URL and API Key.");
+    if (!customBaseUrl.trim()) {
+      setCustomProviderConnected(false);
+      setCustomProviderError("Please enter a Base URL.");
       return;
     }
     setTestingCustomProvider(true);
@@ -562,12 +574,13 @@ pause`;
     if (!e.target.files) return;
     const files = Array.from(e.target.files) as File[];
     const newDocs: { name: string; content: string }[] = [];
+    const oversizedNames: string[] = [];
     const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
 
     for (const file of files) {
       if (file.size > MAX_FILE_SIZE) {
         console.warn(`Skipping file ${file.name}: exceeds 5MB limit.`);
-        alert(`File ${file.name} is too large (max 5MB).`);
+        oversizedNames.push(file.name);
         continue;
       }
       try {
@@ -576,6 +589,11 @@ pause`;
       } catch (err) {
         console.error(`Failed to read file ${file.name}`, err);
       }
+    }
+    if (oversizedNames.length > 0) {
+      setError(`Skipped oversized file(s) (>5MB): ${oversizedNames.join(", ")}`);
+    } else {
+      setError(null);
     }
     setAttachedDocs((prev) => [...prev, ...newDocs]);
     e.target.value = "";
@@ -639,9 +657,15 @@ pause`;
   };
 
   const cancelGeneration = () => {
+    runIdRef.current += 1;
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
+    }
+    if (tokenWarningResolver) {
+      tokenWarningResolver(false);
+      setTokenWarning(null);
+      setTokenWarningResolver(null);
     }
     setLoading(false);
     setStatus("Generation cancelled by user.");
@@ -674,8 +698,14 @@ pause`;
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
+    const myRunId = ++runIdRef.current;
     abortControllerRef.current = new AbortController();
     const signal = abortControllerRef.current.signal;
+    const ensureActive = () => {
+      if (signal.aborted || runIdRef.current !== myRunId) {
+        throw new DOMException("Generation cancelled", "AbortError");
+      }
+    };
 
     setLoading(true);
     setError(null);
@@ -696,24 +726,18 @@ pause`;
           repoData = cachedRepoData;
         } else {
           setStatus("Fetching repository data...");
-          repoData = await fetchRepoData(url, githubToken, maxFiles);
+          repoData = await fetchRepoData(url, githubToken, maxFiles, signal);
+          ensureActive();
           setCachedRepoData(repoData);
           setCacheKey(currentCacheKey);
         }
       } else {
         setStatus("Processing local files...");
         repoData = await processLocalFolder(localFiles!, maxFiles);
+        ensureActive();
         // Do not cache local files in state to save memory, they are fast to read anyway
         setCachedRepoData(null);
         setCacheKey("");
-
-        // Free up memory by clearing the file selection if it's very large, unless we need it for deep analysis
-        if (localFiles && localFiles.length > 1000 && !isDeepAnalysis) {
-          setLocalFiles(null);
-          if (fileInputRef.current) {
-            fileInputRef.current.value = "";
-          }
-        }
       }
 
       if (repoData.isTruncated) {
@@ -750,7 +774,9 @@ pause`;
               referenceUrl,
               githubToken,
               referenceMaxFiles,
+              signal,
             );
+            ensureActive();
             setCachedReferenceRepoData(referenceRepoData);
             setReferenceCacheKey(currentRefCacheKey);
           }
@@ -764,6 +790,7 @@ pause`;
             referenceLocalFiles,
             referenceMaxFiles,
           );
+          ensureActive();
           setCachedReferenceRepoData(null);
           setReferenceCacheKey("");
         }
@@ -773,11 +800,30 @@ pause`;
         }
       }
 
+      const targetRepoIdentifier =
+        inputMode === "local" ? `local://${repoData.info.repo}` : url;
+      const refRepoIdentifier = referenceRepoData
+        ? referenceInputMode === "local"
+          ? `local://${referenceRepoData.info.repo}`
+          : referenceUrl
+        : "";
+      const engineName =
+        localEngine === "ollama"
+          ? "Ollama"
+          : localEngine === "lmstudio"
+            ? "LM Studio"
+            : "Llama.cpp";
+
       let finalUsedRagQuery = "";
       let finalUsedOptimizedQuery = "";
 
       if (useRag && repoData.sourceFiles && repoData.sourceFiles.length > 0) {
         try {
+          await EmbeddingCacheService.pruneUnusedCaches(
+            [targetRepoIdentifier, refRepoIdentifier].filter(Boolean),
+          );
+          ensureActive();
+
           const getFallbackQuery = () => {
             const template = getTemplate(templateMode);
             let query = template
@@ -799,6 +845,8 @@ pause`;
             ragQuery.trim() !== "" ? ragQuery : getFallbackQuery();
           let optimizedQuery = baseQuery;
           let queryIntent = "GENERAL";
+          let optimizedQueryInfo: { query: string; intent: string } | null =
+            null;
 
           // Optimization: Skip LLM call if using a standard template's default query AND no extra context is provided
           const hasExtraContext =
@@ -838,10 +886,11 @@ pause`;
                 if (useIntentReranking) {
                   queryIntent = parsed.intent;
                 }
-                setLastOptimizedQuery({
+                optimizedQueryInfo = {
                   query: optimizedQuery,
                   intent: queryIntent,
-                });
+                };
+                setLastOptimizedQuery(optimizedQueryInfo);
               } else {
                 let result;
                 if (useOllamaForQueryExpansion) {
@@ -850,6 +899,7 @@ pause`;
                       baseQuery,
                       ollamaUrl,
                       ollamaModel,
+                      signal,
                     );
                   } else {
                     result = await rewriteQueryWithOpenAICompatible(
@@ -857,6 +907,7 @@ pause`;
                       ollamaUrl,
                       "sk-dummy-key",
                       ollamaModel,
+                      signal,
                     );
                   }
                 } else {
@@ -866,8 +917,10 @@ pause`;
                     customModel,
                     geminiApiKey,
                     proxyAddress,
+                    signal,
                   });
                 }
+                ensureActive();
 
                 if (useQueryExpansion) {
                   optimizedQuery = result.optimizedQuery;
@@ -885,30 +938,35 @@ pause`;
                     intent: result.intent,
                   }),
                 );
-                setLastOptimizedQuery({
+                optimizedQueryInfo = {
                   query: optimizedQuery,
                   intent: queryIntent,
-                });
+                };
+                setLastOptimizedQuery(optimizedQueryInfo);
               }
 
               console.log("Original RAG query:", baseQuery);
               console.log("Optimized RAG query:", optimizedQuery);
               console.log("Detected Intent:", queryIntent);
-            } catch (e) {
+            } catch (e: any) {
+              if (e?.name === "AbortError" || signal.aborted || runIdRef.current !== myRunId) {
+                throw e;
+              }
               console.warn(
                 "Query optimization failed, using original query",
                 e,
               );
+              optimizedQueryInfo = null;
               setLastOptimizedQuery(null);
             }
           } else {
-            if (isStandardTemplateDefault) {
+            if (isStandardTemplateDefault && useIntentReranking) {
               console.log(
                 "Skipping LLM expansion: using standard template default RAG query.",
               );
               // Map intent based on template if possible
               if (templateMode === "audit" || templateMode === "security")
-                queryIntent = "BUGFIX";
+                queryIntent = "BUG_HUNT";
               else if (
                 templateMode === "architecture" ||
                 templateMode === "integration"
@@ -917,10 +975,11 @@ pause`;
               else if (templateMode === "docs" || templateMode === "eli5")
                 queryIntent = "GENERAL";
             }
-            setLastOptimizedQuery({
+            optimizedQueryInfo = {
               query: optimizedQuery,
               intent: queryIntent,
-            });
+            };
+            setLastOptimizedQuery(optimizedQueryInfo);
           }
 
           const finalRagQuery = optimizedQuery.substring(0, 1000);
@@ -928,7 +987,7 @@ pause`;
           finalUsedOptimizedQuery = finalRagQuery;
 
           // Update the UI state so the user can see what was actually used for the search
-          if (!lastOptimizedQuery || lastOptimizedQuery.query.trim() === "") {
+          if (!optimizedQueryInfo || optimizedQueryInfo.query.trim() === "") {
             setLastOptimizedQuery({
               query: finalRagQuery,
               intent: queryIntent || "AUTO_FALLBACK",
@@ -942,13 +1001,17 @@ pause`;
             queryIntent,
             ollamaUrl,
             ragModel,
-            url, // Target repo URL
+            targetRepoIdentifier,
             ragTopK,
             ragSearchStrategy,
             ragChunkSize,
-            (msg) => setStatus(msg),
-            localEngine
+            (msg) => {
+              if (runIdRef.current === myRunId) setStatus(msg);
+            },
+            localEngine,
+            signal,
           );
+          ensureActive();
           repoData = { ...repoData, sourceFiles: ragFiles };
 
           if (
@@ -963,31 +1026,38 @@ pause`;
               queryIntent,
               ollamaUrl,
               ragModel,
-              referenceUrl, // Reference repo URL
+              refRepoIdentifier,
               ragTopK,
               ragSearchStrategy,
               ragChunkSize,
-              (msg) => setStatus(msg),
-              localEngine
+              (msg) => {
+                if (runIdRef.current === myRunId) setStatus(msg);
+              },
+              localEngine,
+              signal,
             );
+            ensureActive();
             referenceRepoData = {
               ...referenceRepoData,
               sourceFiles: refRagFiles,
             };
           }
         } catch (e: any) {
+          if (e?.name === "AbortError" || signal.aborted || runIdRef.current !== myRunId) {
+            throw e;
+          }
           setError(`RAG failed: ${e.message}`);
-          setLoading(false);
           return;
         }
       }
 
       let usedOllama = false;
       if (useOllama && ollamaConnected !== false) {
-        setStatus(`Summarizing with ${localEngine === "ollama" ? "local Ollama" : localEngine === "lmstudio" ? "LM Studio" : "Llama.cpp"}...`);
+        setStatus(`Summarizing with ${engineName}...`);
         usedOllama = true;
 
         const summarize = async (text: string) => {
+          ensureActive();
           if (!text) return "";
           if (localEngine === "ollama") {
             return await summarize_with_ollama(
@@ -997,32 +1067,41 @@ pause`;
               ollamaNumCtx,
               ollamaSummaryPredict,
               ollamaTemperature,
+              signal,
             );
           } else {
-             const summaryPrompt = `Please summarize the following file content in a few sentences, extracting only the most important information relevant for understanding the architecture, purpose, and key logic of the code. Ignore boilerplate.\n\nContent:\n${text.substring(0, 8000)}`;
-             return await generate_final_prompt_with_openai_compatible(
-                summaryPrompt,
-                ollamaUrl,
-                "sk-dummy-key",
-                ollamaModel,
-                ollamaTemperature,
-             );
+            const summaryPrompt = `Please summarize the following file content in a few sentences, extracting only the most important information relevant for understanding the architecture, purpose, and key logic of the code. Ignore boilerplate.\n\nContent:\n${text.substring(0, 8000)}`;
+            return await generate_final_prompt_with_openai_compatible(
+              summaryPrompt,
+              ollamaUrl,
+              "sk-dummy-key",
+              ollamaModel,
+              ollamaTemperature,
+              signal,
+            );
           }
         };
 
         const summarizedSourceFiles = [];
         if (repoData.sourceFiles) {
           for (const file of repoData.sourceFiles) {
-            setStatus(`Summarizing ${file.path} with ${localEngine === "ollama" ? "Ollama" : "Local Engine"}...`);
+            ensureActive();
+            setStatus(`Summarizing ${file.path} with ${engineName}...`);
             const summary = await summarize(file.content);
+            ensureActive();
             summarizedSourceFiles.push({ path: file.path, content: summary });
           }
         }
 
+        const summarizedReadme = await summarize(repoData.readme);
+        ensureActive();
+        const summarizedDeps = await summarize(repoData.dependencies);
+        ensureActive();
+
         repoData = {
           ...repoData,
-          readme: await summarize(repoData.readme),
-          dependencies: await summarize(repoData.dependencies),
+          readme: summarizedReadme,
+          dependencies: summarizedDeps,
           sourceFiles: summarizedSourceFiles,
         };
 
@@ -1030,30 +1109,36 @@ pause`;
           const refSummarizedSourceFiles = [];
           if (referenceRepoData.sourceFiles) {
             for (const file of referenceRepoData.sourceFiles) {
-              setStatus(`Summarizing reference ${file.path} with Ollama...`);
+              ensureActive();
+              setStatus(`Summarizing reference ${file.path} with ${engineName}...`);
               const summary = await summarize(file.content);
+              ensureActive();
               refSummarizedSourceFiles.push({
                 path: file.path,
                 content: summary,
               });
             }
           }
+          const refReadme = await summarize(referenceRepoData.readme);
+          ensureActive();
+          const refDeps = await summarize(referenceRepoData.dependencies);
+          ensureActive();
+
           referenceRepoData = {
             ...referenceRepoData,
-            readme: await summarize(referenceRepoData.readme),
-            dependencies: await summarize(referenceRepoData.dependencies),
+            readme: refReadme,
+            dependencies: refDeps,
             sourceFiles: refSummarizedSourceFiles,
           };
         }
       }
 
+      ensureActive();
       let generatedPrompt = "";
       let finalModel = "";
       let requestedFiles: string[] = [];
       let fetchedFilesCount: number | undefined = undefined;
-      let fetchedFilesDetails: any[] | undefined = undefined;
       const taskInstruction = getSystemPrompt(templateMode, customInstruction);
-      const engineName = localEngine === "ollama" ? "Ollama" : localEngine === "lmstudio" ? "LM Studio" : "Llama.cpp";
 
       if (useOllamaForFinal && ollamaConnected !== false) {
         setStatus(`Generating final prompt with local ${engineName}...`);
@@ -1083,10 +1168,9 @@ pause`;
 
           setTokenWarning(null);
           setTokenWarningResolver(null);
+          ensureActive();
 
           if (!proceed) {
-            setLoading(false);
-            setStatus("");
             return;
           }
         }
@@ -1099,6 +1183,7 @@ pause`;
             ollamaNumCtx,
             ollamaFinalPredict,
             ollamaTemperature,
+            signal,
           );
         } else {
           generatedPrompt = await generate_final_prompt_with_openai_compatible(
@@ -1107,10 +1192,12 @@ pause`;
             "sk-dummy-key",
             ollamaModel,
             ollamaTemperature,
+            signal,
           );
         }
+        ensureActive();
 
-        finalModel = `${localEngine === "ollama" ? "Ollama" : localEngine === "lmstudio" ? "LM Studio" : "Llama.cpp"} (${ollamaModel})`;
+        finalModel = `${engineName} (${ollamaModel})`;
       } else {
         setStatus(`Generating system prompt with ${aiProvider}...`);
         const result = await generatePrompt(
@@ -1130,26 +1217,34 @@ pause`;
             geminiApiKey,
             proxyAddress,
             isDeepAnalysis,
-            onStatusUpdate: setStatus,
+            onStatusUpdate: (msg) => {
+              if (runIdRef.current === myRunId) setStatus(msg);
+            },
             localFiles: inputMode === "local" ? localFiles : undefined,
-            referenceLocalFiles: referenceInputMode === "local" ? referenceLocalFiles : undefined,
+            referenceLocalFiles:
+              referenceInputMode === "local" ? referenceLocalFiles : undefined,
+            githubToken,
+            temperature: ollamaTemperature,
+            signal,
           },
         );
+        ensureActive();
         generatedPrompt = result.text;
         finalModel = result.modelVersion;
         if (result.requestedFiles) {
           requestedFiles = result.requestedFiles;
           fetchedFilesCount = result.fetchedFilesCount;
-          fetchedFilesDetails = result.fetchedFilesDetails;
         }
       }
 
       let metadata = `> **🤖 Prompt Generation Metadata**\n`;
       metadata += `> - **Model:** ${finalModel}\n`;
-      metadata += `> - **Target Repository:** ${url || "Local Folder"}\n`;
+      metadata += `> - **Target Repository:** ${
+        inputMode === "local" ? `Local Folder (${repoData.info.repo})` : url
+      }\n`;
       if (referenceRepoData) {
         if (referenceInputMode === "local") {
-          metadata += `> - **Reference Repository:** Local Folder\n`;
+          metadata += `> - **Reference Repository:** Local Folder (${referenceRepoData.info.repo})\n`;
         } else if (referenceUrl) {
           metadata += `> - **Reference Repository:** ${referenceUrl}\n`;
         }
@@ -1169,7 +1264,7 @@ pause`;
         }
       }
       if (usedOllama)
-        metadata += `> - **Pre-processing:** Local LLM (Ollama)\n`;
+        metadata += `> - **Pre-processing:** Local LLM (${engineName})\n`;
 
       if (requestedFiles && requestedFiles.length > 0) {
         if (fetchedFilesCount !== undefined) {
@@ -1177,48 +1272,19 @@ pause`;
         } else {
           metadata += `> - **Agentic RAG Requested Files:**\n`;
         }
-        
-        // Add detailed file status if available
-        if (fetchedFilesDetails) {
-          requestedFiles.forEach(file => {
-            const detail = fetchedFilesDetails?.find((f: any) => f.path === file);
-            if (detail) {
-              if (detail.truncated) {
-                metadata += `>   - \`${file}\` (⚠️ Truncated: >50KB)\n`;
-              } else {
-                metadata += `>   - \`${file}\` (✅ Fetched)\n`;
-              }
-            } else {
-              metadata += `>   - \`${file}\` (❌ Not found)\n`;
-            }
-          });
-        } else {
-          requestedFiles.forEach(file => {
-            metadata += `>   - \`${file}\`\n`;
-          });
-        }
+        requestedFiles.forEach((file) => {
+          metadata += `>   - \`${file}\`\n`;
+        });
       }
 
       metadata += `> \n`;
       metadata += `> <details><summary><b>Task Instructions</b></summary>\n> \n`;
-      metadata += `> \`\`\`text\n`;
-      metadata +=
-        taskInstruction
-          .split("\n")
-          .map((line) => `> ${line}`)
-          .join("\n") + "\n";
-      metadata += `> \`\`\`\n`;
+      metadata += wrapMarkdownBlockquoteFence(taskInstruction, "text");
       metadata += `> </details>\n`;
 
       if (additionalContext) {
         metadata += `>\n> <details><summary><b>Additional Context</b></summary>\n> \n`;
-        metadata += `> \`\`\`text\n`;
-        metadata +=
-          additionalContext
-            .split("\n")
-            .map((line) => `> ${line}`)
-            .join("\n") + "\n";
-        metadata += `> \`\`\`\n`;
+        metadata += wrapMarkdownBlockquoteFence(additionalContext, "text");
         metadata += `> </details>\n`;
       }
 
@@ -1226,21 +1292,30 @@ pause`;
 
       generatedPrompt = metadata + generatedPrompt;
 
+      const safeProjectName = projectName
+        .replace(/[<>:"/\\|?*\x00-\x1f]/g, "-")
+        .replace(/-+/g, "-")
+        .replace(/^-|-$/g, "") || "project";
       const safeModelName = finalModel
         .replace(/[^a-zA-Z0-9-]/g, "-")
         .replace(/-+/g, "-")
         .toLowerCase();
       setGeneratedFileName(
-        `${projectName}_${templateName}_${safeModelName}_${timestamp}.md`,
+        `${safeProjectName}_${templateName}_${safeModelName}_${timestamp}.md`,
       );
 
       setPrompt(generatedPrompt);
       setUsedModel(finalModel);
     } catch (err: any) {
+      if (err?.name === "AbortError" || signal.aborted || runIdRef.current !== myRunId) {
+        return;
+      }
       setError(err.message || "An unexpected error occurred.");
     } finally {
-      setLoading(false);
-      setStatus("");
+      if (runIdRef.current === myRunId) {
+        setLoading(false);
+        setStatus("");
+      }
     }
   };
 
@@ -1331,7 +1406,9 @@ pause`;
                   {localFiles && localFiles.length > 0 && (
                     <p className="mt-2 text-sm text-slate-600">
                       Selected {localFiles.length} files from{" "}
-                      {localFiles[0].webkitRelativePath.split("/")[0]}
+                      {localFiles[0].webkitRelativePath?.split(/[/\\]/)[0] ||
+                        localFiles[0].name ||
+                        "local-folder"}
                     </p>
                   )}
                 </div>
@@ -1599,17 +1676,36 @@ pause`;
                       </span>
                     </label>
                     <div className="flex justify-end gap-2">
-                      {templateMode.startsWith("user_") && (
-                        <button
-                          type="button"
-                          onClick={handleDeleteTemplate}
-                          disabled={loading}
-                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-50"
-                        >
-                          <Trash2 className="w-4 h-4 mr-1.5" />
-                          Delete
-                        </button>
-                      )}
+                      {templateMode.startsWith("user_") &&
+                        (confirmDeleteTemplateId === templateMode ? (
+                          <div className="inline-flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={handleDeleteTemplate}
+                              disabled={loading}
+                              className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors disabled:opacity-50"
+                            >
+                              Confirm Delete
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteTemplateId(null)}
+                              className="inline-flex items-center px-2.5 py-1.5 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={handleDeleteTemplate}
+                            disabled={loading}
+                            className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-50"
+                          >
+                            <Trash2 className="w-4 h-4 mr-1.5" />
+                            Delete
+                          </button>
+                        ))}
                       {templateMode.startsWith("user_") &&
                         customInstruction.trim() !== "" && (
                           <button
@@ -1951,6 +2047,45 @@ pause`;
                   </div>
                 </div>
               )}
+
+              <div className="mt-4 pt-4 border-t border-slate-200 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label
+                    className="block text-xs font-medium text-slate-500 mb-1"
+                    title="0 = No limit (Full files). Use 2000-4000 for smaller context models or faster generation."
+                  >
+                    File Truncation Limit (Chars, 0 = Full Files)
+                  </label>
+                  <input
+                    type="number"
+                    value={fileTruncationLimit}
+                    onChange={(e) =>
+                      setFileTruncationLimit(Math.max(0, Number(e.target.value)))
+                    }
+                    className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:ring-indigo-500 focus:border-indigo-500"
+                    disabled={loading}
+                    min={0}
+                    step={1000}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">
+                    Temperature ({ollamaTemperature})
+                  </label>
+                  <input
+                    type="range"
+                    value={ollamaTemperature}
+                    onChange={(e) =>
+                      setOllamaTemperature(Number(e.target.value))
+                    }
+                    className="block w-full mt-2 accent-indigo-600"
+                    disabled={loading}
+                    min={0}
+                    max={1}
+                    step={0.1}
+                  />
+                </div>
+              </div>
             </div>
 
             {/* Local AI Engine Settings */}
@@ -2009,14 +2144,14 @@ pause`;
                     <input
                       id="isDeepAnalysis"
                       type="checkbox"
-                      className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer disabled:opacity-50"
+                      className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                       checked={isDeepAnalysis}
                       onChange={(e) => setIsDeepAnalysis(e.target.checked)}
-                      disabled={loading}
+                      disabled={loading || useOllamaForFinal}
                     />
                     <label
                       htmlFor="isDeepAnalysis"
-                      className="ml-2 flex items-center text-sm font-medium text-slate-700 cursor-pointer"
+                      className={`ml-2 flex items-center text-sm font-medium ${useOllamaForFinal ? "text-slate-400 cursor-not-allowed" : "text-slate-700 cursor-pointer"}`}
                     >
                       Agentic RAG (Deep Analysis)
                       <span 
@@ -2025,6 +2160,11 @@ pause`;
                       >
                         ⚠️ Tokens x3
                       </span>
+                      {useOllamaForFinal && (
+                        <span className="ml-2 text-xs font-normal text-slate-400">
+                          (Bypassed by Local Final Model)
+                        </span>
+                      )}
                     </label>
                   </div>
                 )}
@@ -2347,7 +2487,7 @@ pause`;
                   )}
 
                   {(useOllama || useOllamaForFinal || useOllamaForQueryExpansion) && (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                       {localEngine === "ollama" && (
                         <div>
                           <label
@@ -2403,42 +2543,6 @@ pause`;
                           disabled={loading}
                           min={250}
                           step={50}
-                        />
-                      </div>
-                      <div>
-                        <label
-                          className="block text-xs font-medium text-slate-500 mb-1"
-                          title="0 = No limit (Full files). Use 2000-4000 for faster generation when deep code analysis isn't needed."
-                        >
-                          File Truncation (Chars)
-                        </label>
-                        <input
-                          type="number"
-                          value={fileTruncationLimit}
-                          onChange={(e) =>
-                            setFileTruncationLimit(Number(e.target.value))
-                          }
-                          className="block w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                          disabled={loading}
-                          min={0}
-                          step={1000}
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-slate-500 mb-1">
-                          Temperature ({ollamaTemperature})
-                        </label>
-                        <input
-                          type="range"
-                          value={ollamaTemperature}
-                          onChange={(e) =>
-                            setOllamaTemperature(Number(e.target.value))
-                          }
-                          className="block w-full mt-2"
-                          disabled={loading}
-                          min={0}
-                          max={1}
-                          step={0.1}
                         />
                       </div>
                     </div>
@@ -2644,8 +2748,10 @@ pause`;
       <div className="fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-md border-t border-slate-200 p-4 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] z-40">
         <div className="max-w-4xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex-1 min-w-0">
-            {status && loading && (
-              <p className="text-sm font-medium text-indigo-600 animate-pulse truncate">
+            {status && (
+              <p
+                className={`text-sm font-medium truncate ${loading ? "text-indigo-600 animate-pulse" : "text-slate-600"}`}
+              >
                 {status}
               </p>
             )}

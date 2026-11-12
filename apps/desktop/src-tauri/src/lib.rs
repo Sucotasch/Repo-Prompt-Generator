@@ -27,56 +27,61 @@ pub struct AppState {
     pub we_started_ollama: AtomicBool,
 }
 
+fn resolve_env_gemini_key() -> String {
+    let val = std::env::var("GEMINI_API_KEY")
+        .or_else(|_| std::env::var("VITE_GEMINI_API_KEY"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if val == "YOUR_GEMINI_API_KEY_HERE" || val == "MY_GEMINI_API_KEY" {
+        String::new()
+    } else {
+        val
+    }
+}
+
 #[tauri::command]
 async fn set_app_config(state: State<'_, AppState>, gemini_key: Option<String>, proxy: Option<String>) -> Result<(), String> {
     if let Some(key) = gemini_key {
-        *state.gemini_api_key.write().await = key.trim().to_string();
+        let trimmed = key.trim().to_string();
+        let resolved = if trimmed.is_empty() {
+            resolve_env_gemini_key()
+        } else {
+            trimmed
+        };
+        *state.gemini_api_key.write().await = resolved;
     }
 
     let proxy_url = proxy.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
-    
-    let client = if let Some(url) = proxy_url {
-        let proxy_uri = if !url.starts_with("http") {
-            format!("http://{}", url)
-        } else {
+    let mut builder = isahc::HttpClient::builder().timeout(Duration::from_secs(300));
+
+    if let Some(url) = proxy_url {
+        let proxy_uri = if url.contains("://") {
             url.to_string()
+        } else {
+            format!("http://{}", url)
         };
-        
-        let old_https = std::env::var("HTTPS_PROXY").ok();
-        let old_http = std::env::var("HTTP_PROXY").ok();
-        
-        std::env::set_var("HTTPS_PROXY", &proxy_uri);
-        std::env::set_var("HTTP_PROXY", &proxy_uri);
-        
-        let c = isahc::HttpClient::builder()
-            .timeout(std::time::Duration::from_secs(3600))
-            .build()
-            .map_err(|e| format!("Failed to create proxy client: {}", e))?;
-            
-        if let Some(old) = old_https {
-            std::env::set_var("HTTPS_PROXY", old);
-        } else {
-            std::env::remove_var("HTTPS_PROXY");
-        }
-        if let Some(old) = old_http {
-            std::env::set_var("HTTP_PROXY", old);
-        } else {
-            std::env::remove_var("HTTP_PROXY");
-        }
-        c
-    } else {
-        isahc::HttpClient::builder()
-            .timeout(std::time::Duration::from_secs(3600))
-            .build()
-            .map_err(|e| format!("Failed to create client: {}", e))?
-    };
+        let parsed: isahc::http::Uri = proxy_uri
+            .parse()
+            .map_err(|e| format!("Invalid proxy URL '{}': {}", proxy_uri, e))?;
+        builder = builder.proxy(Some(parsed));
+    }
+
+    let client = builder
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     *state.http_client.write().await = client;
     Ok(())
 }
 
 #[tauri::command(rename_all = "snake_case")]
-async fn call_gemini_secure(state: State<'_, AppState>, prompt: String, model: Option<String>) -> Result<String, String> {
+async fn call_gemini_secure(
+    state: State<'_, AppState>,
+    prompt: String,
+    model: Option<String>,
+    response_mime_type: Option<String>,
+) -> Result<String, String> {
     let key = state.gemini_api_key.read().await.clone();
 
     if key.is_empty() {
@@ -86,11 +91,17 @@ async fn call_gemini_secure(state: State<'_, AppState>, prompt: String, model: O
     println!("[Gemini] Using key: {}... (len: {})", &key[..std::cmp::min(4, key.len())], key.len());
 
     let model_name = model.unwrap_or_else(|| "gemini-3-flash-preview".to_string());
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model_name);
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        urlencoding::encode(&model_name)
+    );
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "contents": [{ "parts": [{ "text": prompt }] }]
     });
+    if let Some(mime) = response_mime_type.filter(|m| !m.trim().is_empty()) {
+        body["generationConfig"] = serde_json::json!({ "responseMimeType": mime });
+    }
 
     let request = isahc::Request::builder()
         .method("POST")
@@ -113,7 +124,36 @@ async fn call_gemini_secure(state: State<'_, AppState>, prompt: String, model: O
         return Err(format!("Gemini API error ({}): {}", status, res_text));
     }
 
-    Ok(res_text)
+    let envelope: serde_json::Value = serde_json::from_str(&res_text)
+        .map_err(|e| format!("Invalid Gemini JSON response: {}", e))?;
+
+    let parts = envelope["candidates"][0]["content"]["parts"]
+        .as_array()
+        .ok_or_else(|| {
+            let block_reason = envelope["promptFeedback"]["blockReason"].as_str();
+            match block_reason {
+                Some(reason) => format!("Gemini blocked response: {}", reason),
+                None => "Gemini response missing candidate parts".to_string(),
+            }
+        })?;
+
+    let mut text = String::new();
+    for part in parts {
+        if part["thought"].as_bool() != Some(true) {
+            if let Some(t) = part["text"].as_str() {
+                text.push_str(t);
+            }
+        }
+    }
+    if text.trim().is_empty() {
+        for part in parts {
+            if let Some(t) = part["text"].as_str() {
+                text.push_str(t);
+            }
+        }
+    }
+
+    Ok(text)
 }
 
 #[tauri::command]
@@ -206,6 +246,7 @@ pub struct RepoInfo {
     owner: String,
     repo: String,
     default_branch: String,
+    branch: Option<String>,
     description: String,
     stargazers_count: Option<u32>,
     topics: Option<Vec<String>>,
@@ -223,6 +264,50 @@ pub struct GithubRepoData {
     is_truncated: bool,
 }
 
+fn encode_github_path(path: &str) -> String {
+    path.split('/')
+        .map(|seg| urlencoding::encode(seg).into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn is_valid_github_ident(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
+}
+
+fn should_ignore_github_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    let segments: Vec<&str> = lower.split('/').collect();
+    if segments.len() > 1 {
+        let dir_segments = &segments[..segments.len() - 1];
+        let hard_ignore = ["venv", ".venv", "node_modules", ".git", "__pycache__", "dist", "build", "target"];
+        if dir_segments.iter().any(|seg| hard_ignore.contains(seg)) {
+            return true;
+        }
+    }
+    let file_name = segments.last().copied().unwrap_or("");
+    if file_name == ".env"
+        || (file_name.starts_with(".env.")
+            && !file_name.ends_with(".example")
+            && !file_name.ends_with(".template")
+            && !file_name.ends_with(".sample"))
+    {
+        return true;
+    }
+    if [".pem", ".key", ".cert", ".p12"].iter().any(|ext| file_name.ends_with(ext)) {
+        return true;
+    }
+    ["secrets.json", "credentials.json", "id_rsa", "id_ed25519"].contains(&file_name)
+}
+
+fn truncate_utf8_content(mut content: String, max_chars: usize) -> String {
+    if let Some((idx, _)) = content.char_indices().nth(max_chars) {
+        content.truncate(idx);
+        content.push_str("\n\n... [TRUNCATED: File exceeds 100KB limit]");
+    }
+    content
+}
+
 #[tauri::command]
 async fn fetch_github_repo(
     state: State<'_, AppState>,
@@ -233,10 +318,15 @@ async fn fetch_github_repo(
     max_files: Option<u32>,
 ) -> Result<GithubRepoData, String> {
     use tokio::task::JoinSet;
+    use tokio::sync::Semaphore;
     use std::sync::Arc;
 
+    if !is_valid_github_ident(&owner) || !is_valid_github_ident(&repo) {
+        return Err("Invalid owner or repository name format.".to_string());
+    }
+
     let client = Arc::new(state.http_client.read().await.clone());
-    let token_arc = Arc::new(token.unwrap_or_default());
+    let token_arc = Arc::new(token.map(|t| t.trim().to_string()).unwrap_or_default());
 
     // 1. Fetch basic info
     let info_url = format!("https://api.github.com/repos/{}/{}", owner, repo);
@@ -254,19 +344,23 @@ async fn fetch_github_repo(
     if !info_res.status().is_success() {
         return Err(format!("Failed to fetch repo info: {}", info_res.status()));
     }
-    
+
     let info_text = info_res.text().await.map_err(|e| e.to_string())?;
     let info_json: serde_json::Value = serde_json::from_str(&info_text).map_err(|e| e.to_string())?;
-    let default_branch = branch.filter(|b| !b.is_empty()).unwrap_or_else(|| {
-        info_json["default_branch"].as_str().unwrap_or("main").to_string()
-    });
+    let default_branch = info_json["default_branch"].as_str().unwrap_or("main").to_string();
+    let target_branch = branch
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| default_branch.clone());
+    let encoded_branch = urlencoding::encode(&target_branch).into_owned();
+
     let description = info_json["description"].as_str().unwrap_or("No description.").to_string();
     let stargazers_count = info_json["stargazers_count"].as_u64().map(|n| n as u32);
     let topics = info_json["topics"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect());
     let language = info_json["language"].as_str().map(|s| s.to_string());
 
     // 2. Fetch tree
-    let tree_url = format!("https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1", owner, repo, default_branch);
+    let tree_url = format!("https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1", owner, repo, encoded_branch);
     let mut tree_builder = isahc::Request::builder()
         .method("GET")
         .uri(&tree_url)
@@ -278,11 +372,24 @@ async fn fetch_github_repo(
     }
 
     let mut tree_res = client.send_async(tree_builder.body("".to_string()).unwrap()).await.map_err(|e| e.to_string())?;
+    if !tree_res.status().is_success() {
+        return Err(format!(
+            "Failed to fetch repository tree for branch '{}': {}",
+            target_branch,
+            tree_res.status()
+        ));
+    }
     let tree_text = tree_res.text().await.map_err(|e| e.to_string())?;
     let tree_json: serde_json::Value = serde_json::from_str(&tree_text).map_err(|e| e.to_string())?;
     let mut tree_paths: Vec<String> = tree_json["tree"]
         .as_array()
-        .map(|a| a.iter().filter(|i| i["type"] == "blob").filter_map(|i| i["path"].as_str().map(|s| s.to_string())).collect())
+        .map(|a| {
+            a.iter()
+                .filter(|i| i["type"] == "blob")
+                .filter_map(|i| i["path"].as_str().map(|s| s.to_string()))
+                .filter(|p| !should_ignore_github_path(p))
+                .collect()
+        })
         .unwrap_or_default();
 
     // 3. Parallel fetch for README and dependencies
@@ -290,7 +397,7 @@ async fn fetch_github_repo(
     let mut join_set = JoinSet::new();
 
     // Fetch README
-    let readme_url = format!("https://api.github.com/repos/{}/{}/readme", owner, repo);
+    let readme_url = format!("https://api.github.com/repos/{}/{}/readme?ref={}", owner, repo, encoded_branch);
     let client_c = Arc::clone(&client);
     let token_c = Arc::clone(&token_arc);
     join_set.spawn(async move {
@@ -299,7 +406,7 @@ async fn fetch_github_repo(
             .header("Accept", "application/vnd.github.v3+json")
             .header("User-Agent", "Tauri/Prompt-Generator");
         if !token_c.is_empty() { b = b.header("Authorization", format!("token {}", *token_c)); }
-        
+
         if let Ok(mut res) = client_c.send_async(b.body("".to_string()).unwrap()).await {
             if res.status().is_success() {
                 if let Ok(text) = res.text().await {
@@ -323,14 +430,20 @@ async fn fetch_github_repo(
             let client_c = Arc::clone(&client);
             let token_c = Arc::clone(&token_arc);
             let file_name = file.to_string();
-            let file_url = format!("https://api.github.com/repos/{}/{}/contents/{}", owner, repo, file);
+            let file_url = format!(
+                "https://api.github.com/repos/{}/{}/contents/{}?ref={}",
+                owner,
+                repo,
+                encode_github_path(file),
+                encoded_branch
+            );
             join_set.spawn(async move {
                 let mut b = isahc::Request::builder()
                     .uri(&file_url)
                     .header("Accept", "application/vnd.github.v3+json")
                     .header("User-Agent", "Tauri/Prompt-Generator");
                 if !token_c.is_empty() { b = b.header("Authorization", format!("token {}", *token_c)); }
-                
+
                 if let Ok(mut res) = client_c.send_async(b.body("".to_string()).unwrap()).await {
                     if res.status().is_success() {
                         if let Ok(text) = res.text().await {
@@ -359,10 +472,13 @@ async fn fetch_github_repo(
         }
     }
 
-    // 4. Determine and fetch source files in parallel
-    let source_extensions = [".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java", ".cpp", ".c", ".h", ".cs", ".md"];
+    // 4. Determine and fetch source files in bounded parallel batches
+    let source_extensions = [".ts", ".tsx", ".js", ".jsx", ".vue", ".svelte", ".py", ".go", ".rs", ".java", ".cpp", ".c", ".h", ".cs", ".sql", ".prisma", ".css", ".scss", ".html", ".md", ".mdx"];
     let mut files_to_fetch: Vec<String> = tree_paths.iter()
-        .filter(|p| source_extensions.iter().any(|ext| p.ends_with(ext)))
+        .filter(|p| {
+            let lower_p = p.to_lowercase();
+            source_extensions.iter().any(|ext| lower_p.ends_with(ext))
+        })
         .filter(|p| !dep_files_list.contains(&p.as_str()) && p.to_lowercase() != "readme.md")
         .cloned().collect();
 
@@ -380,22 +496,32 @@ async fn fetch_github_repo(
     }
 
     files_to_fetch.sort_by(|a, b| get_file_score(b).cmp(&get_file_score(a)));
-    let limit = max_files.unwrap_or(5).clamp(1, 200) as usize;
+    let abs_max = if token_arc.is_empty() { 10 } else { 200 };
+    let limit = max_files.unwrap_or(5).clamp(1, abs_max) as usize;
     let selected = if files_to_fetch.len() > limit { files_to_fetch[0..limit].to_vec() } else { files_to_fetch };
 
+    let semaphore = Arc::new(Semaphore::new(12));
     let mut source_join_set = JoinSet::new();
     for file in selected {
         let client_c = Arc::clone(&client);
         let token_c = Arc::clone(&token_arc);
+        let sem_c = Arc::clone(&semaphore);
         let path = file.clone();
-        let file_url = format!("https://api.github.com/repos/{}/{}/contents/{}", owner, repo, file);
+        let file_url = format!(
+            "https://api.github.com/repos/{}/{}/contents/{}?ref={}",
+            owner,
+            repo,
+            encode_github_path(&file),
+            encoded_branch
+        );
         source_join_set.spawn(async move {
+            let _permit = sem_c.acquire().await.ok()?;
             let mut b = isahc::Request::builder()
                 .uri(&file_url)
                 .header("Accept", "application/vnd.github.v3+json")
                 .header("User-Agent", "Tauri/Prompt-Generator");
             if !token_c.is_empty() { b = b.header("Authorization", format!("token {}", *token_c)); }
-            
+
             if let Ok(mut res) = client_c.send_async(b.body("".to_string()).unwrap()).await {
                 if res.status().is_success() {
                     if let Ok(text) = res.text().await {
@@ -403,7 +529,8 @@ async fn fetch_github_repo(
                             if let Some(content) = json["content"].as_str() {
                                 let cleaned = content.replace('\n', "").replace('\r', "");
                                 if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, cleaned) {
-                                    return Some(FileEntry { path, content: String::from_utf8_lossy(&decoded).to_string() });
+                                    let text_content = truncate_utf8_content(String::from_utf8_lossy(&decoded).to_string(), 100_000);
+                                    return Some(FileEntry { path, content: text_content });
                                 }
                             }
                         }
@@ -423,7 +550,16 @@ async fn fetch_github_repo(
     if tree_paths.len() > 1000 { tree_paths.truncate(1000); is_truncated = true; }
 
     Ok(GithubRepoData {
-        info: RepoInfo { owner, repo, default_branch, description, stargazers_count, topics, language },
+        info: RepoInfo {
+            owner,
+            repo,
+            default_branch,
+            branch: Some(target_branch),
+            description,
+            stargazers_count,
+            topics,
+            language,
+        },
         tree: tree_paths, readme, dependencies, source_files, is_truncated,
     })
 }
@@ -431,10 +567,10 @@ async fn fetch_github_repo(
 #[tauri::command]
 async fn is_ollama_running() -> bool {
     let mut s = System::new();
-    s.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::everything());
+    s.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
     let name_win = OsStr::new("ollama.exe");
     let name_unix = OsStr::new("ollama");
-    
+
     s.processes().values().any(|p| p.name() == name_win || p.name() == name_unix)
 }
 
@@ -456,8 +592,11 @@ async fn start_ollama(state: State<'_, AppState>) -> Result<String, String> {
         .spawn();
 
     match child {
-        Ok(_) => {
+        Ok(mut child_proc) => {
             state.we_started_ollama.store(true, Ordering::SeqCst);
+            std::thread::spawn(move || {
+                let _ = child_proc.wait();
+            });
             Ok("Ollama started successfully".to_string())
         }
         Err(e) => Err(format!("Failed to start Ollama: {}", e)),
@@ -478,9 +617,9 @@ async fn stop_ollama(state: State<'_, AppState>) -> Result<String, String> {
 
     if we_started_it {
         let mut s = System::new();
-        s.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, ProcessRefreshKind::everything());
+        s.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
         let mut killed = 0;
-        
+
         for process in s.processes_by_exact_name(OsStr::new("ollama.exe")) {
             process.kill();
             killed += 1;
@@ -489,7 +628,7 @@ async fn stop_ollama(state: State<'_, AppState>) -> Result<String, String> {
             process.kill();
             killed += 1;
         }
-        
+
         if killed > 0 {
             return Ok(format!("Stopped {} Ollama processes", killed));
         }
@@ -501,7 +640,7 @@ async fn stop_ollama(state: State<'_, AppState>) -> Result<String, String> {
 
 #[tauri::command]
 async fn ollama_check_connection(state: State<'_, AppState>, url: String) -> Result<bool, String> {
-    let url = url.replace("localhost", "127.0.0.1");
+    let url = url.trim().trim_end_matches('/').replace("localhost", "127.0.0.1");
     let endpoint = format!("{}/api/tags", url);
     let res = state.ollama_client.get_async(&endpoint).await;
     match res {
@@ -515,13 +654,13 @@ async fn ollama_check_connection(state: State<'_, AppState>, url: String) -> Res
 
 #[tauri::command]
 async fn ollama_fetch_models(state: State<'_, AppState>, url: String) -> Result<Vec<String>, String> {
-    let url = url.replace("localhost", "127.0.0.1");
+    let url = url.trim().trim_end_matches('/').replace("localhost", "127.0.0.1");
     let endpoint = format!("{}/api/tags", url);
     let mut res = state.ollama_client.get_async(&endpoint).await.map_err(|e| {
         eprintln!("Ollama fetch models error for {}: {}", endpoint, e);
         e.to_string()
     })?;
-    
+
     if !res.status().is_success() {
         eprintln!("Ollama fetch models failed with status: {}", res.status());
         return Ok(Vec::new());
@@ -537,7 +676,7 @@ async fn ollama_fetch_models(state: State<'_, AppState>, url: String) -> Result<
                 .collect()
         })
         .unwrap_or_default();
-    
+
     Ok(models)
 }
 
@@ -552,9 +691,9 @@ async fn ollama_generate(
     temperature: Option<f32>,
     format: Option<String>,
 ) -> Result<String, String> {
-    let url = url.replace("localhost", "127.0.0.1");
+    let url = url.trim().trim_end_matches('/').replace("localhost", "127.0.0.1");
     let endpoint = format!("{}/api/generate", url);
-    
+
     let mut options = serde_json::Map::new();
     if let Some(ctx) = num_ctx { options.insert("num_ctx".to_string(), serde_json::Value::from(ctx)); }
     if let Some(predict) = num_predict { options.insert("num_predict".to_string(), serde_json::Value::from(predict)); }
@@ -591,7 +730,7 @@ async fn ollama_generate(
 
     let data: serde_json::Value = serde_json::from_str(&data_text).map_err(|e| e.to_string())?;
     let response = data["response"].as_str().unwrap_or_default().to_string();
-    
+
     Ok(response)
 }
 
@@ -602,7 +741,7 @@ async fn ollama_embed(
     model: String,
     prompt: String,
 ) -> Result<Vec<f32>, String> {
-    let url = url.replace("localhost", "127.0.0.1");
+    let url = url.trim().trim_end_matches('/').replace("localhost", "127.0.0.1");
     let endpoint = format!("{}/api/embeddings", url);
     
     let body = serde_json::json!({
@@ -691,11 +830,8 @@ async fn get_gemini_key_source(state: State<'_, AppState>) -> Result<String, Str
         return Ok(format!("app_state:{}...{}", &app_key[..std::cmp::min(4, app_key.len())], &app_key[app_key.len().saturating_sub(4)..]));
     }
 
-    let env_key = std::env::var("GEMINI_API_KEY")
-        .or_else(|_| std::env::var("VITE_GEMINI_API_KEY"))
-        .unwrap_or_default();
-    
-    if env_key.is_empty() || env_key == "YOUR_GEMINI_API_KEY_HERE" {
+    let env_key = resolve_env_gemini_key();
+    if env_key.is_empty() {
         Ok("none".to_string())
     } else {
         Ok(format!("env:{}...{}", &env_key[..std::cmp::min(4, env_key.len())], &env_key[env_key.len().saturating_sub(4)..]))
@@ -705,11 +841,7 @@ async fn get_gemini_key_source(state: State<'_, AppState>) -> Result<String, Str
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Priority: GEMINI_API_KEY (system) > VITE_GEMINI_API_KEY (.env) > empty
-    let gemini_api_key = std::env::var("GEMINI_API_KEY")
-        .or_else(|_| std::env::var("VITE_GEMINI_API_KEY"))
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let gemini_api_key = resolve_env_gemini_key();
 
     println!("[Init] Gemini API key from env: {} (len: {})",
         if gemini_api_key.is_empty() { "NOT FOUND" } else { &gemini_api_key[..std::cmp::min(4, gemini_api_key.len())] },
@@ -717,7 +849,7 @@ pub fn run() {
     );
 
     let client = HttpClient::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(300))
         .build()
         .expect("Failed to create HTTP client");
 
@@ -773,7 +905,7 @@ pub fn run() {
                 };
                 if we_started_it {
                     let mut s = System::new();
-                    s.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, ProcessRefreshKind::everything());
+                    s.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
                     for process in s.processes_by_exact_name(OsStr::new("ollama.exe")) {
                         let _ = process.kill();
                     }

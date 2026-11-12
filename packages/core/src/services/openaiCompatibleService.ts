@@ -1,19 +1,77 @@
 import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
 import { safeJsonParse } from "../utils/jsonUtils.ts";
 
+function normalizeBaseUrl(baseURL: string): string {
+  return baseURL.trim().replace(/\/+$/, "");
+}
+
+function buildAuthHeaders(apiKey: string, includeContentType: boolean = true): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (includeContentType) {
+    headers["Content-Type"] = "application/json";
+  }
+  const trimmedKey = apiKey?.trim();
+  if (trimmedKey) {
+    headers["Authorization"] = `Bearer ${trimmedKey}`;
+  }
+  return headers;
+}
+
+function isLocalEndpoint(url: string): boolean {
+  return url.includes("localhost") || url.includes("127.0.0.1");
+}
+
+function withTimeoutSignal(ms: number, externalSignal?: AbortSignal): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(ms);
+  if (!externalSignal) return timeoutSignal;
+  if (typeof (AbortSignal as any).any === "function") {
+    return (AbortSignal as any).any([timeoutSignal, externalSignal]);
+  }
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (externalSignal.aborted || timeoutSignal.aborted) {
+    controller.abort();
+  } else {
+    externalSignal.addEventListener("abort", onAbort, { once: true });
+    timeoutSignal.addEventListener("abort", onAbort, { once: true });
+  }
+  return controller.signal;
+}
+
+async function parseErrorResponse(response: Response): Promise<string> {
+  let errorMessage = `${response.status} ${response.statusText}`;
+  const text = await response.text();
+  try {
+    const errorData = JSON.parse(text);
+    if (errorData.error?.message) {
+      errorMessage = errorData.error.message;
+      if (errorData.error?.metadata) {
+        errorMessage += ` (Metadata: ${JSON.stringify(errorData.error.metadata)})`;
+      }
+    } else if (errorData.message) {
+      errorMessage = errorData.message;
+    } else if (text) {
+      errorMessage = `${errorMessage} - ${text}`;
+    }
+  } catch {
+    if (text) {
+      errorMessage = `${errorMessage} - ${text}`;
+    }
+  }
+  return errorMessage;
+}
+
 export async function fetchOpenAICompatibleModels(
   baseURL: string,
   apiKey: string,
 ): Promise<string[]> {
+  const cleanBaseUrl = normalizeBaseUrl(baseURL);
   try {
     if (isTauri()) {
       const response = await tauriInvoke<any>("ai_network_request", {
         method: "GET",
-        url: `${baseURL}/models`,
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
+        url: `${cleanBaseUrl}/models`,
+        headers: buildAuthHeaders(apiKey),
         body: null,
       });
       
@@ -43,19 +101,15 @@ export async function fetchOpenAICompatibleModels(
       return [];
     }
 
-    const isLocalURL = baseURL.includes('localhost') || baseURL.includes('127.0.0.1');
-
-    if (isLocalURL) {
-      const response = await fetch(`${baseURL}/models`, {
+    if (isLocalEndpoint(cleanBaseUrl)) {
+      const response = await fetch(`${cleanBaseUrl}/models`, {
         method: "GET",
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
+        headers: buildAuthHeaders(apiKey),
+        signal: AbortSignal.timeout(15000),
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status} ${response.statusText}`);
+        throw new Error(await parseErrorResponse(response));
       }
 
       const data = await response.json();
@@ -72,31 +126,15 @@ export async function fetchOpenAICompatibleModels(
       headers: {
         "Content-Type": "application/json",
       },
+      signal: AbortSignal.timeout(30000),
       body: JSON.stringify({
-        baseUrl: baseURL,
-        apiKey: apiKey,
+        baseUrl: cleanBaseUrl,
+        apiKey: apiKey?.trim() || "",
       }),
     });
 
     if (!response.ok) {
-      let errorMessage = `${response.status} ${response.statusText}`;
-      const text = await response.text();
-      try {
-        const errorData = JSON.parse(text);
-        if (errorData.error?.message) {
-          errorMessage = errorData.error.message;
-          if (errorData.error.metadata) {
-            errorMessage += ` (Metadata: ${JSON.stringify(errorData.error.metadata)})`;
-          }
-        } else if (errorData.message) {
-          errorMessage = errorData.message;
-        } else {
-          errorMessage = `${errorMessage} - ${text}`;
-        }
-      } catch (e) {
-        errorMessage = `${errorMessage} - ${text}`;
-      }
-      throw new Error(errorMessage);
+      throw new Error(await parseErrorResponse(response));
     }
 
     const data = await response.json();
@@ -126,11 +164,16 @@ function extractChoiceContent(choice: any): string {
     text = msg.reasoning_content;
   }
 
-  // Strip <think>...</think> tags if final answer content follows
+  // Strip <think>...</think> tags (or prefix ending with </think>) if final answer follows
   if (text.includes("<think>")) {
     const stripped = text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
     if (stripped.length > 0) {
       text = stripped;
+    }
+  } else if (text.includes("</think>")) {
+    const afterThink = text.split("</think>").pop()?.trim();
+    if (afterThink) {
+      text = afterThink;
     }
   }
 
@@ -143,15 +186,18 @@ export async function generate_final_prompt_with_openai_compatible(
   apiKey: string,
   modelName: string,
   temperature: number = 0.3,
+  signal?: AbortSignal,
 ): Promise<string> {
+  if (signal?.aborted) {
+    throw new DOMException("Generation cancelled", "AbortError");
+  }
+  const cleanBaseUrl = normalizeBaseUrl(baseURL);
+
   if (isTauri()) {
     const response = await tauriInvoke<any>("ai_network_request", {
       method: "POST",
-      url: `${baseURL}/chat/completions`,
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
+      url: `${cleanBaseUrl}/chat/completions`,
+      headers: buildAuthHeaders(apiKey),
       body: JSON.stringify({
         model: modelName,
         messages: [{ role: "user", content: promptText }],
@@ -180,15 +226,11 @@ export async function generate_final_prompt_with_openai_compatible(
     return extractChoiceContent(data.choices?.[0]);
   }
 
-  const isLocalURL = baseURL.includes('localhost') || baseURL.includes('127.0.0.1');
-
-  if (isLocalURL) {
-    const response = await fetch(`${baseURL}/chat/completions`, {
+  if (isLocalEndpoint(cleanBaseUrl)) {
+    const response = await fetch(`${cleanBaseUrl}/chat/completions`, {
       method: "POST",
-      headers: {
-         "Authorization": `Bearer ${apiKey}`,
-         "Content-Type": "application/json",
-      },
+      headers: buildAuthHeaders(apiKey),
+      signal: withTimeoutSignal(120000, signal),
       body: JSON.stringify({
         model: modelName,
         messages: [{ role: "user", content: promptText }],
@@ -197,7 +239,7 @@ export async function generate_final_prompt_with_openai_compatible(
     });
 
     if (!response.ok) {
-       throw new Error(`OpenAI API Error: ${response.status} ${response.statusText}`);
+       throw new Error(`OpenAI API Error: ${await parseErrorResponse(response)}`);
     }
     const data = await response.json();
     return extractChoiceContent(data.choices?.[0]);
@@ -208,35 +250,20 @@ export async function generate_final_prompt_with_openai_compatible(
     headers: {
       "Content-Type": "application/json",
     },
+    signal: withTimeoutSignal(120000, signal),
     body: JSON.stringify({
-      baseUrl: baseURL,
-      apiKey: apiKey,
+      baseUrl: cleanBaseUrl,
+      apiKey: apiKey?.trim() || "",
       payload: {
         model: modelName,
         messages: [{ role: "user", content: promptText }],
+        temperature: temperature,
       },
     }),
   });
 
   if (!response.ok) {
-    let errorMessage = `${response.status} ${response.statusText}`;
-    const text = await response.text();
-    try {
-      const errorData = JSON.parse(text);
-      if (errorData.error?.message) {
-        errorMessage = errorData.error.message;
-        if (errorData.error?.metadata) {
-          errorMessage += ` (Metadata: ${JSON.stringify(errorData.error.metadata)})`;
-        }
-      } else if (errorData.message) {
-        errorMessage = errorData.message;
-      } else {
-        errorMessage = `${errorMessage} - ${text}`;
-      }
-    } catch (e) {
-      errorMessage = `${errorMessage} - ${text}`;
-    }
-    throw new Error(`OpenAI API Error: ${errorMessage}`);
+    throw new Error(`OpenAI API Error: ${await parseErrorResponse(response)}`);
   }
 
   const data = await response.json();
@@ -248,7 +275,11 @@ export async function rewriteQueryWithOpenAICompatible(
   baseURL: string,
   apiKey: string,
   modelName: string,
+  signal?: AbortSignal,
 ): Promise<{ optimizedQuery: string; intent: string }> {
+  if (signal?.aborted) {
+    throw new DOMException("Generation cancelled", "AbortError");
+  }
   const systemPrompt = `You are a search query optimizer for a codebase RAG system.
 Given a user's task description (which will be enclosed in <user_text> tags), extract the core technical keywords, function names, and concepts that are most likely to be found in the source code.
 Output ONLY the optimized search query, nothing else. No explanations.
@@ -266,14 +297,13 @@ Return your response in the following JSON format:
   "intent": "ARCHITECTURE"
 }`;
 
+  const cleanBaseUrl = normalizeBaseUrl(baseURL);
+
   if (isTauri()) {
     const response = await tauriInvoke<any>("ai_network_request", {
       method: "POST",
-      url: `${baseURL}/chat/completions`,
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
+      url: `${cleanBaseUrl}/chat/completions`,
+      headers: buildAuthHeaders(apiKey),
       body: JSON.stringify({
         model: modelName,
         messages: [
@@ -315,26 +345,23 @@ Return your response in the following JSON format:
     };
   }
 
-  const isLocalURL = baseURL.includes('localhost') || baseURL.includes('127.0.0.1');
-
-  if (isLocalURL) {
-    const response = await fetch(`${baseURL}/chat/completions`, {
+  if (isLocalEndpoint(cleanBaseUrl)) {
+    const response = await fetch(`${cleanBaseUrl}/chat/completions`, {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
+      headers: buildAuthHeaders(apiKey),
+      signal: withTimeoutSignal(30000, signal),
       body: JSON.stringify({
         model: modelName,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: `<user_text>\n${query}\n</user_text>` },
         ],
+        temperature: 0.3,
       }),
     });
 
     if (!response.ok) {
-       throw new Error(`OpenAI API Error: ${response.status} ${response.statusText}`);
+       throw new Error(`OpenAI API Error: ${await parseErrorResponse(response)}`);
     }
 
     const data = await response.json();
@@ -356,38 +383,23 @@ Return your response in the following JSON format:
     headers: {
       "Content-Type": "application/json",
     },
+    signal: withTimeoutSignal(30000, signal),
     body: JSON.stringify({
-      baseUrl: baseURL,
-      apiKey: apiKey,
+      baseUrl: cleanBaseUrl,
+      apiKey: apiKey?.trim() || "",
       payload: {
         model: modelName,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: `<user_text>\n${query}\n</user_text>` },
         ],
+        temperature: 0.3,
       },
     }),
   });
 
   if (!response.ok) {
-    let errorMessage = `${response.status} ${response.statusText}`;
-    const text = await response.text();
-    try {
-      const errorData = JSON.parse(text);
-      if (errorData.error?.message) {
-        errorMessage = errorData.error.message;
-        if (errorData.error?.metadata) {
-          errorMessage += ` (Metadata: ${JSON.stringify(errorData.error.metadata)})`;
-        }
-      } else if (errorData.message) {
-        errorMessage = errorData.message;
-      } else {
-        errorMessage = `${errorMessage} - ${text}`;
-      }
-    } catch (e) {
-      errorMessage = `${errorMessage} - ${text}`;
-    }
-    throw new Error(`OpenAI API Error: ${errorMessage}`);
+    throw new Error(`OpenAI API Error: ${await parseErrorResponse(response)}`);
   }
 
   const data = await response.json();

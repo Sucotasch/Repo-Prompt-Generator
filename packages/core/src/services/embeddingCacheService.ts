@@ -53,7 +53,13 @@ export class EmbeddingCacheService {
 
       if (response) {
         const data = await response.json();
-        return data.embedding;
+        if (
+          Array.isArray(data?.embedding) &&
+          data.embedding.length > 0 &&
+          typeof data.embedding[0] === "number"
+        ) {
+          return data.embedding;
+        }
       }
     } catch (e) {
       console.warn("[EmbeddingCache] Read failed:", e);
@@ -70,6 +76,13 @@ export class EmbeddingCacheService {
     embedding: number[],
     repoUrl: string,
   ): Promise<void> {
+    if (
+      !Array.isArray(embedding) ||
+      embedding.length === 0 ||
+      typeof embedding[0] !== "number"
+    ) {
+      return;
+    }
     try {
       const ns = this.getNamespace(repoUrl);
       const hash = await this.generateHash(text, model);

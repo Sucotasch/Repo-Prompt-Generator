@@ -1,3 +1,22 @@
+function resolveRelativeModulePath(fromFilePath: string, importSpec: string): string {
+  const normalizedFrom = fromFilePath.replace(/\\/g, "/");
+  const cleanSpec = importSpec.replace(/\\/g, "/");
+  if (!cleanSpec.startsWith(".")) {
+    return cleanSpec;
+  }
+  const fromSegments = normalizedFrom.split("/");
+  fromSegments.pop(); // remove filename
+  for (const seg of cleanSpec.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") {
+      if (fromSegments.length > 0) fromSegments.pop();
+    } else {
+      fromSegments.push(seg);
+    }
+  }
+  return fromSegments.join("/");
+}
+
 export function buildCodeDependencyGraph(
   sourceFiles: { path: string; content: string }[],
   maxChars: number = 3000,
@@ -24,11 +43,12 @@ export function buildCodeDependencyGraph(
         targetModule.startsWith("~/") ||
         targetModule.startsWith("src/")
       ) {
-        // Clean up paths to make them shorter and more readable
+        const resolvedTarget = resolveRelativeModulePath(file.path, targetModule);
         const fromPath = file.path
+          .replace(/\\/g, "/")
           .replace(/^.*\/src\//, "src/")
           .replace(/^\.\//, "");
-        const toPath = targetModule
+        const toPath = resolvedTarget
           .replace(/^.*\/src\//, "src/")
           .replace(/^\.\//, "");
 

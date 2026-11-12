@@ -22,22 +22,27 @@ export async function rewriteQuery(
     customModel?: string;
     geminiApiKey?: string;
     proxyAddress?: string;
+    signal?: AbortSignal;
   },
 ): Promise<{
   optimizedQuery: string;
   intent: string;
 }> {
-  if (
-    provider === "custom" &&
-    options?.customBaseUrl &&
-    options?.customApiKey &&
-    options?.customModel
-  ) {
+  if (provider === "custom") {
+    const baseUrl = options?.customBaseUrl?.trim();
+    const model = options?.customModel?.trim();
+    if (!baseUrl) {
+      throw new Error("Custom Provider is selected, but Base URL is missing.");
+    }
+    if (!model) {
+      throw new Error("Custom Provider is selected, but Model Name is missing.");
+    }
     return await rewriteQueryWithOpenAICompatible(
       query,
-      options.customBaseUrl,
-      options.customApiKey,
-      options.customModel,
+      baseUrl,
+      options?.customApiKey?.trim() || "",
+      model,
+      options?.signal,
     );
   } else {
     // Default to Gemini
@@ -45,6 +50,7 @@ export async function rewriteQuery(
       query,
       options?.geminiApiKey,
       options?.proxyAddress,
+      options?.signal,
     );
   }
 }
@@ -71,22 +77,27 @@ export async function generatePrompt(
     onStatusUpdate?: (status: string) => void;
     localFiles?: FileList | null;
     referenceLocalFiles?: FileList | null;
+    githubToken?: string;
+    temperature?: number;
+    signal?: AbortSignal;
   },
 ): Promise<{
   text: string;
   modelVersion: string;
   requestedFiles?: string[];
   fetchedFilesCount?: number;
-  fetchedFilesDetails?: any[];
 }> {
   const fileTruncationLimit = options?.fileTruncationLimit ?? 0;
 
-  if (
-    provider === "custom" &&
-    options?.customBaseUrl &&
-    options?.customApiKey &&
-    options?.customModel
-  ) {
+  if (provider === "custom") {
+    const baseUrl = options?.customBaseUrl?.trim();
+    const model = options?.customModel?.trim();
+    if (!baseUrl) {
+      throw new Error("Custom Provider is selected, but Base URL is missing.");
+    }
+    if (!model) {
+      throw new Error("Custom Provider is selected, but Model Name is missing.");
+    }
     const promptText = buildPromptText(
       repoData,
       taskInstruction,
@@ -94,15 +105,17 @@ export async function generatePrompt(
       analyzeIssues,
       referenceRepoData,
       attachedDocs,
-      0,
+      fileTruncationLimit,
     );
     const text = await generate_final_prompt_with_openai_compatible(
       promptText,
-      options.customBaseUrl,
-      options.customApiKey,
-      options.customModel,
+      baseUrl,
+      options?.customApiKey?.trim() || "",
+      model,
+      options?.temperature ?? 0.3,
+      options?.signal,
     );
-    return { text, modelVersion: `custom/${options.customModel}` };
+    return { text, modelVersion: `custom/${model}` };
   } else {
     // Default to Gemini
     return await geminiGenerate(
@@ -119,7 +132,9 @@ export async function generatePrompt(
       options?.isDeepAnalysis,
       options?.onStatusUpdate,
       options?.localFiles,
-      options?.referenceLocalFiles
+      options?.referenceLocalFiles,
+      options?.githubToken,
+      options?.signal,
     );
   }
 }

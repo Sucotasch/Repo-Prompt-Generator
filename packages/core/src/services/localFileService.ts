@@ -1,7 +1,46 @@
 import { RepoData } from "./githubService";
 
-const HARD_IGNORE_REGEX = /(^|\/)(venv|\.venv|node_modules|\.git|__pycache__|dist|build)(\/|$)/i;
-const SECRET_IGNORE_REGEX = /(\.env|\.pem|\.key|\.cert|\.p12|secrets\.json|credentials\.json|id_rsa)$|\/(\.env|\.pem|\.key|\.cert|\.p12|secrets\.json|credentials\.json|id_rsa)/i;
+const HARD_IGNORE_DIRS = new Set([
+  "venv",
+  ".venv",
+  "node_modules",
+  ".git",
+  "__pycache__",
+  "dist",
+  "build",
+  "target",
+]);
+const SECRET_EXACT_NAMES = new Set([
+  "secrets.json",
+  "credentials.json",
+  "id_rsa",
+  "id_ed25519",
+]);
+const SECRET_EXTENSIONS = [".pem", ".key", ".cert", ".p12"];
+
+function shouldIgnoreLocalPath(filePath: string): boolean {
+  const lower = filePath.replace(/\\/g, "/").toLowerCase();
+  const segments = lower.split("/").filter(Boolean);
+  if (segments.length > 1) {
+    for (let i = 0; i < segments.length - 1; i++) {
+      if (HARD_IGNORE_DIRS.has(segments[i])) return true;
+    }
+  }
+  const fileName = segments[segments.length - 1] || "";
+  if (
+    fileName === ".env" ||
+    (fileName.startsWith(".env.") &&
+      !fileName.endsWith(".example") &&
+      !fileName.endsWith(".template") &&
+      !fileName.endsWith(".sample"))
+  ) {
+    return true;
+  }
+  if (SECRET_EXTENSIONS.some((ext) => fileName.endsWith(ext))) {
+    return true;
+  }
+  return SECRET_EXACT_NAMES.has(fileName);
+}
 
 const TEST_REGEX = /(\/tests?\/|__tests__|.*\.(test|spec)\.|^test_|.*_test\.go)/i;
 const AUX_REGEX = /(build|setup|config|webpack|vite|rollup|gulpfile|backup|manage\.py|scripts\/|tools\/|docs\/|example|demo|migrations\/)/i;
@@ -16,12 +55,15 @@ const depFiles = [
   "pom.xml",
   "build.gradle",
 ];
+const depFileSet = new Set(depFiles.map((d) => d.toLowerCase()));
 
 const sourceExtensions = [
   ".ts",
   ".tsx",
   ".js",
   ".jsx",
+  ".vue",
+  ".svelte",
   ".py",
   ".go",
   ".rs",
@@ -30,7 +72,13 @@ const sourceExtensions = [
   ".c",
   ".h",
   ".cs",
+  ".sql",
+  ".prisma",
+  ".css",
+  ".scss",
+  ".html",
   ".md",
+  ".mdx",
 ];
 
 const getFileScore = (filePath: string): number => {
@@ -49,6 +97,32 @@ const getFileScore = (filePath: string): number => {
   return score;
 };
 
+function getFileBaseNameLower(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, "/");
+  const idx = normalized.lastIndexOf("/");
+  return (idx === -1 ? normalized : normalized.slice(idx + 1)).toLowerCase();
+}
+
+function getPathDepth(filePath: string): number {
+  return filePath.replace(/\\/g, "/").split("/").filter(Boolean).length;
+}
+
+function findShallowestByExactName(files: File[], targetLowerName: string): File | undefined {
+  let bestFile: File | undefined = undefined;
+  let bestDepth = Infinity;
+  for (const f of files) {
+    const p = f.webkitRelativePath || f.name;
+    if (getFileBaseNameLower(p) === targetLowerName) {
+      const depth = getPathDepth(p);
+      if (depth < bestDepth) {
+        bestDepth = depth;
+        bestFile = f;
+      }
+    }
+  }
+  return bestFile;
+}
+
 export async function processLocalFolder(
   files: FileList,
   maxFiles: number,
@@ -57,24 +131,20 @@ export async function processLocalFolder(
 
   const filteredFiles = fileArray.filter((f) => {
     const path = f.webkitRelativePath || f.name;
-    return !HARD_IGNORE_REGEX.test(path) && !SECRET_IGNORE_REGEX.test(path);
+    return !shouldIgnoreLocalPath(path);
   });
 
   const treePaths = filteredFiles.map((f) => f.webkitRelativePath || f.name);
 
   let readme = "";
-  const readmeFile = filteredFiles.find((f) =>
-    (f.webkitRelativePath || f.name).toLowerCase().endsWith("readme.md"),
-  );
+  const readmeFile = findShallowestByExactName(filteredFiles, "readme.md");
   if (readmeFile) {
     readme = await readmeFile.text();
   }
 
   let dependencies = "";
   for (const depName of depFiles) {
-    const depFile = filteredFiles.find((f) =>
-      (f.webkitRelativePath || f.name).endsWith(depName),
-    );
+    const depFile = findShallowestByExactName(filteredFiles, depName.toLowerCase());
     if (depFile) {
       dependencies += `\n--- ${depName} ---\n${await depFile.text()}\n`;
     }
@@ -82,10 +152,12 @@ export async function processLocalFolder(
 
   let filesToFetch = filteredFiles.filter((f) => {
     const p = f.webkitRelativePath || f.name;
+    const lowerP = p.toLowerCase();
+    const baseLower = getFileBaseNameLower(p);
     return (
-      sourceExtensions.some((ext) => p.endsWith(ext)) &&
-      !depFiles.some((d) => p.endsWith(d)) &&
-      !p.toLowerCase().endsWith("readme.md")
+      sourceExtensions.some((ext) => lowerP.endsWith(ext)) &&
+      !depFileSet.has(baseLower) &&
+      baseLower !== "readme.md"
     );
   });
 
@@ -102,10 +174,18 @@ export async function processLocalFolder(
   filesToFetch = filesToFetch.slice(0, limit);
 
   const finalSourceFiles = await Promise.all(
-    filesToFetch.map(async (f) => ({
-      path: f.webkitRelativePath || f.name,
-      content: await f.text(),
-    })),
+    filesToFetch.map(async (f) => {
+      let content = await f.text();
+      if (content.length > 100000) {
+        content =
+          content.substring(0, 100000) +
+          "\n\n... [TRUNCATED: File exceeds 100KB limit. Showing only the top part.]";
+      }
+      return {
+        path: f.webkitRelativePath || f.name,
+        content,
+      };
+    }),
   );
 
   let finalTreePaths = treePaths;
@@ -117,7 +197,7 @@ export async function processLocalFolder(
 
   const repoName =
     fileArray.length > 0
-      ? fileArray[0].webkitRelativePath.split("/")[0] || "local-folder"
+      ? fileArray[0].webkitRelativePath?.split(/[/\\]/)[0] || "local-folder"
       : "local-folder";
 
   return {

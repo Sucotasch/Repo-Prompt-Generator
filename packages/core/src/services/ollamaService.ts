@@ -2,12 +2,34 @@ import { RepoData } from "./githubService";
 import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
 import { safeJsonParse } from "../utils/jsonUtils";
 
+function normalizeOllamaUrl(url: string): string {
+  return url.trim().replace(/\/+$/, "");
+}
+
+function withTimeoutSignal(ms: number, externalSignal?: AbortSignal): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(ms);
+  if (!externalSignal) return timeoutSignal;
+  if (typeof (AbortSignal as any).any === "function") {
+    return (AbortSignal as any).any([timeoutSignal, externalSignal]);
+  }
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (externalSignal.aborted || timeoutSignal.aborted) {
+    controller.abort();
+  } else {
+    externalSignal.addEventListener("abort", onAbort, { once: true });
+    timeoutSignal.addEventListener("abort", onAbort, { once: true });
+  }
+  return controller.signal;
+}
+
 export async function checkOllamaConnection(url: string): Promise<boolean> {
+  const cleanUrl = normalizeOllamaUrl(url);
   try {
     if (isTauri()) {
-      return await tauriInvoke<boolean>("ollama_check_connection", { url });
+      return await tauriInvoke<boolean>("ollama_check_connection", { url: cleanUrl });
     }
-    const res = await fetch(`${url}/api/tags`, {
+    const res = await fetch(`${cleanUrl}/api/tags`, {
       signal: AbortSignal.timeout(3000), // 3s timeout for quick check
     });
     return res.ok;
@@ -17,11 +39,12 @@ export async function checkOllamaConnection(url: string): Promise<boolean> {
 }
 
 export async function fetchOllamaModels(url: string): Promise<string[]> {
+  const cleanUrl = normalizeOllamaUrl(url);
   try {
     if (isTauri()) {
-      return await tauriInvoke<string[]>("ollama_fetch_models", { url });
+      return await tauriInvoke<string[]>("ollama_fetch_models", { url: cleanUrl });
     }
-    const res = await fetch(`${url}/api/tags`, {
+    const res = await fetch(`${cleanUrl}/api/tags`, {
       signal: AbortSignal.timeout(5000), // 5s timeout for model list
     });
     if (!res.ok) return [];
@@ -39,14 +62,20 @@ export async function summarize_with_ollama(
   numCtx: number = 8192,
   numPredict: number = 250,
   temperature: number = 0.3,
+  signal?: AbortSignal,
 ): Promise<string> {
   if (!text || text.trim() === "") return "";
+  if (signal?.aborted) {
+    throw new DOMException("Generation cancelled", "AbortError");
+  }
   const prompt = `Please summarize the following file content in a few sentences, extracting only the most important information relevant for understanding the architecture, purpose, and key logic of the code. Ignore boilerplate.\n\nContent:\n${text.substring(0, 8000)}`;
+
+  const cleanUrl = normalizeOllamaUrl(url);
 
   try {
     if (isTauri()) {
       return await tauriInvoke<string>("ollama_generate", {
-        url,
+        url: cleanUrl,
         model,
         prompt,
         numCtx,
@@ -55,9 +84,10 @@ export async function summarize_with_ollama(
       });
     }
 
-    const res = await fetch(`${url}/api/generate`, {
+    const res = await fetch(`${cleanUrl}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: withTimeoutSignal(300000, signal),
       body: JSON.stringify({
         model: model,
         prompt: prompt,
@@ -73,7 +103,10 @@ export async function summarize_with_ollama(
     if (!res.ok) throw new Error("Ollama request failed");
     const data = await res.json();
     return data.response;
-  } catch (e) {
+  } catch (e: any) {
+    if (e?.name === "AbortError" || signal?.aborted) {
+      throw new DOMException("Generation cancelled", "AbortError");
+    }
     console.error("Ollama summarization error:", e);
     return `[Ollama Summarization Failed] ${text.substring(0, 500)}...`;
   }
@@ -83,6 +116,7 @@ export async function rewriteQueryWithOllama(
   query: string,
   url: string,
   model: string,
+  signal?: AbortSignal,
 ): Promise<{ optimizedQuery: string; intent: string }> {
   if (!query || query.trim() === "")
     return { optimizedQuery: query, intent: "GENERAL" };
@@ -108,10 +142,12 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
 ${query}
 </user_text>`;
 
+  const cleanUrl = normalizeOllamaUrl(url);
+
   try {
     if (isTauri()) {
       const text = await tauriInvoke<string>("ollama_generate", {
-        url,
+        url: cleanUrl,
         model,
         prompt,
         numPredict: 200,
@@ -128,9 +164,10 @@ ${query}
       };
     }
 
-    const res = await fetch(`${url}/api/generate`, {
+    const res = await fetch(`${cleanUrl}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: withTimeoutSignal(60000, signal),
       body: JSON.stringify({
         model: model,
         prompt: prompt,
@@ -154,7 +191,10 @@ ${query}
       optimizedQuery: parsed.optimizedQuery || query,
       intent: parsed.intent || "GENERAL",
     };
-  } catch (e) {
+  } catch (e: any) {
+    if (e?.name === "AbortError" || signal?.aborted) {
+      throw new DOMException("Generation cancelled", "AbortError");
+    }
     console.error("Ollama query rewrite error:", e);
     return { optimizedQuery: query, intent: "GENERAL" };
   }
@@ -167,11 +207,17 @@ export async function generate_final_prompt_with_ollama(
   numCtx: number = 8192,
   numPredict: number = 2048,
   temperature: number = 0.5,
+  signal?: AbortSignal,
 ): Promise<string> {
+  if (signal?.aborted) {
+    throw new DOMException("Generation cancelled", "AbortError");
+  }
+  const cleanUrl = normalizeOllamaUrl(url);
+
   try {
     if (isTauri()) {
       return await tauriInvoke<string>("ollama_generate", {
-        url,
+        url: cleanUrl,
         model,
         prompt,
         numCtx,
@@ -180,9 +226,10 @@ export async function generate_final_prompt_with_ollama(
       });
     }
 
-    const res = await fetch(`${url}/api/generate`, {
+    const res = await fetch(`${cleanUrl}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: withTimeoutSignal(600000, signal),
       body: JSON.stringify({
         model: model,
         prompt: prompt,
@@ -199,6 +246,9 @@ export async function generate_final_prompt_with_ollama(
     const data = await res.json();
     return data.response;
   } catch (e: any) {
+    if (e?.name === "AbortError" || signal?.aborted) {
+      throw new DOMException("Generation cancelled", "AbortError");
+    }
     console.error("Ollama generation error:", e);
     throw new Error(
       `Ollama generation failed: ${e.message || "Unknown error"}`,

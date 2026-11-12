@@ -20,12 +20,34 @@ export interface RepoData {
   isTruncated?: boolean;
 }
 
+function withTimeoutSignal(ms: number, externalSignal?: AbortSignal): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(ms);
+  if (!externalSignal) return timeoutSignal;
+  if (typeof (AbortSignal as any).any === "function") {
+    return (AbortSignal as any).any([timeoutSignal, externalSignal]);
+  }
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (externalSignal.aborted || timeoutSignal.aborted) {
+    controller.abort();
+  } else {
+    externalSignal.addEventListener("abort", onAbort, { once: true });
+    timeoutSignal.addEventListener("abort", onAbort, { once: true });
+  }
+  return controller.signal;
+}
+
 export async function fetchRepoData(
   url: string,
   token?: string,
   maxFiles: number = 5,
+  signal?: AbortSignal,
 ): Promise<RepoData> {
   try {
+    if (signal?.aborted) {
+      throw new DOMException("Generation cancelled", "AbortError");
+    }
+
     let owner = "";
     let repo = "";
     let branch = undefined;
@@ -60,13 +82,17 @@ export async function fetchRepoData(
     }
 
     if (isTauri()) {
-      return await tauriInvoke<RepoData>("fetch_github_repo", {
+      const res = await tauriInvoke<RepoData>("fetch_github_repo", {
         owner,
         repo,
         branch,
         token,
         maxFiles,
       });
+      if (signal?.aborted) {
+        throw new DOMException("Generation cancelled", "AbortError");
+      }
+      return res;
     }
 
     const response = await fetch("/api/repo", {
@@ -74,7 +100,7 @@ export async function fetchRepoData(
       headers: {
         "Content-Type": "application/json",
       },
-      signal: AbortSignal.timeout(60000), // 60s timeout for repo fetch
+      signal: withTimeoutSignal(60000, signal), // 60s timeout + cancel support
       body: JSON.stringify({ owner, repo, branch, token, maxFiles }),
     });
 
@@ -92,6 +118,16 @@ export async function fetchRepoData(
     }
     throw err;
   }
+}
+
+export function sanitizeAndEncodeGitHubPath(filePath: string): string | null {
+  if (typeof filePath !== "string") return null;
+  const normalized = filePath.replace(/\\/g, "/").replace(/^\/+/, "").trim();
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.length === 0 || segments.some((s) => s === "." || s === "..")) {
+    return null;
+  }
+  return segments.map((s) => encodeURIComponent(s)).join("/");
 }
 
 async function fetchFilesFromRepo(
@@ -118,28 +154,36 @@ async function fetchFilesFromRepo(
       }
 
       for (const file of filePaths.slice(0, 3)) {
+        const encodedFile = sanitizeAndEncodeGitHubPath(file);
+        if (!encodedFile) {
+          console.warn(`Skipped invalid GitHub path in Tauri: ${file}`);
+          continue;
+        }
         try {
-          const url = `https://api.github.com/repos/${owner}/${repo}/contents/${file}?ref=${encodedBranch}`;
-          const response = await tauriInvoke<any>("ai_network_request", {
+          const url = `https://api.github.com/repos/${owner}/${repo}/contents/${encodedFile}?ref=${encodedBranch}`;
+          const response = await tauriInvoke<{ status: number; text: string }>("ai_network_request", {
             method: "GET",
             url,
             headers,
             body: null,
           });
 
-          if (response && response.content) {
-            // Base64 decode in browser
-            const binaryString = atob(response.content);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-              bytes[i] = binaryString.charCodeAt(i);
-            }
-            let content = new TextDecoder("utf-8").decode(bytes);
+          if (response && response.status >= 200 && response.status < 300 && response.text) {
+            const fileData = JSON.parse(response.text);
+            if (fileData && typeof fileData.content === "string") {
+              const cleanBase64 = fileData.content.replace(/\s/g, "");
+              const binaryString = atob(cleanBase64);
+              const bytes = new Uint8Array(binaryString.length);
+              for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+              }
+              let content = new TextDecoder("utf-8").decode(bytes);
 
-            if (content.length > 50000) {
-              content = content.substring(0, 50000) + "\n\n... [TRUNCATED: File exceeds 50KB limit. Showing only the top part.]";
+              if (content.length > 50000) {
+                content = content.substring(0, 50000) + "\n\n... [TRUNCATED: File exceeds 50KB limit. Showing only the top part.]";
+              }
+              fetchedFiles.push({ path: file, content });
             }
-            fetchedFiles.push({ path: file, content });
           }
         } catch (e) {
           console.warn(`Failed to fetch specific file ${file} in Tauri:`, e);

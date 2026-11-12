@@ -4,6 +4,29 @@ import { RepoData } from "./githubService";
 import { buildCodeDependencyGraph } from "../utils/codeGraph";
 import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
 import { safeJsonParse } from "../utils/jsonUtils.ts";
+import { fetchSpecificFiles } from "./githubService";
+
+const PLACEHOLDER_KEYS = new Set(["MY_GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE"]);
+
+function resolveGeminiApiKey(explicitKey?: string): string {
+  const cleanExplicit = explicitKey?.trim();
+  if (cleanExplicit && !PLACEHOLDER_KEYS.has(cleanExplicit)) {
+    return cleanExplicit;
+  }
+  try {
+    const definedKey = process.env.GEMINI_API_KEY?.trim();
+    if (definedKey && !PLACEHOLDER_KEYS.has(definedKey)) {
+      return definedKey;
+    }
+  } catch {
+    // process is not defined when Vite define substitution was skipped
+  }
+  const viteKey = import.meta.env.VITE_GEMINI_API_KEY?.trim();
+  if (viteKey && !PLACEHOLDER_KEYS.has(viteKey)) {
+    return viteKey;
+  }
+  return "";
+}
 
 export function buildPromptText(
   repoData: RepoData,
@@ -34,7 +57,7 @@ export function buildPromptText(
     prompt += `Branch: ${repoData.info.branch}\n`;
   }
   prompt += `Description: ${repoData.info.description}\n\n`;
-  prompt += `File Tree (partial):\n${repoData.tree.slice(0, 500).join("\n")}\n\n`;
+  prompt += `File Tree (partial):\n${repoData.tree.slice(0, 1000).join("\n")}\n\n`;
 
   if (repoData.sourceFiles && repoData.sourceFiles.length > 0) {
     const dependencyGraph = buildCodeDependencyGraph(repoData.sourceFiles);
@@ -56,7 +79,7 @@ export function buildPromptText(
       prompt += `Branch: ${referenceRepoData.info.branch}\n`;
     }
     prompt += `Description: ${referenceRepoData.info.description}\n\n`;
-    prompt += `File Tree (partial):\n${referenceRepoData.tree.slice(0, 500).join("\n")}\n\n`;
+    prompt += `File Tree (partial):\n${referenceRepoData.tree.slice(0, 1000).join("\n")}\n\n`;
 
     if (
       referenceRepoData.sourceFiles &&
@@ -99,9 +122,13 @@ export async function rewriteQueryWithGemini(
   query: string,
   geminiApiKey?: string,
   proxyAddress?: string,
+  signal?: AbortSignal,
 ): Promise<{ optimizedQuery: string; intent: string }> {
   if (!query || query.trim() === "")
     return { optimizedQuery: query, intent: "GENERAL" };
+  if (signal?.aborted) {
+    throw new DOMException("Generation cancelled", "AbortError");
+  }
 
   const prompt = `You are an AI assistant optimizing a search query for a Retrieval-Augmented Generation (RAG) system operating on a code repository.
 The user's original query is: "${query}"
@@ -127,6 +154,7 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
       const responseText = await tauriInvoke<string>("call_gemini_secure", {
         prompt,
         model: "gemini-3-flash-preview",
+        response_mime_type: "application/json",
       });
       
       const cleanText = responseText.trim();
@@ -142,13 +170,14 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
     }
 
     const ai = new GoogleGenAI({
-      apiKey: geminiApiKey || (typeof process !== 'undefined' ? process.env.GEMINI_API_KEY : undefined) || import.meta.env.VITE_GEMINI_API_KEY || "",
+      apiKey: resolveGeminiApiKey(geminiApiKey),
     });
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
+        abortSignal: signal,
       },
     });
 
@@ -163,13 +192,14 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
       optimizedQuery: parsed.optimizedQuery || query,
       intent: parsed.intent || "GENERAL",
     };
-  } catch (e) {
+  } catch (e: any) {
+    if (e?.name === "AbortError" || signal?.aborted) {
+      throw new DOMException("Generation cancelled", "AbortError");
+    }
     console.error("Failed to rewrite query with Gemini:", e);
     return { optimizedQuery: query, intent: "GENERAL" };
   }
 }
-
-import { fetchSpecificFiles } from "./githubService";
 
 export async function generateSystemPrompt(
   repoData: RepoData,
@@ -185,8 +215,13 @@ export async function generateSystemPrompt(
   isDeepAnalysis: boolean = false,
   onStatusUpdate?: (status: string) => void,
   localFiles?: FileList | null,
-  referenceLocalFiles?: FileList | null
+  referenceLocalFiles?: FileList | null,
+  githubToken?: string,
+  signal?: AbortSignal,
 ): Promise<{ text: string; modelVersion: string; requestedFiles?: string[]; fetchedFilesCount?: number }> {
+  if (signal?.aborted) {
+    throw new DOMException("Generation cancelled", "AbortError");
+  }
   const prompt = buildPromptText(
     repoData,
     taskInstruction,
@@ -245,11 +280,24 @@ export async function generateSystemPrompt(
       if (functionCallPart?.functionCall) {
         const call = functionCallPart.functionCall;
         if (call.name === "request_additional_files") {
-          const requestedFiles = call.args.filePaths || [];
+          const requestedFiles = call.args?.filePaths || [];
           requestedFilesList = requestedFiles;
           if (onStatusUpdate) onStatusUpdate(`Requesting additional files (${requestedFiles.length})...`);
-          
-          const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, undefined, referenceRepoData, localFiles, referenceLocalFiles);
+
+          let token = githubToken;
+          if (!token) {
+            try {
+              const settings = localStorage.getItem("gemini_app_settings");
+              if (settings) {
+                token = JSON.parse(settings).githubToken;
+              }
+            } catch (e) {}
+          }
+
+          const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, token, referenceRepoData, localFiles, referenceLocalFiles);
+          if (signal?.aborted) {
+            throw new DOMException("Generation cancelled", "AbortError");
+          }
           fetchedFilesCount = fetchedFiles.length;
           
           const secureFetchedFiles = fetchedFiles.map(f => ({
@@ -266,7 +314,10 @@ export async function generateSystemPrompt(
             instructionText = "\n\nCRITICAL INSTRUCTION: You have received the requested files. You MUST now provide the final answer based on these files. Do NOT request any more files. Provide the final output directly.";
           }
           
-          contents.push(response.candidates[0].content);
+          if (!candidateContent) {
+            throw new Error("Missing candidate content for function response turn.");
+          }
+          contents.push(candidateContent);
           contents.push({
             role: "user",
             parts: [
@@ -284,7 +335,7 @@ export async function generateSystemPrompt(
 
           response = await tauriInvoke<any>("call_gemini_advanced", {
             contents,
-            tools,
+            tools: undefined,
             model: modelVersion,
           });
         }
@@ -316,14 +367,17 @@ export async function generateSystemPrompt(
       } else {
         finalPrompt = "Failed to generate prompt. No candidates returned.";
       }
-    } catch (e) {
+    } catch (e: any) {
+      if (e?.name === "AbortError" || signal?.aborted) {
+        throw new DOMException("Generation cancelled", "AbortError");
+      }
       console.error("Failed to generate prompt with Gemini via Tauri:", e);
       finalPrompt = `Error: ${e}`;
     }
   } else {
     try {
       const ai = new GoogleGenAI({
-        apiKey: geminiApiKey || (typeof process !== 'undefined' ? process.env.GEMINI_API_KEY : undefined) || import.meta.env.VITE_GEMINI_API_KEY || "",
+        apiKey: resolveGeminiApiKey(geminiApiKey),
       });
 
       if (onStatusUpdate) onStatusUpdate("Analyzing project structure...");
@@ -332,24 +386,26 @@ export async function generateSystemPrompt(
         contents,
         config: {
           tools,
+          abortSignal: signal,
         },
       });
 
       if (response.functionCalls && response.functionCalls.length > 0) {
         const call = response.functionCalls[0];
         if (call.name === "request_additional_files") {
-          const requestedFiles = (call.args as any).filePaths || [];
+          const requestedFiles = (call.args as any)?.filePaths || [];
           requestedFilesList = requestedFiles;
           if (onStatusUpdate) onStatusUpdate(`Requesting additional files (${requestedFiles.length})...`);
           
-          // Get token from local storage if available
-          let token = undefined;
-          try {
-            const settings = localStorage.getItem("gemini_app_settings");
-            if (settings) {
-              token = JSON.parse(settings).githubToken;
-            }
-          } catch (e) {}
+          let token = githubToken;
+          if (!token) {
+            try {
+              const settings = localStorage.getItem("gemini_app_settings");
+              if (settings) {
+                token = JSON.parse(settings).githubToken;
+              }
+            } catch (e) {}
+          }
 
           const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, token, referenceRepoData, localFiles, referenceLocalFiles);
           fetchedFilesCount = fetchedFiles.length;
@@ -368,7 +424,11 @@ export async function generateSystemPrompt(
             instructionText = "\n\nCRITICAL INSTRUCTION: You have received the requested files. You MUST now provide the final answer based on these files. Do NOT request any more files. Provide the final output directly.";
           }
           
-          contents.push(response.candidates?.[0]?.content);
+          const candidateMsg = response.candidates?.[0]?.content;
+          if (!candidateMsg) {
+            throw new Error("Missing candidate content for function response turn.");
+          }
+          contents.push(candidateMsg);
           contents.push({
             role: "user",
             parts: [
@@ -388,7 +448,7 @@ export async function generateSystemPrompt(
             model: modelVersion,
             contents,
             config: {
-              tools,
+              abortSignal: signal,
             },
           });
         }
@@ -420,7 +480,10 @@ export async function generateSystemPrompt(
       } else {
         finalPrompt = "Failed to generate prompt. No candidates returned.";
       }
-    } catch (e) {
+    } catch (e: any) {
+      if (e?.name === "AbortError" || signal?.aborted) {
+        throw new DOMException("Generation cancelled", "AbortError");
+      }
       console.error("Failed to generate prompt with Gemini:", e);
       finalPrompt = `Error: ${e}`;
     }

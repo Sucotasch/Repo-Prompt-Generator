@@ -1,10 +1,80 @@
 import "dotenv/config";
 import express from "express";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI } from "@google/genai";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+
+const GITHUB_IDENT_REGEX = /^[a-zA-Z0-9-._]+$/;
+const HARD_IGNORE_DIRS = new Set([
+  "venv",
+  ".venv",
+  "node_modules",
+  ".git",
+  "__pycache__",
+  "dist",
+  "build",
+  "target",
+]);
+const SECRET_EXACT_NAMES = new Set([
+  "secrets.json",
+  "credentials.json",
+  "id_rsa",
+  "id_ed25519",
+]);
+const SECRET_EXTENSIONS = [".pem", ".key", ".cert", ".p12"];
+
+function sanitizeAndEncodeGitHubPath(filePath: string): string | null {
+  if (typeof filePath !== "string") return null;
+  const normalized = filePath.replace(/\\/g, "/").replace(/^\/+/, "").trim();
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.length === 0 || segments.some((s) => s === "." || s === "..")) {
+    return null;
+  }
+  return segments.map((s) => encodeURIComponent(s)).join("/");
+}
+
+function shouldIgnoreRepoPath(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  const segments = lower.split("/").filter(Boolean);
+  if (segments.length > 1) {
+    for (let i = 0; i < segments.length - 1; i++) {
+      if (HARD_IGNORE_DIRS.has(segments[i])) return true;
+    }
+  }
+  const fileName = segments[segments.length - 1] || "";
+  if (
+    fileName === ".env" ||
+    (fileName.startsWith(".env.") &&
+      !fileName.endsWith(".example") &&
+      !fileName.endsWith(".template") &&
+      !fileName.endsWith(".sample"))
+  ) {
+    return true;
+  }
+  if (SECRET_EXTENSIONS.some((ext) => fileName.endsWith(ext))) {
+    return true;
+  }
+  return SECRET_EXACT_NAMES.has(fileName);
+}
+
+function truncateContent(content: string, maxChars: number, label: string): string {
+  if (content.length <= maxChars) return content;
+  return content.substring(0, maxChars) + `\n\n... [TRUNCATED: File exceeds ${label} limit. Showing only the top part.]`;
+}
+
+function validateProxyBaseUrl(baseUrl: unknown): string | null {
+  if (typeof baseUrl !== "string" || !baseUrl.trim()) return null;
+  try {
+    const parsed = new URL(baseUrl.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    return baseUrl.trim().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
 
 async function startServer() {
   const app = express();
@@ -49,15 +119,14 @@ async function startServer() {
       }
 
       // Strict validation to prevent SSRF and injection
-      const nameRegex = /^[a-zA-Z0-9-._]+$/;
-      if (!nameRegex.test(owner) || !nameRegex.test(repo)) {
+      if (!GITHUB_IDENT_REGEX.test(owner) || !GITHUB_IDENT_REGEX.test(repo)) {
         return res.status(400).json({ error: "Invalid owner or repo format." });
       }
 
       // Fetch basic info
       const infoRes = await fetch(
         `https://api.github.com/repos/${owner}/${repo}`,
-        { headers },
+        { headers, signal: AbortSignal.timeout(15000) },
       );
       if (!infoRes.ok) {
         if (infoRes.status === 403) {
@@ -83,51 +152,22 @@ async function startServer() {
       const topics = infoData.topics || [];
       const language = infoData.language;
 
-      const targetBranch = branch || defaultBranch;
+      const targetBranch = (branch && branch.trim()) || defaultBranch;
       const encodedBranch = encodeURIComponent(targetBranch);
-
-      const HARD_IGNORE = [
-        "venv",
-        ".venv",
-        "node_modules",
-        ".git",
-        "__pycache__",
-        "dist",
-        "build",
-      ];
-      const SECRET_IGNORE = [
-        ".env",
-        ".pem",
-        ".key",
-        ".cert",
-        ".p12",
-        "secrets.json",
-        "credentials.json",
-        "id_rsa",
-      ];
 
       // Fetch tree
       const treeRes = await fetch(
         `https://api.github.com/repos/${owner}/${repo}/git/trees/${encodedBranch}?recursive=1`,
-        { headers },
+        { headers, signal: AbortSignal.timeout(20000) },
       );
       let treePaths: string[] = [];
 
       if (treeRes.ok) {
         const treeData = await treeRes.json();
-        treePaths = treeData.tree
+        treePaths = (treeData.tree || [])
           .filter((item: any) => item.type === "blob")
           .map((item: any) => item.path)
-          .filter((path: string) => {
-            const isHardIgnored = HARD_IGNORE.some(
-              (ignore) =>
-                path.includes(`/${ignore}/`) || path.startsWith(`${ignore}/`),
-            );
-            const isSecret = SECRET_IGNORE.some(
-              (secret) => path.endsWith(secret) || path.includes(`/${secret}`),
-            );
-            return !isHardIgnored && !isSecret;
-          });
+          .filter((filePath: string) => !shouldIgnoreRepoPath(filePath));
       } else {
         if (treeRes.status === 404) {
           return res.status(404).json({
@@ -139,21 +179,6 @@ async function startServer() {
         });
       }
 
-      // Fetch README
-      let readme = "";
-      const readmeRes = await fetch(
-        `https://api.github.com/repos/${owner}/${repo}/readme?ref=${encodedBranch}`,
-        { headers },
-      );
-      if (readmeRes.ok) {
-        const readmeData = await readmeRes.json();
-        if (readmeData.content) {
-          readme = Buffer.from(readmeData.content, "base64").toString("utf-8");
-        }
-      }
-
-      // Fetch dependencies
-      let dependencies = "";
       const depFiles = [
         "package.json",
         "requirements.txt",
@@ -163,20 +188,52 @@ async function startServer() {
         "build.gradle",
       ];
 
-      for (const file of depFiles) {
-        if (treePaths.includes(file)) {
-          const fileRes = await fetch(
-            `https://api.github.com/repos/${owner}/${repo}/contents/${file}?ref=${encodedBranch}`,
-            { headers },
-          );
-          if (fileRes.ok) {
-            const fileData = await fileRes.json();
-            if (fileData.content) {
-              dependencies += `\n--- ${file} ---\n${Buffer.from(fileData.content, "base64").toString("utf-8")}\n`;
+      // Fetch README and dependencies concurrently
+      const [readmeResult, depResults] = await Promise.all([
+        (async () => {
+          try {
+            const readmeRes = await fetch(
+              `https://api.github.com/repos/${owner}/${repo}/readme?ref=${encodedBranch}`,
+              { headers, signal: AbortSignal.timeout(15000) },
+            );
+            if (readmeRes.ok) {
+              const readmeData = await readmeRes.json();
+              if (readmeData.content) {
+                return Buffer.from(readmeData.content, "base64").toString("utf-8");
+              }
             }
+          } catch (e) {
+            console.warn("Failed to fetch README:", e);
           }
-        }
-      }
+          return "";
+        })(),
+        Promise.all(
+          depFiles
+            .filter((file) => treePaths.includes(file))
+            .map(async (file) => {
+              const encodedFile = sanitizeAndEncodeGitHubPath(file);
+              if (!encodedFile) return "";
+              try {
+                const fileRes = await fetch(
+                  `https://api.github.com/repos/${owner}/${repo}/contents/${encodedFile}?ref=${encodedBranch}`,
+                  { headers, signal: AbortSignal.timeout(15000) },
+                );
+                if (fileRes.ok) {
+                  const fileData = await fileRes.json();
+                  if (fileData.content) {
+                    return `\n--- ${file} ---\n${Buffer.from(fileData.content, "base64").toString("utf-8")}\n`;
+                  }
+                }
+              } catch (e) {
+                console.warn(`Failed to fetch dep ${file}:`, e);
+              }
+              return "";
+            }),
+        ),
+      ]);
+
+      const readme = readmeResult;
+      const dependencies = depResults.join("");
 
       // Fetch top source files
       const sourceFiles: { path: string; content: string }[] = [];
@@ -185,6 +242,8 @@ async function startServer() {
         ".tsx",
         ".js",
         ".jsx",
+        ".vue",
+        ".svelte",
         ".py",
         ".go",
         ".rs",
@@ -193,11 +252,17 @@ async function startServer() {
         ".c",
         ".h",
         ".cs",
+        ".sql",
+        ".prisma",
+        ".css",
+        ".scss",
+        ".html",
         ".md",
+        ".mdx",
       ];
 
       let filesToFetch = treePaths
-        .filter((p) => sourceExtensions.some((ext) => p.endsWith(ext)))
+        .filter((p) => sourceExtensions.some((ext) => p.toLowerCase().endsWith(ext)))
         .filter(
           (p) => !depFiles.includes(p) && p.toLowerCase() !== "readme.md",
         );
@@ -290,19 +355,36 @@ async function startServer() {
       const limit = Math.min(Math.max(1, Number(maxFiles) || 5), absoluteMax);
       filesToFetch = filesToFetch.slice(0, limit);
 
-      for (const file of filesToFetch) {
-        const fileRes = await fetch(
-          `https://api.github.com/repos/${owner}/${repo}/contents/${file}?ref=${encodedBranch}`,
-          { headers },
+      const BATCH_SIZE = 10;
+      for (let i = 0; i < filesToFetch.length; i += BATCH_SIZE) {
+        const batch = filesToFetch.slice(i, i + BATCH_SIZE);
+        const batchResults = await Promise.all(
+          batch.map(async (file) => {
+            const encodedFile = sanitizeAndEncodeGitHubPath(file);
+            if (!encodedFile) return null;
+            try {
+              const fileRes = await fetch(
+                `https://api.github.com/repos/${owner}/${repo}/contents/${encodedFile}?ref=${encodedBranch}`,
+                { headers, signal: AbortSignal.timeout(15000) },
+              );
+              if (fileRes.ok) {
+                const fileData = await fileRes.json();
+                if (fileData.content) {
+                  const decoded = Buffer.from(fileData.content, "base64").toString("utf-8");
+                  return {
+                    path: file,
+                    content: truncateContent(decoded, 100000, "100KB"),
+                  };
+                }
+              }
+            } catch (e) {
+              console.warn(`Failed to fetch file ${file}:`, e);
+            }
+            return null;
+          }),
         );
-        if (fileRes.ok) {
-          const fileData = await fileRes.json();
-          if (fileData.content) {
-            sourceFiles.push({
-              path: file,
-              content: Buffer.from(fileData.content, "base64").toString("utf-8"),
-            });
-          }
+        for (const item of batchResults) {
+          if (item) sourceFiles.push(item);
         }
       }
 
@@ -341,15 +423,30 @@ async function startServer() {
     try {
       const { owner, repo, branch, token, filePaths } = req.body;
 
-      if (!owner || !repo || !filePaths || !Array.isArray(filePaths)) {
+      if (
+        !owner ||
+        !repo ||
+        typeof owner !== "string" ||
+        typeof repo !== "string" ||
+        !filePaths ||
+        !Array.isArray(filePaths)
+      ) {
         return res.status(400).json({ error: "Missing required parameters" });
+      }
+
+      if (!GITHUB_IDENT_REGEX.test(owner) || !GITHUB_IDENT_REGEX.test(repo)) {
+        return res.status(400).json({ error: "Invalid owner or repo format." });
+      }
+
+      if (branch && typeof branch !== "string") {
+        return res.status(400).json({ error: "Branch must be a string." });
       }
 
       const headers: Record<string, string> = {
         "User-Agent": "AI-Studio-Applet/1.0",
         "Accept": "application/vnd.github.v3+json",
       };
-      if (token) {
+      if (token && typeof token === "string") {
         headers["Authorization"] = `token ${token}`;
       }
 
@@ -359,25 +456,37 @@ async function startServer() {
       // Limit to 3 files max
       const pathsToFetch = filePaths.slice(0, 3);
 
-      for (const file of pathsToFetch) {
-        try {
-          const fileRes = await fetch(
-            `https://api.github.com/repos/${owner}/${repo}/contents/${file}?ref=${encodedBranch}`,
-            { headers }
-          );
-          if (fileRes.ok) {
-            const fileData = await fileRes.json();
-            if (fileData.content) {
-              let content = Buffer.from(fileData.content, "base64").toString("utf-8");
-              if (content.length > 50000) {
-                content = content.substring(0, 50000) + "\n\n... [TRUNCATED: Файл превышает лимит в 50KB. Показана только верхняя часть.]";
-              }
-              fetchedFiles.push({ path: file, content });
-            }
+      const fileResults = await Promise.all(
+        pathsToFetch.map(async (file) => {
+          const encodedFile = sanitizeAndEncodeGitHubPath(file);
+          if (!encodedFile || shouldIgnoreRepoPath(file)) {
+            console.warn(`Blocked invalid or sensitive file path: ${file}`);
+            return null;
           }
-        } catch (e) {
-          console.warn(`Failed to fetch file ${file}:`, e);
-        }
+          try {
+            const fileRes = await fetch(
+              `https://api.github.com/repos/${owner}/${repo}/contents/${encodedFile}?ref=${encodedBranch}`,
+              { headers, signal: AbortSignal.timeout(15000) }
+            );
+            if (fileRes.ok) {
+              const fileData = await fileRes.json();
+              if (fileData.content) {
+                const decoded = Buffer.from(fileData.content, "base64").toString("utf-8");
+                return {
+                  path: file,
+                  content: truncateContent(decoded, 50000, "50KB"),
+                };
+              }
+            }
+          } catch (e) {
+            console.warn(`Failed to fetch file ${file}:`, e);
+          }
+          return null;
+        }),
+      );
+
+      for (const item of fileResults) {
+        if (item) fetchedFiles.push(item);
       }
 
       res.json({ files: fetchedFiles });
@@ -391,21 +500,29 @@ async function startServer() {
   app.post("/api/openai-compatible/models", async (req, res) => {
     try {
       const { baseUrl, apiKey } = req.body;
-      if (!baseUrl || !apiKey) {
+      const cleanBaseUrl = validateProxyBaseUrl(baseUrl);
+      if (!cleanBaseUrl) {
         return res
           .status(400)
-          .json({ error: "baseUrl and apiKey are required" });
+          .json({ error: "A valid http/https baseUrl is required" });
       }
-      const response = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "HTTP-Referer": "https://ais-dev.run.app",
-          "X-Title": "AI Studio Applet",
-          "User-Agent": "AI-Studio-Applet/1.0",
-        },
+      const headers: Record<string, string> = {
+        "HTTP-Referer": "https://ais-dev.run.app",
+        "X-Title": "AI Studio Applet",
+        "User-Agent": "AI-Studio-Applet/1.0",
+      };
+      if (typeof apiKey === "string" && apiKey.trim()) {
+        headers["Authorization"] = `Bearer ${apiKey.trim()}`;
+      }
+      const response = await fetch(`${cleanBaseUrl}/models`, {
+        headers,
+        signal: AbortSignal.timeout(30000),
       });
       const text = await response.text();
-      res.status(response.status).send(text);
+      res
+        .status(response.status)
+        .type(response.headers.get("content-type") || "application/json")
+        .send(text);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -415,27 +532,32 @@ async function startServer() {
   app.post("/api/openai-compatible/chat", async (req, res) => {
     try {
       const { baseUrl, apiKey, payload } = req.body;
-      if (!baseUrl || !apiKey || !payload) {
+      const cleanBaseUrl = validateProxyBaseUrl(baseUrl);
+      if (!cleanBaseUrl || !payload) {
         return res
           .status(400)
-          .json({ error: "baseUrl, apiKey, and payload are required" });
+          .json({ error: "A valid http/https baseUrl and payload are required" });
       }
-      const response = await fetch(
-        `${baseUrl.replace(/\/$/, "")}/chat/completions`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://ais-dev.run.app",
-            "X-Title": "AI Studio Applet",
-            "User-Agent": "AI-Studio-Applet/1.0",
-          },
-          body: JSON.stringify(payload),
-        },
-      );
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://ais-dev.run.app",
+        "X-Title": "AI Studio Applet",
+        "User-Agent": "AI-Studio-Applet/1.0",
+      };
+      if (typeof apiKey === "string" && apiKey.trim()) {
+        headers["Authorization"] = `Bearer ${apiKey.trim()}`;
+      }
+      const response = await fetch(`${cleanBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(120000),
+      });
       const text = await response.text();
-      res.status(response.status).send(text);
+      res
+        .status(response.status)
+        .type(response.headers.get("content-type") || "application/json")
+        .send(text);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

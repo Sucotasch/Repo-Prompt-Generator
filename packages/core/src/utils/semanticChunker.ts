@@ -27,15 +27,16 @@ export class SemanticChunker {
    * @returns Массив объектов (текст чанка и его зона)
    */
   static chunkText(text: string, options: ChunkingOptions = {}): ChunkResult[] {
-    const maxChars = (options.maxTokens || 512) * this.CHARS_PER_TOKEN;
-    const overlapChars = (options.overlapTokens || 50) * this.CHARS_PER_TOKEN;
+    const maxChars = (options.maxTokens ?? 512) * this.CHARS_PER_TOKEN;
+    const overlapChars = (options.overlapTokens ?? 50) * this.CHARS_PER_TOKEN;
     const zone = options.filePath ? detectZoneFromPath(options.filePath) : "General";
+    const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     
     const chunks: string[] = [];
     
     // Поиск семантических границ: двойной перенос строки ИЛИ начало объявления структуры
     // Используем позитивный просмотр вперед (?=...), чтобы не удалять сами разделители
-    const boundaries = text.split(/(?=\n\n|\n(?:class|function|def|struct|impl|const|let|var|interface|type|export|import)\s)/g);
+    const boundaries = normalized.split(/(?=\n\n|\n(?:class|function|def|struct|impl|const|let|var|interface|type|export|import)\s)/g);
     
     let currentChunk = "";
 

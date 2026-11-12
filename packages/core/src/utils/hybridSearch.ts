@@ -49,13 +49,27 @@ export class BM25 {
 
   /**
    * Tokenizes text for code analysis.
-   * Splits by non-alphanumeric characters, preserving underscores.
+   * Splits camelCase/PascalCase, snake_case parts, and supports Unicode identifiers.
    */
   private tokenize(text: string): string[] {
-    return text
+    const expanded = text
+      .replace(/([a-z\p{Ll}])([A-Z\p{Lu}])/gu, "$1 $2")
+      .replace(/([A-Z\p{Lu}]+)([A-Z\p{Lu}][a-z\p{Ll}])/gu, "$1 $2");
+    const rawTokens = expanded
       .toLowerCase()
-      .split(/[^a-z0-9_]+/i)
+      .split(/[^\p{L}\p{N}_]+/u)
       .filter((t) => t.length > 1);
+
+    const tokens: string[] = [];
+    for (const token of rawTokens) {
+      tokens.push(token);
+      if (token.includes("_")) {
+        for (const sub of token.split("_")) {
+          if (sub.length > 1) tokens.push(sub);
+        }
+      }
+    }
+    return tokens;
   }
 
   /**

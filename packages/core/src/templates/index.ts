@@ -7,11 +7,13 @@ import { integrationTemplate } from "./integration";
 import { eli5Template } from "./eli5";
 import { vibeTemplate } from "./vibe";
 import { tutorialTemplate } from "./tutorial";
+import { architectureTemplate } from "./architecture";
 
 export const templates: Record<string, TemplateDefinition> = {
   default: defaultTemplate,
   audit: auditTemplate,
   security: securityTemplate,
+  architecture: architectureTemplate,
   docs: docsTemplate,
   integration: integrationTemplate,
   eli5: eli5Template,
