@@ -90,7 +90,9 @@ async fn call_gemini_secure(
 
     println!("[Gemini] Using key: {}... (len: {})", &key[..std::cmp::min(4, key.len())], key.len());
 
-    let model_name = model.unwrap_or_else(|| "gemini-3-flash-preview".to_string());
+    let model_name = model
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "gemini-4-hydrogen".to_string());
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
         urlencoding::encode(&model_name)
@@ -156,21 +158,43 @@ async fn call_gemini_secure(
     Ok(text)
 }
 
-#[tauri::command]
-async fn call_gemini_advanced(state: State<'_, AppState>, contents: serde_json::Value, tools: Option<serde_json::Value>, model: Option<String>) -> Result<serde_json::Value, String> {
+#[tauri::command(rename_all = "snake_case")]
+async fn call_gemini_advanced(
+    state: State<'_, AppState>,
+    contents: serde_json::Value,
+    tools: Option<serde_json::Value>,
+    tool_config: Option<serde_json::Value>,
+    generation_config: Option<serde_json::Value>,
+    system_instruction: Option<serde_json::Value>,
+    model: Option<String>,
+) -> Result<serde_json::Value, String> {
     let key = state.gemini_api_key.read().await.clone();
 
     if key.is_empty() {
         return Err("Gemini API key is missing. Please enter it in the settings or set the GEMINI_API_KEY environment variable.".to_string());
     }
 
-    let model_name = model.unwrap_or_else(|| "gemini-3.1-pro-preview".to_string());
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model_name);
+    let model_name = model
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "gemini-4-hydrogen".to_string());
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        urlencoding::encode(&model_name)
+    );
 
     let mut body_map = serde_json::Map::new();
     body_map.insert("contents".to_string(), contents);
     if let Some(t) = tools {
         body_map.insert("tools".to_string(), t);
+    }
+    if let Some(tc) = tool_config {
+        body_map.insert("toolConfig".to_string(), tc);
+    }
+    if let Some(gc) = generation_config {
+        body_map.insert("generationConfig".to_string(), gc);
+    }
+    if let Some(si) = system_instruction {
+        body_map.insert("systemInstruction".to_string(), si);
     }
     let body = serde_json::Value::Object(body_map);
 
@@ -188,56 +212,310 @@ async fn call_gemini_advanced(state: State<'_, AppState>, contents: serde_json::
     let response_body = response.text_async().await.map_err(|e| e.to_string())?;
 
     if !response.status().is_success() {
-        return Err(format!("Gemini API error: {} - {}", response.status(), response_body));
+        return Err(format!("Gemini API error ({}): {}", response.status(), response_body));
     }
 
     let json: serde_json::Value = serde_json::from_str(&response_body).map_err(|e| e.to_string())?;
+    if json["candidates"].as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        if let Some(reason) = json["promptFeedback"]["blockReason"].as_str() {
+            return Err(format!("Gemini blocked response: {}", reason));
+        }
+    }
     Ok(json)
 }
 
-#[tauri::command]
-async fn scan_local_repository(path: String) -> Result<Vec<FileEntry>, String> {
+fn get_local_file_score(file_path: &str) -> i32 {
+    let mut score = 0;
+    let lower = file_path.replace('\\', "/").to_lowercase();
+    let parts: Vec<&str> = lower.split('/').filter(|s| !s.is_empty()).collect();
+    let file_name = parts.last().copied().unwrap_or("");
+    let depth = parts.len() as i32;
+
+    if lower.contains("/test/")
+        || lower.contains("/tests/")
+        || lower.contains("__tests__")
+        || file_name.contains(".test.")
+        || file_name.contains(".spec.")
+        || file_name.starts_with("test_")
+        || file_name.ends_with("_test.go")
+    {
+        score -= 50;
+    }
+    if [
+        "build",
+        "setup",
+        "config",
+        "webpack",
+        "vite",
+        "rollup",
+        "gulpfile",
+        "backup",
+        "manage.py",
+        "scripts/",
+        "tools/",
+        "docs/",
+        "example",
+        "demo",
+        "migrations/",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+    {
+        score -= 30;
+    }
+    if ["src/", "lib/", "app/", "core/", "pkg/", "internal/"]
+        .iter()
+        .any(|d| lower.starts_with(d) || lower.contains(&format!("/{}", d)))
+    {
+        score += 20;
+    }
+    if [
+        "main",
+        "index",
+        "app",
+        "server",
+        "core",
+        "manager",
+        "parser",
+        "api",
+        "router",
+        "handler",
+        "controller",
+        "service",
+        "model",
+        "database",
+    ]
+    .iter()
+    .any(|n| file_name.contains(n))
+    {
+        score += 10;
+    }
+
+    score - depth
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn scan_local_repository(
+    path: String,
+    max_files: Option<u32>,
+) -> Result<GithubRepoData, String> {
+    use std::path::{Path, PathBuf};
     use tokio::task::JoinSet;
-    let mut files = Vec::new();
-    let mut set = JoinSet::new();
 
-    let walker = walkdir::WalkDir::new(path)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            let is_hidden = name.starts_with(".git") || name == ".venv" || name == ".idea" || name == ".vscode";
-            let is_heavy = name == "node_modules" || name == "target" || name == "venv" || name == "build" || name == "__pycache__";
-            !is_hidden && !is_heavy
-        });
+    let root = PathBuf::from(&path);
+    if !root.is_dir() {
+        return Err("Selected path is not a valid directory.".to_string());
+    }
 
+    let repo_name = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "local-folder".to_string());
+
+    struct ScannedFile {
+        rel_path: String,
+        full_path: PathBuf,
+        size: u64,
+        depth: usize,
+        base_lower: String,
+    }
+
+    let walker = walkdir::WalkDir::new(&root).into_iter().filter_entry(|e| {
+        if e.depth() == 0 {
+            return true;
+        }
+        let name = e.file_name().to_string_lossy().to_lowercase();
+        let is_hidden_dir = name == ".git" || name == ".venv" || name == ".idea" || name == ".vscode";
+        let is_heavy_dir = name == "node_modules"
+            || name == "target"
+            || name == "venv"
+            || name == "dist"
+            || name == "build"
+            || name == "__pycache__";
+        !is_hidden_dir && !is_heavy_dir
+    });
+
+    let mut candidates: Vec<ScannedFile> = Vec::new();
     for entry in walker.filter_map(|e| e.ok()) {
-        if entry.file_type().is_file() {
-            if let Ok(metadata) = entry.metadata() {
-                if metadata.len() > 1_000_000 {
-                    continue; // Skip files > 1MB
-                }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = match entry.path().strip_prefix(&root) {
+            Ok(p) => p.to_string_lossy().replace('\\', "/"),
+            Err(_) => continue,
+        };
+        if rel.is_empty() || should_ignore_github_path(&rel) {
+            continue;
+        }
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let depth = rel.split('/').filter(|s| !s.is_empty()).count();
+        let base_lower = Path::new(&rel)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        candidates.push(ScannedFile {
+            rel_path: rel,
+            full_path: entry.path().to_path_buf(),
+            size,
+            depth,
+            base_lower,
+        });
+    }
+
+    candidates.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+
+    let mut tree_paths: Vec<String> = candidates.iter().map(|c| c.rel_path.clone()).collect();
+    let mut is_truncated = false;
+    if tree_paths.len() > 1000 {
+        tree_paths.truncate(1000);
+        is_truncated = true;
+    }
+
+    let find_shallowest = |target_lower: &str| -> Option<&ScannedFile> {
+        candidates
+            .iter()
+            .filter(|c| c.base_lower == target_lower && c.size <= 1_000_000)
+            .min_by_key(|c| c.depth)
+    };
+
+    let mut readme = String::new();
+    if let Some(readme_file) = find_shallowest("readme.md") {
+        if let Ok(content) = fs::read_to_string(&readme_file.full_path) {
+            readme = truncate_utf8_content(content, 100_000);
+        }
+    }
+
+    let dep_files = [
+        "package.json",
+        "requirements.txt",
+        "go.mod",
+        "Cargo.toml",
+        "pom.xml",
+        "build.gradle",
+    ];
+    let dep_set_lower: Vec<String> = dep_files.iter().map(|d| d.to_lowercase()).collect();
+    let mut dependencies = String::new();
+    for dep_name in dep_files {
+        if let Some(dep_file) = find_shallowest(&dep_name.to_lowercase()) {
+            if let Ok(content) = fs::read_to_string(&dep_file.full_path) {
+                dependencies.push_str(&format!("\n--- {} ---\n{}\n", dep_name, content));
             }
-            
-            let file_path = entry.path().to_path_buf();
-            set.spawn_blocking(move || {
-                match fs::read_to_string(&file_path) {
-                    Ok(content) => Some(FileEntry {
-                        path: file_path.display().to_string(),
-                        content,
-                    }),
-                    Err(_) => None,
-                }
+        }
+    }
+
+    let source_extensions = [
+        ".ts", ".tsx", ".js", ".jsx", ".vue", ".svelte", ".py", ".go", ".rs", ".java", ".cpp",
+        ".c", ".h", ".cs", ".sql", ".prisma", ".css", ".scss", ".html", ".md", ".mdx",
+    ];
+
+    let mut source_candidates: Vec<&ScannedFile> = candidates
+        .iter()
+        .filter(|c| {
+            let lower_p = c.rel_path.to_lowercase();
+            c.size <= 1_000_000
+                && source_extensions.iter().any(|ext| lower_p.ends_with(ext))
+                && !dep_set_lower.contains(&c.base_lower)
+                && c.base_lower != "readme.md"
+        })
+        .collect();
+
+    source_candidates.sort_by(|a, b| {
+        get_local_file_score(&b.rel_path).cmp(&get_local_file_score(&a.rel_path))
+    });
+
+    let limit = max_files.unwrap_or(5).clamp(1, 200) as usize;
+    let selected: Vec<(String, PathBuf)> = source_candidates
+        .into_iter()
+        .take(limit)
+        .map(|c| (c.rel_path.clone(), c.full_path.clone()))
+        .collect();
+
+    let mut set = JoinSet::new();
+    for (rel_path, full_path) in selected {
+        set.spawn_blocking(move || match fs::read_to_string(&full_path) {
+            Ok(content) => Some(FileEntry {
+                path: rel_path,
+                content: truncate_utf8_content(content, 100_000),
+            }),
+            Err(_) => None,
+        });
+    }
+
+    let mut source_files = Vec::new();
+    while let Some(res) = set.join_next().await {
+        if let Ok(Some(entry)) = res {
+            source_files.push(entry);
+        }
+    }
+
+    Ok(GithubRepoData {
+        info: RepoInfo {
+            owner: "local".to_string(),
+            repo: repo_name,
+            default_branch: "local".to_string(),
+            branch: Some("local".to_string()),
+            description: "Local folder upload".to_string(),
+            stargazers_count: None,
+            topics: None,
+            language: None,
+        },
+        tree: tree_paths,
+        readme,
+        dependencies,
+        source_files,
+        is_truncated,
+    })
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn read_local_repo_files(
+    root_path: String,
+    file_paths: Vec<String>,
+) -> Result<Vec<FileEntry>, String> {
+    let root_canonical = fs::canonicalize(&root_path)
+        .map_err(|e| format!("Invalid local repository root: {}", e))?;
+    let mut results = Vec::new();
+
+    for rel in file_paths.into_iter().take(5) {
+        let normalized = rel.replace('\\', "/").trim_start_matches('/').to_string();
+        let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+        if segments.is_empty()
+            || segments.iter().any(|s| *s == "." || *s == "..")
+            || should_ignore_github_path(&normalized)
+        {
+            continue;
+        }
+
+        let mut candidate = root_canonical.clone();
+        for seg in &segments {
+            candidate.push(seg);
+        }
+
+        let resolved = match fs::canonicalize(&candidate) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if !resolved.starts_with(&root_canonical) || !resolved.is_file() {
+            continue;
+        }
+        if let Ok(meta) = fs::metadata(&resolved) {
+            if meta.len() > 1_000_000 {
+                continue;
+            }
+        }
+        if let Ok(content) = fs::read_to_string(&resolved) {
+            results.push(FileEntry {
+                path: rel,
+                content: truncate_utf8_content(content, 50_000),
             });
         }
     }
 
-    while let Some(result) = set.join_next().await {
-        if let Ok(Some(file_entry)) = result {
-            files.push(file_entry);
-        }
-    }
-
-    Ok(files)
+    Ok(results)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -882,6 +1160,7 @@ pub fn run() {
             call_gemini_secure,
             call_gemini_advanced,
             scan_local_repository,
+            read_local_repo_files,
             fetch_github_repo,
             is_ollama_running,
             start_ollama,

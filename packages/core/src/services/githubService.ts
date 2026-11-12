@@ -18,6 +18,7 @@ export interface RepoData {
   dependencies: string;
   sourceFiles?: { path: string; content: string }[];
   isTruncated?: boolean;
+  localRootPath?: string;
 }
 
 function withTimeoutSignal(ms: number, externalSignal?: AbortSignal): AbortSignal {
@@ -133,10 +134,14 @@ export function sanitizeAndEncodeGitHubPath(filePath: string): string | null {
 async function fetchFilesFromRepo(
   info: RepoInfo,
   filePaths: string[],
-  token?: string
+  token?: string,
+  signal?: AbortSignal,
 ): Promise<{ path: string; content: string }[]> {
   if (filePaths.length === 0) return [];
-  
+  if (signal?.aborted) {
+    throw new DOMException("Generation cancelled", "AbortError");
+  }
+
   try {
     const owner = info.owner;
     const repo = info.repo;
@@ -153,7 +158,10 @@ async function fetchFilesFromRepo(
         headers["Authorization"] = `token ${token}`;
       }
 
-      for (const file of filePaths.slice(0, 3)) {
+      for (const file of filePaths.slice(0, 5)) {
+        if (signal?.aborted) {
+          throw new DOMException("Generation cancelled", "AbortError");
+        }
         const encodedFile = sanitizeAndEncodeGitHubPath(file);
         if (!encodedFile) {
           console.warn(`Skipped invalid GitHub path in Tauri: ${file}`);
@@ -197,8 +205,8 @@ async function fetchFilesFromRepo(
       headers: {
         "Content-Type": "application/json",
       },
-      signal: AbortSignal.timeout(30000),
-      body: JSON.stringify({ owner, repo, branch, token, filePaths }),
+      signal: withTimeoutSignal(30000, signal),
+      body: JSON.stringify({ owner, repo, branch, token, filePaths: filePaths.slice(0, 5) }),
     });
 
     if (!response.ok) {
@@ -209,6 +217,9 @@ async function fetchFilesFromRepo(
     const data = await response.json();
     return data.files || [];
   } catch (err: any) {
+    if (err?.name === "AbortError" || signal?.aborted) {
+      throw new DOMException("Generation cancelled", "AbortError");
+    }
     console.error("Error fetching specific files:", err);
     return [];
   }
@@ -220,64 +231,100 @@ export async function fetchSpecificFiles(
   token?: string,
   referenceRepoData?: RepoData,
   localFiles?: FileList | null,
-  referenceLocalFiles?: FileList | null
+  referenceLocalFiles?: FileList | null,
+  signal?: AbortSignal,
 ): Promise<{ path: string; content: string }[]> {
+  if (signal?.aborted) {
+    throw new DOMException("Generation cancelled", "AbortError");
+  }
   const targetFiles = filePaths.filter(f => repoData.tree.includes(f));
   const refFiles = referenceRepoData ? filePaths.filter(f => referenceRepoData.tree.includes(f) && !repoData.tree.includes(f)) : [];
   const unknownFiles = filePaths.filter(f => !repoData.tree.includes(f) && !(referenceRepoData && referenceRepoData.tree.includes(f)));
-  
+
   const finalTargetFiles = [...targetFiles, ...unknownFiles];
-  
+
   let results: { path: string; content: string }[] = [];
-  
+
   if (finalTargetFiles.length > 0) {
     if (repoData.info.owner === "local") {
       const localResults = await fetchLocalFiles(finalTargetFiles, localFiles, repoData);
       results = results.concat(localResults);
     } else {
-      const targetResults = await fetchFilesFromRepo(repoData.info, finalTargetFiles, token);
+      const targetResults = await fetchFilesFromRepo(repoData.info, finalTargetFiles, token, signal);
       results = results.concat(targetResults);
     }
   }
-  
+
+  if (signal?.aborted) {
+    throw new DOMException("Generation cancelled", "AbortError");
+  }
+
   if (refFiles.length > 0 && referenceRepoData) {
     if (referenceRepoData.info.owner === "local") {
       const refLocalResults = await fetchLocalFiles(refFiles, referenceLocalFiles, referenceRepoData);
       results = results.concat(refLocalResults);
     } else {
-      const refResults = await fetchFilesFromRepo(referenceRepoData.info, refFiles, token);
+      const refResults = await fetchFilesFromRepo(referenceRepoData.info, refFiles, token, signal);
       results = results.concat(refResults);
     }
   }
-  
+
   return results;
 }
 
-async function fetchLocalFiles(filePaths: string[], localFiles: FileList | null | undefined, repoData: RepoData): Promise<{ path: string; content: string }[]> {
+async function fetchLocalFiles(
+  filePaths: string[],
+  localFiles: FileList | null | undefined,
+  repoData: RepoData,
+): Promise<{ path: string; content: string }[]> {
   const results: { path: string; content: string }[] = [];
-  
-  for (const filePath of filePaths) {
-    const existing = repoData.sourceFiles?.find(f => f.path === filePath);
+  const missingNativePaths: string[] = [];
+
+  for (const filePath of filePaths.slice(0, 5)) {
+    const existing = repoData.sourceFiles?.find((f) => f.path === filePath);
     if (existing) {
       results.push(existing);
       continue;
     }
-    
+
     if (localFiles) {
-      const file = Array.from(localFiles).find(f => (f.webkitRelativePath || f.name) === filePath);
+      const file = Array.from(localFiles).find(
+        (f) => (f.webkitRelativePath || f.name) === filePath,
+      );
       if (file) {
         try {
           let content = await file.text();
           if (content.length > 50000) {
-            content = content.substring(0, 50000) + "\n\n... [TRUNCATED: File exceeds 50KB limit. Showing only the top part.]";
+            content =
+              content.substring(0, 50000) +
+              "\n\n... [TRUNCATED: File exceeds 50KB limit. Showing only the top part.]";
           }
           results.push({ path: filePath, content });
         } catch (e) {
           console.error(`Failed to read local file ${filePath}:`, e);
         }
       }
+    } else if (isTauri() && repoData.localRootPath) {
+      missingNativePaths.push(filePath);
     }
   }
-  
+
+  if (missingNativePaths.length > 0 && isTauri() && repoData.localRootPath) {
+    try {
+      const nativeFiles = await tauriInvoke<{ path: string; content: string }[]>(
+        "read_local_repo_files",
+        {
+          root_path: repoData.localRootPath,
+          file_paths: missingNativePaths,
+        },
+      );
+      if (Array.isArray(nativeFiles)) {
+        results.push(...nativeFiles);
+      }
+    } catch (e) {
+      console.error("Failed to read local files via Tauri:", e);
+    }
+  }
+
   return results;
 }

@@ -27,6 +27,7 @@ export async function rewriteQuery(
 ): Promise<{
   optimizedQuery: string;
   intent: string;
+  isFallback?: boolean;
 }> {
   if (provider === "custom") {
     const baseUrl = options?.customBaseUrl?.trim();
@@ -71,6 +72,8 @@ export async function generatePrompt(
     customApiKey?: string;
     customModel?: string;
     geminiApiKey?: string;
+    geminiModel?: string;
+    geminiThinkingLevel?: string;
     proxyAddress?: string;
     fileTruncationLimit?: number;
     isDeepAnalysis?: boolean;
@@ -135,6 +138,8 @@ export async function generatePrompt(
       options?.referenceLocalFiles,
       options?.githubToken,
       options?.signal,
+      options?.geminiModel,
+      options?.geminiThinkingLevel,
     );
   }
 }

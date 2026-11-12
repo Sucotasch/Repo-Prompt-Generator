@@ -1,3 +1,4 @@
+import { tauriInvoke } from "../utils/tauriAdapter.ts";
 import { RepoData } from "./githubService";
 
 const HARD_IGNORE_DIRS = new Set([
@@ -213,5 +214,20 @@ export async function processLocalFolder(
     dependencies,
     sourceFiles: finalSourceFiles,
     isTruncated,
+  };
+}
+
+export async function processNativeLocalFolder(
+  folderPath: string,
+  maxFiles: number,
+): Promise<RepoData> {
+  const limit = Math.min(Math.max(1, Number(maxFiles) || 5), 200);
+  const data = await tauriInvoke<RepoData>("scan_local_repository", {
+    path: folderPath,
+    max_files: limit,
+  });
+  return {
+    ...data,
+    localRootPath: folderPath,
   };
 }

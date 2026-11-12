@@ -34,3 +34,22 @@ const downloadWebFile = (content: string, filename: string) => {
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 };
+
+export const pickLocalDirectoryNative = async (
+  title: string = "Select Repository Folder",
+): Promise<string | null> => {
+  if (!isTauri()) return null;
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title,
+    });
+    return typeof selected === "string" ? selected : null;
+  } catch (e) {
+    console.error("Failed to open folder picker in Tauri:", e);
+    return null;
+  }
+};
+

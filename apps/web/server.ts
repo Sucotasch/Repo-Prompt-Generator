@@ -4,6 +4,93 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import {
+  FunctionCallingConfigMode,
+  GoogleGenAI,
+  ThinkingLevel,
+  Type,
+} from "@google/genai";
+
+const PLACEHOLDER_GEMINI_KEYS = new Set([
+  "MY_GEMINI_API_KEY",
+  "YOUR_GEMINI_API_KEY_HERE",
+]);
+const ALLOWED_GEMINI_MODELS = new Set([
+  "gemini-4-hydrogen",
+  "gemini-4-argon",
+  "gemini-4-carbon",
+]);
+
+function resolveServerGeminiKey(headerKey?: string): string {
+  const cleanHeader = headerKey?.trim();
+  if (cleanHeader && !PLACEHOLDER_GEMINI_KEYS.has(cleanHeader)) {
+    return cleanHeader;
+  }
+  const envKey = process.env.GEMINI_API_KEY?.trim();
+  if (envKey && !PLACEHOLDER_GEMINI_KEYS.has(envKey)) {
+    return envKey;
+  }
+  return "";
+}
+
+function resolveServerThinkingLevel(
+  model: string,
+  requested?: unknown,
+): ThinkingLevel {
+  const valid =
+    requested === "LOW" ||
+    requested === "MEDIUM" ||
+    requested === "HIGH" ||
+    requested === "XHIGH"
+      ? requested
+      : undefined;
+  if (valid === "XHIGH" && model !== "gemini-4-hydrogen") {
+    return ThinkingLevel.HIGH;
+  }
+  switch (valid) {
+    case "LOW":
+      return ThinkingLevel.LOW;
+    case "MEDIUM":
+      return ThinkingLevel.MEDIUM;
+    case "HIGH":
+      return ThinkingLevel.HIGH;
+    case "XHIGH":
+      return ThinkingLevel.XHIGH;
+    default:
+      return model === "gemini-4-hydrogen"
+        ? ThinkingLevel.HIGH
+        : ThinkingLevel.MEDIUM;
+  }
+}
+
+function formatGeminiServerError(err: any): { status: number; message: string } {
+  const raw = err?.message || String(err);
+  const status =
+    typeof err?.status === "number" && err.status >= 400 && err.status < 600
+      ? err.status
+      : 500;
+  if (status === 403 || raw.includes("PERMISSION_DENIED")) {
+    return {
+      status,
+      message:
+        "Gemini API permission denied (403). Check your GEMINI_API_KEY in Settings > Secrets.",
+    };
+  }
+  if (status === 429 || raw.includes("RESOURCE_EXHAUSTED")) {
+    return {
+      status,
+      message:
+        "Gemini API quota exceeded (429). If using a paid model (Argon/Carbon), select a billing-enabled API key in Settings > Secrets.",
+    };
+  }
+  if (status === 404 || raw.includes("NOT_FOUND")) {
+    return {
+      status,
+      message: `Gemini model not found or unavailable (404): ${raw}`,
+    };
+  }
+  return { status, message: raw };
+}
 
 const GITHUB_IDENT_REGEX = /^[a-zA-Z0-9-._]+$/;
 const HARD_IGNORE_DIRS = new Set([
@@ -453,8 +540,8 @@ async function startServer() {
       const encodedBranch = encodeURIComponent(branch || "main");
       const fetchedFiles: { path: string; content: string }[] = [];
 
-      // Limit to 3 files max
-      const pathsToFetch = filePaths.slice(0, 3);
+      // Limit to 5 files max
+      const pathsToFetch = filePaths.slice(0, 5);
 
       const fileResults = await Promise.all(
         pathsToFetch.map(async (file) => {
@@ -560,6 +647,167 @@ async function startServer() {
         .send(text);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Server-side Gemini query rewrite endpoint
+  app.post("/api/gemini/rewrite", async (req, res) => {
+    const ac = new AbortController();
+    res.on("close", () => {
+      if (!res.writableEnded) ac.abort();
+    });
+    try {
+      const apiKey = resolveServerGeminiKey(req.header("x-gemini-api-key"));
+      if (!apiKey) {
+        return res.status(400).json({
+          error:
+            "Gemini API key is missing. Set GEMINI_API_KEY in Settings > Secrets or provide a key.",
+        });
+      }
+      const { prompt } = req.body || {};
+      if (typeof prompt !== "string" || !prompt.trim()) {
+        return res.status(400).json({ error: "Prompt is required." });
+      }
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build",
+          },
+        },
+      });
+      const response = await ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          abortSignal: ac.signal,
+        },
+      });
+      res.json({ text: response.text || "{}" });
+    } catch (error: any) {
+      if (error?.name === "AbortError" || ac.signal.aborted) {
+        return res.status(499).json({ error: "Request aborted" });
+      }
+      const formatted = formatGeminiServerError(error);
+      res.status(formatted.status).json({ error: formatted.message });
+    }
+  });
+
+  // Server-side Gemini generation & Agentic RAG multi-turn endpoint
+  app.post("/api/gemini/generate", async (req, res) => {
+    const ac = new AbortController();
+    res.on("close", () => {
+      if (!res.writableEnded) ac.abort();
+    });
+    try {
+      const apiKey = resolveServerGeminiKey(req.header("x-gemini-api-key"));
+      if (!apiKey) {
+        return res.status(400).json({
+          error:
+            "Gemini API key is missing. Set GEMINI_API_KEY in Settings > Secrets or provide a key.",
+        });
+      }
+      const {
+        model,
+        contents,
+        enableDeepAnalysis,
+        functionCallingMode,
+        thinkingLevel,
+        systemInstruction,
+      } = req.body || {};
+
+      if (!Array.isArray(contents) || contents.length === 0) {
+        return res.status(400).json({ error: "contents array is required." });
+      }
+
+      const resolvedModel =
+        typeof model === "string" && ALLOWED_GEMINI_MODELS.has(model)
+          ? model
+          : "gemini-4-hydrogen";
+
+      const resolvedThinkingLevel = resolveServerThinkingLevel(
+        resolvedModel,
+        thinkingLevel,
+      );
+
+      const config: Record<string, any> = {
+        thinkingConfig: { thinkingLevel: resolvedThinkingLevel },
+        abortSignal: ac.signal,
+      };
+
+      if (typeof systemInstruction === "string" && systemInstruction.trim()) {
+        config.systemInstruction = systemInstruction;
+      }
+
+      if (enableDeepAnalysis) {
+        config.tools = [
+          {
+            functionDeclarations: [
+              {
+                name: "request_additional_files",
+                description:
+                  "Request specific files from the repository to gain more context before answering.",
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    filePaths: {
+                      type: Type.ARRAY,
+                      items: { type: Type.STRING },
+                      description: "List of repository file paths to fetch (max 5 per call).",
+                    },
+                  },
+                  required: ["filePaths"],
+                },
+              },
+            ],
+          },
+        ];
+        config.toolConfig = {
+          functionCallingConfig: {
+            mode:
+              functionCallingMode === "NONE"
+                ? FunctionCallingConfigMode.NONE
+                : FunctionCallingConfigMode.AUTO,
+          },
+        };
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build",
+          },
+        },
+      });
+
+      const response = await ai.models.generateContent({
+        model: resolvedModel,
+        contents,
+        config,
+      });
+
+      if (
+        (!response.candidates || response.candidates.length === 0) &&
+        response.promptFeedback?.blockReason
+      ) {
+        return res.status(400).json({
+          error: `Gemini blocked response: ${response.promptFeedback.blockReason}`,
+        });
+      }
+
+      res.json({
+        candidates: response.candidates || [],
+        promptFeedback: response.promptFeedback,
+      });
+    } catch (error: any) {
+      if (error?.name === "AbortError" || ac.signal.aborted) {
+        return res.status(499).json({ error: "Request aborted" });
+      }
+      const formatted = formatGeminiServerError(error);
+      res.status(formatted.status).json({ error: formatted.message });
     }
   });
 

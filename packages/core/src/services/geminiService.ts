@@ -1,31 +1,28 @@
-/// <reference types="vite/client" />
-import { GoogleGenAI, Type } from "@google/genai";
-import { RepoData } from "./githubService";
+import {
+  DEFAULT_GEMINI_MODEL,
+  GeminiModelId,
+  GeminiThinkingLevel,
+  normalizeThinkingLevel,
+  resolveGeminiModel,
+} from "../config/geminiModels.ts";
 import { buildCodeDependencyGraph } from "../utils/codeGraph";
-import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
 import { safeJsonParse } from "../utils/jsonUtils.ts";
-import { fetchSpecificFiles } from "./githubService";
+import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
+import { RepoData, fetchSpecificFiles } from "./githubService";
 
 const PLACEHOLDER_KEYS = new Set(["MY_GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE"]);
+const MAX_TOOL_ROUNDS = 3;
+const MAX_FILES_PER_CALL = 5;
 
-function resolveGeminiApiKey(explicitKey?: string): string {
-  const cleanExplicit = explicitKey?.trim();
-  if (cleanExplicit && !PLACEHOLDER_KEYS.has(cleanExplicit)) {
-    return cleanExplicit;
+function cleanExplicitGeminiKey(explicitKey?: string): string {
+  const clean = explicitKey?.trim() || "";
+  return clean && !PLACEHOLDER_KEYS.has(clean) ? clean : "";
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException("Generation cancelled", "AbortError");
   }
-  try {
-    const definedKey = process.env.GEMINI_API_KEY?.trim();
-    if (definedKey && !PLACEHOLDER_KEYS.has(definedKey)) {
-      return definedKey;
-    }
-  } catch {
-    // process is not defined when Vite define substitution was skipped
-  }
-  const viteKey = import.meta.env.VITE_GEMINI_API_KEY?.trim();
-  if (viteKey && !PLACEHOLDER_KEYS.has(viteKey)) {
-    return viteKey;
-  }
-  return "";
 }
 
 export function buildPromptText(
@@ -121,14 +118,13 @@ export function buildPromptText(
 export async function rewriteQueryWithGemini(
   query: string,
   geminiApiKey?: string,
-  proxyAddress?: string,
+  _proxyAddress?: string,
   signal?: AbortSignal,
-): Promise<{ optimizedQuery: string; intent: string }> {
-  if (!query || query.trim() === "")
-    return { optimizedQuery: query, intent: "GENERAL" };
-  if (signal?.aborted) {
-    throw new DOMException("Generation cancelled", "AbortError");
+): Promise<{ optimizedQuery: string; intent: string; isFallback?: boolean }> {
+  if (!query || query.trim() === "") {
+    return { optimizedQuery: query, intent: "GENERAL", isFallback: true };
   }
+  throwIfAborted(signal);
 
   const prompt = `You are an AI assistant optimizing a search query for a Retrieval-Augmented Generation (RAG) system operating on a code repository.
 The user's original query is: "${query}"
@@ -150,62 +146,180 @@ Return ONLY a valid JSON object with the following structure, nothing else. Do n
 }`;
 
   try {
+    let responseText = "";
     if (isTauri()) {
-      const responseText = await tauriInvoke<string>("call_gemini_secure", {
+      responseText = await tauriInvoke<string>("call_gemini_secure", {
         prompt,
-        model: "gemini-3-flash-preview",
+        model: DEFAULT_GEMINI_MODEL,
         response_mime_type: "application/json",
       });
-      
-      const cleanText = responseText.trim();
-      const parsed = safeJsonParse<{optimizedQuery?: string, intent?: string}>(cleanText, {
-        optimizedQuery: query,
-        intent: "GENERAL",
-      });
-
-      return {
-        optimizedQuery: parsed.optimizedQuery || query,
-        intent: parsed.intent || "GENERAL",
+    } else {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
       };
+      const cleanKey = cleanExplicitGeminiKey(geminiApiKey);
+      if (cleanKey) {
+        headers["x-gemini-api-key"] = cleanKey;
+      }
+      const res = await fetch("/api/gemini/rewrite", {
+        method: "POST",
+        headers,
+        signal,
+        body: JSON.stringify({ prompt }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error || `Gemini rewrite error (${res.status})`);
+      }
+      responseText = payload.text || "{}";
     }
 
-    const ai = new GoogleGenAI({
-      apiKey: resolveGeminiApiKey(geminiApiKey),
-    });
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        abortSignal: signal,
-      },
-    });
-
-    const text = response.text || "{}";
-    const cleanText = text.trim();
-    const parsed = safeJsonParse<{optimizedQuery?: string, intent?: string}>(cleanText, {
-      optimizedQuery: query,
-      intent: "GENERAL",
-    });
-
+    throwIfAborted(signal);
+    const parsed = safeJsonParse<{ optimizedQuery?: string; intent?: string } | null>(
+      responseText.trim(),
+      null,
+    );
+    if (!parsed || !parsed.optimizedQuery?.trim()) {
+      return { optimizedQuery: query, intent: "GENERAL", isFallback: true };
+    }
     return {
-      optimizedQuery: parsed.optimizedQuery || query,
+      optimizedQuery: parsed.optimizedQuery,
       intent: parsed.intent || "GENERAL",
+      isFallback: false,
     };
   } catch (e: any) {
     if (e?.name === "AbortError" || signal?.aborted) {
       throw new DOMException("Generation cancelled", "AbortError");
     }
     console.error("Failed to rewrite query with Gemini:", e);
-    return { optimizedQuery: query, intent: "GENERAL" };
+    return { optimizedQuery: query, intent: "GENERAL", isFallback: true };
   }
+}
+
+interface GeminiInvokeParams {
+  model: GeminiModelId;
+  contents: any[];
+  enableDeepAnalysis: boolean;
+  functionCallingMode: "AUTO" | "NONE";
+  thinkingLevel: GeminiThinkingLevel;
+  geminiApiKey?: string;
+  signal?: AbortSignal;
+}
+
+const TAURI_DEEP_ANALYSIS_TOOLS = [
+  {
+    functionDeclarations: [
+      {
+        name: "request_additional_files",
+        description:
+          "Request specific files from the repository to gain more context before answering.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            filePaths: {
+              type: "ARRAY",
+              items: { type: "STRING" },
+              description: "List of repository file paths to fetch (max 5 per call).",
+            },
+          },
+          required: ["filePaths"],
+        },
+      },
+    ],
+  },
+];
+
+async function invokeGeminiAdvanced(params: GeminiInvokeParams): Promise<any> {
+  throwIfAborted(params.signal);
+
+  if (isTauri()) {
+    const response = await tauriInvoke<any>("call_gemini_advanced", {
+      contents: params.contents,
+      tools: params.enableDeepAnalysis ? TAURI_DEEP_ANALYSIS_TOOLS : null,
+      tool_config: params.enableDeepAnalysis
+        ? {
+            functionCallingConfig: {
+              mode: params.functionCallingMode,
+            },
+          }
+        : null,
+      generation_config: {
+        thinkingConfig: {
+          thinkingLevel: params.thinkingLevel,
+        },
+      },
+      model: params.model,
+    });
+    throwIfAborted(params.signal);
+    return response;
+  }
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  const cleanKey = cleanExplicitGeminiKey(params.geminiApiKey);
+  if (cleanKey) {
+    headers["x-gemini-api-key"] = cleanKey;
+  }
+
+  const res = await fetch("/api/gemini/generate", {
+    method: "POST",
+    headers,
+    signal: params.signal,
+    body: JSON.stringify({
+      model: params.model,
+      contents: params.contents,
+      enableDeepAnalysis: params.enableDeepAnalysis,
+      functionCallingMode: params.functionCallingMode,
+      thinkingLevel: params.thinkingLevel,
+    }),
+  });
+
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(payload?.error || `Gemini API error (${res.status})`);
+  }
+  throwIfAborted(params.signal);
+  return payload;
+}
+
+function extractCandidateText(candidate: any): string {
+  const parts = candidate?.content?.parts;
+  if (!Array.isArray(parts)) return "";
+  let text = "";
+  for (const part of parts) {
+    if (part?.text && !part?.thought) {
+      text += part.text;
+    }
+  }
+  if (!text.trim()) {
+    for (const part of parts) {
+      if (part?.text) {
+        text += part.text;
+      }
+    }
+  }
+  return text;
+}
+
+function resolveGithubTokenFallback(explicitToken?: string): string | undefined {
+  if (explicitToken?.trim()) return explicitToken.trim();
+  try {
+    const settings = localStorage.getItem("gemini_app_settings");
+    if (settings) {
+      return JSON.parse(settings).githubToken || undefined;
+    }
+  } catch {
+    // ignore storage read error
+  }
+  return undefined;
 }
 
 export async function generateSystemPrompt(
   repoData: RepoData,
   taskInstruction: string,
   geminiApiKey: string,
-  proxyAddress: string,
+  _proxyAddress: string,
   additionalContext?: string,
   analyzeIssues?: boolean,
   usedOllama?: boolean,
@@ -218,10 +332,22 @@ export async function generateSystemPrompt(
   referenceLocalFiles?: FileList | null,
   githubToken?: string,
   signal?: AbortSignal,
-): Promise<{ text: string; modelVersion: string; requestedFiles?: string[]; fetchedFilesCount?: number }> {
-  if (signal?.aborted) {
-    throw new DOMException("Generation cancelled", "AbortError");
-  }
+  geminiModel?: string,
+  geminiThinkingLevel?: string,
+): Promise<{
+  text: string;
+  modelVersion: string;
+  requestedFiles?: string[];
+  fetchedFilesCount?: number;
+}> {
+  throwIfAborted(signal);
+
+  const resolvedModel = resolveGeminiModel(geminiModel);
+  const resolvedThinkingLevel = normalizeThinkingLevel(
+    resolvedModel,
+    geminiThinkingLevel,
+  );
+
   const prompt = buildPromptText(
     repoData,
     taskInstruction,
@@ -232,268 +358,155 @@ export async function generateSystemPrompt(
     fileTruncationLimit,
   );
 
-  let finalPrompt = "Failed to generate prompt.";
-  let modelVersion = "gemini-3.1-pro-preview";
-  let requestedFilesList: string[] = [];
-  let fetchedFilesCount: number | undefined = undefined;
-
   const contents: any[] = [{ role: "user", parts: [{ text: prompt }] }];
-  let tools: any[] | undefined = undefined;
+  const requestedSet = new Set<string>();
+  const alreadyFetched = new Map<string, string>();
+  const token = resolveGithubTokenFallback(githubToken);
 
-  if (isDeepAnalysis) {
-    tools = [
-      {
-        functionDeclarations: [
-          {
-            name: "request_additional_files",
-            description: "Request specific files from the repository to gain more context before answering.",
-            parameters: {
-              type: Type.OBJECT,
-              properties: {
-                filePaths: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: "List of file paths to fetch. Max 3 files.",
-                },
-              },
-              required: ["filePaths"],
+  try {
+    const maxRounds = isDeepAnalysis ? MAX_TOOL_ROUNDS : 1;
+
+    for (let round = 0; round < maxRounds; round++) {
+      throwIfAborted(signal);
+      const isFinalForcedRound = isDeepAnalysis && round === maxRounds - 1;
+
+      if (round === 0) {
+        onStatusUpdate?.(`Generating with ${resolvedModel}...`);
+      } else if (isFinalForcedRound) {
+        onStatusUpdate?.("Synthesizing final prompt from collected context...");
+      } else {
+        onStatusUpdate?.(`Deep Analysis round ${round + 1}/${MAX_TOOL_ROUNDS}...`);
+      }
+
+      const response = await invokeGeminiAdvanced({
+        model: resolvedModel,
+        contents,
+        enableDeepAnalysis: isDeepAnalysis,
+        functionCallingMode: isFinalForcedRound ? "NONE" : "AUTO",
+        thinkingLevel: resolvedThinkingLevel,
+        geminiApiKey,
+        signal,
+      });
+
+      const candidate = response?.candidates?.[0];
+      if (!candidate) {
+        const blockReason = response?.promptFeedback?.blockReason;
+        throw new Error(
+          blockReason
+            ? `Gemini blocked response: ${blockReason}`
+            : "Gemini returned no candidates.",
+        );
+      }
+
+      const candidateContent = candidate.content;
+      const parts: any[] = Array.isArray(candidateContent?.parts)
+        ? candidateContent.parts
+        : [];
+      const functionCallParts = parts.filter((p) => Boolean(p?.functionCall));
+
+      if (functionCallParts.length === 0) {
+        const text = extractCandidateText(candidate);
+        if (!text.trim()) {
+          throw new Error(
+            `Gemini returned an empty response (finishReason: ${candidate.finishReason || "Unknown"}).`,
+          );
+        }
+        const finalText = usedOllama
+          ? `> **Note:** This context was pre-processed by local LLM.\n\n${text}`
+          : text;
+        return {
+          text: finalText,
+          modelVersion: resolvedModel,
+          requestedFiles: Array.from(requestedSet),
+          fetchedFilesCount: alreadyFetched.size,
+        };
+      }
+
+      if (isFinalForcedRound) {
+        throw new Error(
+          `Model attempted to call tool '${functionCallParts[0].functionCall?.name || "unknown"}' on final synthesis step instead of returning output.`,
+        );
+      }
+
+      // Preserve full candidate content (including thought + thoughtSignature)
+      contents.push(candidateContent);
+
+      // Process ALL parallel tool calls in this turn strictly 1:1 with matching call.id
+      const responseParts: any[] = [];
+      for (const part of functionCallParts) {
+        const call = part.functionCall;
+        if (call.name !== "request_additional_files") {
+          responseParts.push({
+            functionResponse: {
+              ...(call.id ? { id: call.id } : {}),
+              name: call.name,
+              response: { error: `Unsupported tool '${call.name}'.` },
+            },
+          });
+          continue;
+        }
+
+        const rawPaths: string[] = Array.isArray(call.args?.filePaths)
+          ? call.args.filePaths.filter((p: unknown): p is string => typeof p === "string")
+          : [];
+        const batchPaths = rawPaths.slice(0, MAX_FILES_PER_CALL);
+        const skippedOverLimit = rawPaths.slice(MAX_FILES_PER_CALL);
+
+        batchPaths.forEach((p) => requestedSet.add(p));
+        const toFetch = batchPaths.filter((p) => !alreadyFetched.has(p));
+
+        if (toFetch.length > 0) {
+          onStatusUpdate?.(
+            `Deep Analysis: fetching ${toFetch.length} file(s)...`,
+          );
+          const newlyFetched = await fetchSpecificFiles(
+            repoData,
+            toFetch,
+            token,
+            referenceRepoData,
+            localFiles,
+            referenceLocalFiles,
+            signal,
+          );
+          throwIfAborted(signal);
+          for (const f of newlyFetched) {
+            alreadyFetched.set(f.path, f.content);
+          }
+        }
+
+        const filesPayload = batchPaths
+          .filter((p) => alreadyFetched.has(p))
+          .map((p) => ({
+            path: p,
+            content: `\n<repository_file_content path="${p}">\n${alreadyFetched.get(p)}\n</repository_file_content>\n`,
+          }));
+        const missing = batchPaths.filter((p) => !alreadyFetched.has(p));
+
+        responseParts.push({
+          functionResponse: {
+            ...(call.id ? { id: call.id } : {}),
+            name: call.name,
+            response: {
+              files: filesPayload,
+              missing,
+              skippedDueToBatchLimit: skippedOverLimit,
+              remainingToolRounds: Math.max(0, MAX_TOOL_ROUNDS - 2 - round),
             },
           },
-        ],
-      },
-    ];
-  }
+        });
+      }
 
-  if (isTauri()) {
-    try {
-      if (onStatusUpdate) onStatusUpdate("Analyzing project structure...");
-      let response = await tauriInvoke<any>("call_gemini_advanced", {
-        contents,
-        tools,
-        model: modelVersion,
+      contents.push({
+        role: "user",
+        parts: responseParts,
       });
-
-      const candidateContent = response.candidates?.[0]?.content;
-      const parts = candidateContent?.parts || [];
-      const functionCallPart = parts.find((p: any) => p?.functionCall);
-
-      if (functionCallPart?.functionCall) {
-        const call = functionCallPart.functionCall;
-        if (call.name === "request_additional_files") {
-          const requestedFiles = call.args?.filePaths || [];
-          requestedFilesList = requestedFiles;
-          if (onStatusUpdate) onStatusUpdate(`Requesting additional files (${requestedFiles.length})...`);
-
-          let token = githubToken;
-          if (!token) {
-            try {
-              const settings = localStorage.getItem("gemini_app_settings");
-              if (settings) {
-                token = JSON.parse(settings).githubToken;
-              }
-            } catch (e) {}
-          }
-
-          const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, token, referenceRepoData, localFiles, referenceLocalFiles);
-          if (signal?.aborted) {
-            throw new DOMException("Generation cancelled", "AbortError");
-          }
-          fetchedFilesCount = fetchedFiles.length;
-          
-          const secureFetchedFiles = fetchedFiles.map(f => ({
-            path: f.path,
-            content: `\n<repository_file_content path="${f.path}">\n${f.content}\n</repository_file_content>\n`
-          }));
-          
-          let instructionText = "";
-          if (fetchedFiles.length === 0) {
-            if (onStatusUpdate) onStatusUpdate("Failed to fetch files. Generating fallback response...");
-            instructionText = "\n\nCRITICAL INSTRUCTION: The requested files could not be fetched or were empty. You MUST now provide the final answer based on the initial context. Do NOT request any more files. Provide the final output directly.";
-          } else {
-            if (onStatusUpdate) onStatusUpdate(`Successfully fetched ${fetchedFiles.length} files. Generating final response...`);
-            instructionText = "\n\nCRITICAL INSTRUCTION: You have received the requested files. You MUST now provide the final answer based on these files. Do NOT request any more files. Provide the final output directly.";
-          }
-          
-          if (!candidateContent) {
-            throw new Error("Missing candidate content for function response turn.");
-          }
-          contents.push(candidateContent);
-          contents.push({
-            role: "user",
-            parts: [
-              {
-                functionResponse: {
-                  name: "request_additional_files",
-                  response: { files: secureFetchedFiles }
-                }
-              },
-              {
-                text: instructionText
-              }
-            ]
-          });
-
-          response = await tauriInvoke<any>("call_gemini_advanced", {
-            contents,
-            tools: undefined,
-            model: modelVersion,
-          });
-        }
-      }
-
-      if (response.candidates && response.candidates.length > 0) {
-        const candidate = response.candidates[0];
-        let text = "";
-        let functionCall = null;
-        if (candidate.content?.parts) {
-          for (const part of candidate.content.parts) {
-            if (part.text && !part.thought) text += part.text;
-            if (part.functionCall) functionCall = part.functionCall;
-          }
-          if (!text.trim()) {
-            for (const part of candidate.content.parts) {
-              if (part.text) text += part.text;
-            }
-          }
-        }
-        
-        if (text.trim()) {
-          finalPrompt = text;
-        } else if (functionCall) {
-          finalPrompt = `Failed to generate prompt. Model attempted to call function '${functionCall.name}' again instead of providing a final answer.`;
-        } else {
-          finalPrompt = `Failed to generate prompt. Response was empty. Finish reason: ${candidate.finishReason || "Unknown"}.`;
-        }
-      } else {
-        finalPrompt = "Failed to generate prompt. No candidates returned.";
-      }
-    } catch (e: any) {
-      if (e?.name === "AbortError" || signal?.aborted) {
-        throw new DOMException("Generation cancelled", "AbortError");
-      }
-      console.error("Failed to generate prompt with Gemini via Tauri:", e);
-      finalPrompt = `Error: ${e}`;
     }
-  } else {
-    try {
-      const ai = new GoogleGenAI({
-        apiKey: resolveGeminiApiKey(geminiApiKey),
-      });
 
-      if (onStatusUpdate) onStatusUpdate("Analyzing project structure...");
-      let response = await ai.models.generateContent({
-        model: modelVersion,
-        contents,
-        config: {
-          tools,
-          abortSignal: signal,
-        },
-      });
-
-      if (response.functionCalls && response.functionCalls.length > 0) {
-        const call = response.functionCalls[0];
-        if (call.name === "request_additional_files") {
-          const requestedFiles = (call.args as any)?.filePaths || [];
-          requestedFilesList = requestedFiles;
-          if (onStatusUpdate) onStatusUpdate(`Requesting additional files (${requestedFiles.length})...`);
-          
-          let token = githubToken;
-          if (!token) {
-            try {
-              const settings = localStorage.getItem("gemini_app_settings");
-              if (settings) {
-                token = JSON.parse(settings).githubToken;
-              }
-            } catch (e) {}
-          }
-
-          const fetchedFiles = await fetchSpecificFiles(repoData, requestedFiles, token, referenceRepoData, localFiles, referenceLocalFiles);
-          fetchedFilesCount = fetchedFiles.length;
-          
-          const secureFetchedFiles = fetchedFiles.map(f => ({
-            path: f.path,
-            content: `\n<repository_file_content path="${f.path}">\n${f.content}\n</repository_file_content>\n`
-          }));
-          
-          let instructionText = "";
-          if (fetchedFiles.length === 0) {
-            if (onStatusUpdate) onStatusUpdate("Failed to fetch files. Generating fallback response...");
-            instructionText = "\n\nCRITICAL INSTRUCTION: The requested files could not be fetched or were empty. You MUST now provide the final answer based on the initial context. Do NOT request any more files. Provide the final output directly.";
-          } else {
-            if (onStatusUpdate) onStatusUpdate(`Successfully fetched ${fetchedFiles.length} files. Generating final response...`);
-            instructionText = "\n\nCRITICAL INSTRUCTION: You have received the requested files. You MUST now provide the final answer based on these files. Do NOT request any more files. Provide the final output directly.";
-          }
-          
-          const candidateMsg = response.candidates?.[0]?.content;
-          if (!candidateMsg) {
-            throw new Error("Missing candidate content for function response turn.");
-          }
-          contents.push(candidateMsg);
-          contents.push({
-            role: "user",
-            parts: [
-              {
-                functionResponse: {
-                  name: "request_additional_files",
-                  response: { files: secureFetchedFiles }
-                }
-              },
-              {
-                text: instructionText
-              }
-            ]
-          });
-
-          response = await ai.models.generateContent({
-            model: modelVersion,
-            contents,
-            config: {
-              abortSignal: signal,
-            },
-          });
-        }
-      }
-
-      if (response.candidates && response.candidates.length > 0) {
-        const candidate = response.candidates[0];
-        let text = "";
-        let functionCall = null;
-        if (candidate.content?.parts) {
-          for (const part of candidate.content.parts) {
-            if (part.text && !part.thought) text += part.text;
-            if (part.functionCall) functionCall = part.functionCall;
-          }
-          if (!text.trim()) {
-            for (const part of candidate.content.parts) {
-              if (part.text) text += part.text;
-            }
-          }
-        }
-        
-        if (text.trim()) {
-          finalPrompt = text;
-        } else if (functionCall) {
-          finalPrompt = `Failed to generate prompt. Model attempted to call function '${functionCall.name}' again instead of providing a final answer.`;
-        } else {
-          finalPrompt = `Failed to generate prompt. Response was empty. Finish reason: ${candidate.finishReason || "Unknown"}.`;
-        }
-      } else {
-        finalPrompt = "Failed to generate prompt. No candidates returned.";
-      }
-    } catch (e: any) {
-      if (e?.name === "AbortError" || signal?.aborted) {
-        throw new DOMException("Generation cancelled", "AbortError");
-      }
-      console.error("Failed to generate prompt with Gemini:", e);
-      finalPrompt = `Error: ${e}`;
+    throw new Error("Deep Analysis exceeded maximum tool rounds without a final response.");
+  } catch (e: any) {
+    if (e?.name === "AbortError" || signal?.aborted) {
+      throw new DOMException("Generation cancelled", "AbortError");
     }
+    throw e instanceof Error ? e : new Error(String(e));
   }
-
-  if (usedOllama) {
-    finalPrompt =
-      `> **Note:** This context was pre-processed by local LLM.\n\n` +
-      finalPrompt;
-  }
-
-  return { text: finalPrompt, modelVersion, requestedFiles: requestedFilesList, fetchedFilesCount };
 }

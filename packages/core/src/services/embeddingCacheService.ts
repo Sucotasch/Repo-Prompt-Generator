@@ -169,6 +169,7 @@ export class EmbeddingCacheService {
           await caches.delete(name);
         }
       }
+      localStorage.removeItem("embedding_cache_activity");
       console.log("[EmbeddingCache] All caches cleared.");
     } catch (e) {
       console.error("[EmbeddingCache] Failed to clear cache:", e);

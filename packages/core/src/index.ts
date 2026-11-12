@@ -1,3 +1,4 @@
+export * from "./config/geminiModels.ts";
 export * from "./services/aiAdapter.ts";
 export * from "./services/embeddingCacheService.ts";
 export * from "./services/geminiService.ts";
