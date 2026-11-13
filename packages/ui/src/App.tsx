@@ -108,6 +108,8 @@ export default function App() {
             error={pipeline.error}
             onDismissError={() => pipeline.setError(null)}
             isTruncated={pipeline.isTruncated}
+            ragWarning={pipeline.ragWarning}
+            onDismissRagWarning={() => pipeline.setRagWarning(null)}
             maxFiles={settings.maxFiles}
             prompt={pipeline.prompt}
             generatedFileName={pipeline.generatedFileName}

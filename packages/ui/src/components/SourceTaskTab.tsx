@@ -1,5 +1,6 @@
-import React from "react";
+import { useState } from "react";
 import {
+  Check,
   Database,
   Folder,
   FolderOpen,
@@ -9,7 +10,13 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { getAllTemplates, getTemplate, isTauri } from "@repo-prompt-generator/core";
+import {
+  GithubTokenVerificationResult,
+  getAllTemplates,
+  getTemplate,
+  isTauri,
+  verifyGithubToken,
+} from "@repo-prompt-generator/core";
 import { useAppSettings } from "../hooks/useAppSettings";
 
 interface SourceTaskTabProps {
@@ -42,6 +49,18 @@ export function SourceTaskTab({
       : settings.githubToken
         ? 200
         : 10;
+
+  const [verifyingToken, setVerifyingToken] = useState(false);
+  const [tokenVerification, setTokenVerification] =
+    useState<GithubTokenVerificationResult | null>(null);
+
+  const handleVerifyToken = async () => {
+    if (!settings.githubToken.trim()) return;
+    setVerifyingToken(true);
+    const result = await verifyGithubToken(settings.githubToken);
+    setTokenVerification(result);
+    setVerifyingToken(false);
+  };
 
   return (
     <div className="divide-y divide-slate-200">
@@ -106,21 +125,80 @@ export function SourceTaskTab({
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label
-                  htmlFor="githubToken"
-                  className="block text-xs font-medium text-slate-600 mb-1"
-                >
-                  GitHub Token (Optional)
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label
+                    htmlFor="githubToken"
+                    className="block text-xs font-medium text-slate-600"
+                  >
+                    GitHub Token (Optional)
+                  </label>
+                  {settings.githubToken && (
+                    <div className="flex items-center gap-2.5">
+                      <button
+                        type="button"
+                        onClick={handleVerifyToken}
+                        disabled={loading || verifyingToken || !settings.githubToken.trim()}
+                        className="text-[11px] font-medium text-indigo-600 hover:text-indigo-800 whitespace-nowrap cursor-pointer disabled:opacity-50"
+                      >
+                        {verifyingToken ? "Checking..." : "Verify"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          settings.setGithubToken("");
+                          setTokenVerification(null);
+                        }}
+                        disabled={loading}
+                        className="text-[11px] font-medium text-slate-500 hover:text-red-600 whitespace-nowrap cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <input
                   id="githubToken"
+                  name="github-pat-token"
                   type="password"
+                  autoComplete="new-password"
+                  data-1p-ignore="true"
+                  data-lpignore="true"
                   placeholder="ghp_..."
                   value={settings.githubToken}
-                  onChange={(e) => settings.setGithubToken(e.target.value)}
+                  onChange={(e) => {
+                    settings.setGithubToken(e.target.value);
+                    setTokenVerification(null);
+                  }}
                   disabled={loading}
-                  className="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                  className="w-full px-3 py-1.5 text-sm font-mono border border-slate-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                 />
+                {tokenVerification && (
+                  <p
+                    className={`mt-1 text-[11px] tabular-nums flex items-center gap-1 ${
+                      tokenVerification.valid
+                        ? "text-emerald-700"
+                        : "text-red-600"
+                    }`}
+                  >
+                    {tokenVerification.valid ? (
+                      <>
+                        <Check className="w-3 h-3 shrink-0" />
+                        <span>
+                          Valid token
+                          {typeof tokenVerification.remaining === "number" &&
+                          typeof tokenVerification.limit === "number"
+                            ? ` · ${tokenVerification.remaining.toLocaleString()} / ${tokenVerification.limit.toLocaleString()} req left`
+                            : ""}
+                          {tokenVerification.scopes
+                            ? ` · scopes: ${tokenVerification.scopes}`
+                            : ""}
+                        </span>
+                      </>
+                    ) : (
+                      <span>{tokenVerification.error}</span>
+                    )}
+                  </p>
+                )}
               </div>
               <div>
                 <label

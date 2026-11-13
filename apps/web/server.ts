@@ -197,12 +197,13 @@ async function startServer() {
           .json({ error: "Invalid request. Branch must be a string." });
       }
 
+      const cleanToken = typeof token === "string" ? token.trim() : "";
       const headers: Record<string, string> = {
         "Accept": "application/vnd.github.v3+json",
         "User-Agent": "repo-prompt-generator/1.0.0",
       };
-      if (token && typeof token === "string") {
-        headers["Authorization"] = `token ${token}`;
+      if (cleanToken) {
+        headers["Authorization"] = `Bearer ${cleanToken}`;
       }
 
       // Strict validation to prevent SSRF and injection
@@ -216,7 +217,12 @@ async function startServer() {
         { headers, signal: AbortSignal.timeout(15000) },
       );
       if (!infoRes.ok) {
-        if (infoRes.status === 403) {
+        if (infoRes.status === 401) {
+          return res.status(401).json({
+            error:
+              "GitHub authentication failed (401 Unauthorized): your GitHub Token appears invalid, expired, or browser-autofilled. Clear the GitHub Token field to fetch public repositories without authentication, or provide a valid token.",
+          });
+        } else if (infoRes.status === 403) {
           return res.status(403).json({
             error:
               "GitHub API rate limit exceeded. Please try again later or provide a GitHub token.",
@@ -256,6 +262,12 @@ async function startServer() {
           .map((item: any) => item.path)
           .filter((filePath: string) => !shouldIgnoreRepoPath(filePath));
       } else {
+        if (treeRes.status === 401) {
+          return res.status(401).json({
+            error:
+              "GitHub authentication failed (401 Unauthorized) while reading repository tree. Clear the GitHub Token field for public repositories or update it.",
+          });
+        }
         if (treeRes.status === 404) {
           return res.status(404).json({
             error: `Branch, tag, or commit '${targetBranch}' not found in repository.`,
@@ -438,7 +450,7 @@ async function startServer() {
       filesToFetch.sort((a, b) => getFileScore(b) - getFileScore(a));
 
       // Limit to requested maxFiles (dynamic based on token)
-      const absoluteMax = token ? 200 : 10;
+      const absoluteMax = cleanToken ? 200 : 10;
       const limit = Math.min(Math.max(1, Number(maxFiles) || 5), absoluteMax);
       filesToFetch = filesToFetch.slice(0, limit);
 
@@ -529,12 +541,13 @@ async function startServer() {
         return res.status(400).json({ error: "Branch must be a string." });
       }
 
+      const cleanToken = typeof token === "string" ? token.trim() : "";
       const headers: Record<string, string> = {
         "User-Agent": "AI-Studio-Applet/1.0",
         "Accept": "application/vnd.github.v3+json",
       };
-      if (token && typeof token === "string") {
-        headers["Authorization"] = `token ${token}`;
+      if (cleanToken) {
+        headers["Authorization"] = `Bearer ${cleanToken}`;
       }
 
       const encodedBranch = encodeURIComponent(branch || "main");
@@ -583,6 +596,59 @@ async function startServer() {
     }
   });
 
+  // Verify GitHub token validity without consuming API core quota
+  app.post("/api/repo/verify-token", async (req, res) => {
+    try {
+      const cleanToken =
+        typeof req.body?.token === "string" ? req.body.token.trim() : "";
+      if (!cleanToken) {
+        return res.status(400).json({
+          valid: false,
+          error: "GitHub token is empty.",
+        });
+      }
+
+      const ghRes = await fetch("https://api.github.com/rate_limit", {
+        headers: {
+          "Accept": "application/vnd.github.v3+json",
+          "User-Agent": "repo-prompt-generator/1.0.0",
+          "Authorization": `Bearer ${cleanToken}`,
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (ghRes.status === 401) {
+        return res.status(401).json({
+          valid: false,
+          error: "Invalid or expired token (401 Unauthorized).",
+        });
+      }
+
+      if (!ghRes.ok) {
+        return res.status(ghRes.status).json({
+          valid: false,
+          error: `GitHub API returned ${ghRes.status} ${ghRes.statusText}`,
+        });
+      }
+
+      const data = await ghRes.json().catch(() => ({}));
+      const core = data?.resources?.core || data?.rate || {};
+      const scopes = ghRes.headers.get("x-oauth-scopes") || "";
+
+      return res.json({
+        valid: true,
+        limit: typeof core.limit === "number" ? core.limit : undefined,
+        remaining: typeof core.remaining === "number" ? core.remaining : undefined,
+        scopes,
+      });
+    } catch (error: any) {
+      res.status(500).json({
+        valid: false,
+        error: error?.message || "Failed to contact GitHub API.",
+      });
+    }
+  });
+
   // Proxy for OpenAI-compatible /models
   app.post("/api/openai-compatible/models", async (req, res) => {
     try {
@@ -617,6 +683,10 @@ async function startServer() {
 
   // Proxy for OpenAI-compatible /chat/completions
   app.post("/api/openai-compatible/chat", async (req, res) => {
+    const ac = new AbortController();
+    res.on("close", () => {
+      if (!res.writableEnded) ac.abort();
+    });
     try {
       const { baseUrl, apiKey, payload } = req.body;
       const cleanBaseUrl = validateProxyBaseUrl(baseUrl);
@@ -638,7 +708,7 @@ async function startServer() {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(120000),
+        signal: ac.signal,
       });
       const text = await response.text();
       res
@@ -646,6 +716,9 @@ async function startServer() {
         .type(response.headers.get("content-type") || "application/json")
         .send(text);
     } catch (error: any) {
+      if (error?.name === "AbortError" || ac.signal.aborted) {
+        return res.status(499).json({ error: "Request aborted" });
+      }
       res.status(500).json({ error: error.message });
     }
   });
@@ -816,12 +889,27 @@ async function startServer() {
   const __dirname = path.dirname(__filename);
 
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
+    let resolvedVite: Awaited<ReturnType<typeof createViteServer>> | null = null;
+    const vitePromise = createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
       root: __dirname,
+    }).then((vite) => {
+      resolvedVite = vite;
+      return vite;
     });
-    app.use(vite.middlewares);
+    vitePromise.catch((err) => {
+      console.error("Failed to initialize Vite dev server:", err);
+      process.exit(1);
+    });
+    app.use(async (req, res, next) => {
+      try {
+        const vite = resolvedVite ?? (await vitePromise);
+        vite.middlewares(req, res, next);
+      } catch (err) {
+        next(err);
+      }
+    });
   } else {
     const distPath = path.join(__dirname, 'dist');
     app.use(express.static(distPath));

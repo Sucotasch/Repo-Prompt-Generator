@@ -30,21 +30,27 @@ function assertValidEmbedding(embedding: unknown, context: string): number[] {
   return embedding as number[];
 }
 
-function withTimeoutSignal(ms: number, externalSignal?: AbortSignal): AbortSignal {
-  const timeoutSignal = AbortSignal.timeout(ms);
-  if (!externalSignal) return timeoutSignal;
-  if (typeof (AbortSignal as any).any === "function") {
-    return (AbortSignal as any).any([timeoutSignal, externalSignal]);
+function withAbortSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(new DOMException("Generation cancelled", "AbortError"));
   }
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  if (externalSignal.aborted || timeoutSignal.aborted) {
-    controller.abort();
-  } else {
-    externalSignal.addEventListener("abort", onAbort, { once: true });
-    timeoutSignal.addEventListener("abort", onAbort, { once: true });
-  }
-  return controller.signal;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(new DOMException("Generation cancelled", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (val) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(val);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
 }
 
 export async function getEmbedding(
@@ -68,24 +74,30 @@ export async function getEmbedding(
 
   if (isTauri()) {
     if (engine === "ollama") {
-      const raw = await tauriInvoke<number[]>("ollama_embed", {
-        url: cleanUrl,
-        model,
-        prompt: text,
-      });
+      const raw = await withAbortSignal(
+        tauriInvoke<number[]>("ollama_embed", {
+          url: cleanUrl,
+          model,
+          prompt: text,
+        }),
+        signal,
+      );
       embedding = assertValidEmbedding(raw, "Tauri Ollama");
     } else {
-      const response = await tauriInvoke<any>("ai_network_request", {
-        method: "POST",
-        url: `${cleanUrl}/embeddings`,
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: model,
-          input: text,
+      const response = await withAbortSignal(
+        tauriInvoke<any>("ai_network_request", {
+          method: "POST",
+          url: `${cleanUrl}/embeddings`,
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: model,
+            input: text,
+          }),
         }),
-      });
+        signal,
+      );
 
       if (response.status < 200 || response.status >= 300) {
         throw new Error(`OpenAI API Error: ${response.status} - ${response.text}`);
@@ -98,7 +110,7 @@ export async function getEmbedding(
       const res = await fetch(`${cleanUrl}/api/embeddings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        signal: withTimeoutSignal(30000, signal),
+        signal,
         body: JSON.stringify({
           model,
           prompt: text,
@@ -116,7 +128,7 @@ export async function getEmbedding(
       const res = await fetch(`${cleanUrl}/embeddings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        signal: withTimeoutSignal(30000, signal),
+        signal,
         body: JSON.stringify({
           model,
           input: text,
@@ -188,6 +200,7 @@ export async function performRAG(
   onProgress?: (msg: string) => void,
   engine: "ollama" | "lmstudio" | "llamacpp" = "ollama",
   signal?: AbortSignal,
+  onWarning?: (msg: string) => void,
 ): Promise<{ path: string; content: string }[]> {
   if (signal?.aborted) {
     throw new DOMException("Generation cancelled", "AbortError");
@@ -200,8 +213,9 @@ Analyze the provided code snippets. When determining relevance:
 3. Prioritize files containing the specific "Retrieval Keywords" provided in the query.
 `;
 
-  onProgress?.("Generating query embedding...");
+  onProgress?.("Generating query embedding (loading local model if needed)...");
   let queryEmbedding: number[] | null = null;
+  let lastEmbeddingError: string | null = null;
   try {
     // We don't cache the query embedding as it's dynamic and small
     queryEmbedding = await getEmbedding(
@@ -216,7 +230,10 @@ Analyze the provided code snippets. When determining relevance:
     if (e?.name === "AbortError" || signal?.aborted) {
       throw new DOMException("Generation cancelled", "AbortError");
     }
-    console.warn(`[RAG Warning] Failed to embed query using model '${model}'. Falling back to pure keyword search (BM25). Error details: ${e.message}`);
+    lastEmbeddingError = e?.message || String(e);
+    const warnMsg = `Vector embedding failed for model '${model}' (${lastEmbeddingError}). Falling back to keyword search (BM25 only).`;
+    console.warn(`[RAG Warning] ${warnMsg}`);
+    onWarning?.(warnMsg);
   }
 
   const allChunks: { path: string; content: string; zone: string; embedding?: number[] }[] =
@@ -242,6 +259,7 @@ Analyze the provided code snippets. When determining relevance:
 
   // 2. Vector Semantic Search
   let processed = 0;
+  let consecutiveFailures = 0;
   if (queryEmbedding) {
     for (const chunk of allChunks) {
       if (signal?.aborted) {
@@ -262,11 +280,20 @@ Analyze the provided code snippets. When determining relevance:
           engine,
           signal,
         );
+        consecutiveFailures = 0;
       } catch (e: any) {
         if (e?.name === "AbortError" || signal?.aborted) {
           throw new DOMException("Generation cancelled", "AbortError");
         }
+        consecutiveFailures++;
+        lastEmbeddingError = e?.message || String(e);
         console.warn(`Failed to embed chunk from ${chunk.path}`, e);
+        if (consecutiveFailures >= 3) {
+          const abortWarn = `Stopped chunk vector indexing after 3 consecutive failures (${lastEmbeddingError}). Remaining chunks will rely on BM25.`;
+          console.warn(`[RAG Warning] ${abortWarn}`);
+          onWarning?.(abortWarn);
+          break;
+        }
       }
     }
   }
@@ -274,6 +301,12 @@ Analyze the provided code snippets. When determining relevance:
   const hasVectorEmbeddings =
     Boolean(queryEmbedding) &&
     allChunks.some((c) => Array.isArray(c.embedding) && c.embedding.length > 0);
+
+  if (queryEmbedding && !hasVectorEmbeddings && lastEmbeddingError) {
+    onWarning?.(
+      `Chunk embeddings failed for '${model}' (${lastEmbeddingError}). Falling back to keyword search (BM25 only).`,
+    );
+  }
 
   onProgress?.(
     hasVectorEmbeddings

@@ -216,6 +216,42 @@ export function RagLocalTab({
           />
           <span>Use Local Model for Final Generation (Bypass Cloud API)</span>
         </label>
+        <label
+          className={`flex items-start gap-2.5 text-xs pt-1 ${
+            settings.useOllamaForFinal || settings.aiProvider !== "gemini"
+              ? "opacity-50 cursor-not-allowed text-slate-500"
+              : "cursor-pointer text-slate-800"
+          }`}
+        >
+          <input
+            type="checkbox"
+            checked={settings.isDeepAnalysis}
+            onChange={(e) => settings.setIsDeepAnalysis(e.target.checked)}
+            disabled={
+              loading ||
+              settings.useOllamaForFinal ||
+              settings.aiProvider !== "gemini"
+            }
+            className="mt-0.5 h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded"
+          />
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium">
+                Use Agentic RAG (Deep Analysis — Gemini requests extra files)
+              </span>
+              <span className="text-[11px] font-semibold font-mono text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
+                Token x 3
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              {settings.aiProvider !== "gemini"
+                ? "Requires Synthesis Provider set to Google Gemini 4 (Provider & Model tab)."
+                : settings.useOllamaForFinal
+                  ? "Disabled while Local Final Generation is enabled."
+                  : "Up to 3 API turns with full accumulated context and extra files (~3x+ token usage)."}
+            </p>
+          </div>
+        </label>
       </section>
 
       {/* RAG Core & Advanced Settings (immediately visible, zero burrowing) */}

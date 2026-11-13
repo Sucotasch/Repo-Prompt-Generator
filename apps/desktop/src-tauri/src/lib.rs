@@ -615,11 +615,14 @@ async fn fetch_github_repo(
         .header("User-Agent", "Tauri/Prompt-Generator");
 
     if !token_arc.is_empty() {
-        builder = builder.header("Authorization", format!("token {}", *token_arc));
+        builder = builder.header("Authorization", format!("Bearer {}", *token_arc));
     }
 
     let mut info_res = client.send_async(builder.body("".to_string()).unwrap()).await.map_err(|e| e.to_string())?;
     if !info_res.status().is_success() {
+        if info_res.status().as_u16() == 401 {
+            return Err("GitHub authentication failed (401 Unauthorized): your GitHub Token appears invalid or expired. Clear the GitHub Token field for public repositories or update it.".to_string());
+        }
         return Err(format!("Failed to fetch repo info: {}", info_res.status()));
     }
 
@@ -646,7 +649,7 @@ async fn fetch_github_repo(
         .header("User-Agent", "Tauri/Prompt-Generator");
 
     if !token_arc.is_empty() {
-        tree_builder = tree_builder.header("Authorization", format!("token {}", *token_arc));
+        tree_builder = tree_builder.header("Authorization", format!("Bearer {}", *token_arc));
     }
 
     let mut tree_res = client.send_async(tree_builder.body("".to_string()).unwrap()).await.map_err(|e| e.to_string())?;
@@ -683,7 +686,7 @@ async fn fetch_github_repo(
             .uri(&readme_url)
             .header("Accept", "application/vnd.github.v3+json")
             .header("User-Agent", "Tauri/Prompt-Generator");
-        if !token_c.is_empty() { b = b.header("Authorization", format!("token {}", *token_c)); }
+        if !token_c.is_empty() { b = b.header("Authorization", format!("Bearer {}", *token_c)); }
 
         if let Ok(mut res) = client_c.send_async(b.body("".to_string()).unwrap()).await {
             if res.status().is_success() {
@@ -720,7 +723,7 @@ async fn fetch_github_repo(
                     .uri(&file_url)
                     .header("Accept", "application/vnd.github.v3+json")
                     .header("User-Agent", "Tauri/Prompt-Generator");
-                if !token_c.is_empty() { b = b.header("Authorization", format!("token {}", *token_c)); }
+                if !token_c.is_empty() { b = b.header("Authorization", format!("Bearer {}", *token_c)); }
 
                 if let Ok(mut res) = client_c.send_async(b.body("".to_string()).unwrap()).await {
                     if res.status().is_success() {
@@ -798,7 +801,7 @@ async fn fetch_github_repo(
                 .uri(&file_url)
                 .header("Accept", "application/vnd.github.v3+json")
                 .header("User-Agent", "Tauri/Prompt-Generator");
-            if !token_c.is_empty() { b = b.header("Authorization", format!("token {}", *token_c)); }
+            if !token_c.is_empty() { b = b.header("Authorization", format!("Bearer {}", *token_c)); }
 
             if let Ok(mut res) = client_c.send_async(b.body("".to_string()).unwrap()).await {
                 if res.status().is_success() {
@@ -852,33 +855,78 @@ async fn is_ollama_running() -> bool {
     s.processes().values().any(|p| p.name() == name_win || p.name() == name_unix)
 }
 
+fn resolve_ollama_candidates() -> Vec<std::path::PathBuf> {
+    let mut candidates = vec![std::path::PathBuf::from("ollama")];
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let mut p = std::path::PathBuf::from(local_app_data);
+            p.push("Programs");
+            p.push("Ollama");
+            p.push("ollama.exe");
+            candidates.push(p);
+        }
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            let mut p = std::path::PathBuf::from(program_files);
+            p.push("Ollama");
+            p.push("ollama.exe");
+            candidates.push(p);
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        candidates.push(std::path::PathBuf::from("/usr/local/bin/ollama"));
+        candidates.push(std::path::PathBuf::from("/opt/homebrew/bin/ollama"));
+        candidates.push(std::path::PathBuf::from(
+            "/Applications/Ollama.app/Contents/Resources/ollama",
+        ));
+    }
+
+    candidates
+}
+
 #[tauri::command]
 async fn start_ollama(state: State<'_, AppState>) -> Result<String, String> {
     if is_ollama_running().await {
         return Ok("Ollama is already running".to_string());
     }
 
-    #[cfg(target_os = "windows")]
-    let child = Command::new("ollama")
-        .arg("serve")
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .spawn();
-
-    #[cfg(not(target_os = "windows"))]
-    let child = Command::new("ollama")
-        .arg("serve")
-        .spawn();
-
-    match child {
-        Ok(mut child_proc) => {
-            state.we_started_ollama.store(true, Ordering::SeqCst);
-            std::thread::spawn(move || {
-                let _ = child_proc.wait();
-            });
-            Ok("Ollama started successfully".to_string())
+    let mut last_err: Option<std::io::Error> = None;
+    for candidate in resolve_ollama_candidates() {
+        if candidate.is_absolute() && !candidate.exists() {
+            continue;
         }
-        Err(e) => Err(format!("Failed to start Ollama: {}", e)),
+        let mut cmd = Command::new(&candidate);
+        cmd.arg("serve");
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+        match cmd.spawn() {
+            Ok(mut child_proc) => {
+                state.we_started_ollama.store(true, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let _ = child_proc.wait();
+                });
+                return Ok("Ollama started successfully".to_string());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => {
+                return Err(format!("Failed to start Ollama: {}", e));
+            }
+        }
     }
+
+    Err(format!(
+        "Failed to find Ollama executable in PATH or default locations: {}",
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "Not found".to_string())
+    ))
 }
 
 #[tauri::command]
@@ -1068,6 +1116,9 @@ async fn ai_network_request(
     body: Option<String>
 ) -> Result<serde_json::Value, String> {
     let url = url.replace("localhost", "127.0.0.1");
+    let is_local = url.starts_with("http://127.0.0.1")
+        || url.starts_with("http://0.0.0.0")
+        || url.starts_with("http://[::1]");
     let mut builder = isahc::Request::builder()
         .method(method.as_str())
         .uri(&url);
@@ -1082,7 +1133,11 @@ async fn ai_network_request(
         builder.body("".to_string()).map_err(|e| e.to_string())?
     };
 
-    let client = state.http_client.read().await.clone();
+    let client = if is_local {
+        state.ollama_client.clone()
+    } else {
+        state.http_client.read().await.clone()
+    };
     let mut res = client.send_async(request).await.map_err(|e| e.to_string())?;
     
     let mut res_headers = serde_json::Map::new();

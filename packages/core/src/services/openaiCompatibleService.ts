@@ -18,24 +18,41 @@ function buildAuthHeaders(apiKey: string, includeContentType: boolean = true): R
 }
 
 function isLocalEndpoint(url: string): boolean {
-  return url.includes("localhost") || url.includes("127.0.0.1");
+  try {
+    const { hostname } = new URL(url);
+    return (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "0.0.0.0" ||
+      hostname === "::1" ||
+      hostname === "[::1]"
+    );
+  } catch {
+    return url.includes("localhost") || url.includes("127.0.0.1");
+  }
 }
 
-function withTimeoutSignal(ms: number, externalSignal?: AbortSignal): AbortSignal {
-  const timeoutSignal = AbortSignal.timeout(ms);
-  if (!externalSignal) return timeoutSignal;
-  if (typeof (AbortSignal as any).any === "function") {
-    return (AbortSignal as any).any([timeoutSignal, externalSignal]);
+function withAbortSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(new DOMException("Generation cancelled", "AbortError"));
   }
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  if (externalSignal.aborted || timeoutSignal.aborted) {
-    controller.abort();
-  } else {
-    externalSignal.addEventListener("abort", onAbort, { once: true });
-    timeoutSignal.addEventListener("abort", onAbort, { once: true });
-  }
-  return controller.signal;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(new DOMException("Generation cancelled", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (val) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(val);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
 }
 
 async function parseErrorResponse(response: Response): Promise<string> {
@@ -194,16 +211,19 @@ export async function generate_final_prompt_with_openai_compatible(
   const cleanBaseUrl = normalizeBaseUrl(baseURL);
 
   if (isTauri()) {
-    const response = await tauriInvoke<any>("ai_network_request", {
-      method: "POST",
-      url: `${cleanBaseUrl}/chat/completions`,
-      headers: buildAuthHeaders(apiKey),
-      body: JSON.stringify({
-        model: modelName,
-        messages: [{ role: "user", content: promptText }],
-        temperature: temperature,
+    const response = await withAbortSignal(
+      tauriInvoke<any>("ai_network_request", {
+        method: "POST",
+        url: `${cleanBaseUrl}/chat/completions`,
+        headers: buildAuthHeaders(apiKey),
+        body: JSON.stringify({
+          model: modelName,
+          messages: [{ role: "user", content: promptText }],
+          temperature: temperature,
+        }),
       }),
-    });
+      signal,
+    );
 
     if (response.status < 200 || response.status >= 300) {
       let errorMessage = `HTTP ${response.status}`;
@@ -230,7 +250,7 @@ export async function generate_final_prompt_with_openai_compatible(
     const response = await fetch(`${cleanBaseUrl}/chat/completions`, {
       method: "POST",
       headers: buildAuthHeaders(apiKey),
-      signal: withTimeoutSignal(120000, signal),
+      signal,
       body: JSON.stringify({
         model: modelName,
         messages: [{ role: "user", content: promptText }],
@@ -250,7 +270,7 @@ export async function generate_final_prompt_with_openai_compatible(
     headers: {
       "Content-Type": "application/json",
     },
-    signal: withTimeoutSignal(120000, signal),
+    signal,
     body: JSON.stringify({
       baseUrl: cleanBaseUrl,
       apiKey: apiKey?.trim() || "",
@@ -300,19 +320,22 @@ Return your response in the following JSON format:
   const cleanBaseUrl = normalizeBaseUrl(baseURL);
 
   if (isTauri()) {
-    const response = await tauriInvoke<any>("ai_network_request", {
-      method: "POST",
-      url: `${cleanBaseUrl}/chat/completions`,
-      headers: buildAuthHeaders(apiKey),
-      body: JSON.stringify({
-        model: modelName,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: `<user_text>\n${query}\n</user_text>` },
-        ],
-        temperature: 0.3,
+    const response = await withAbortSignal(
+      tauriInvoke<any>("ai_network_request", {
+        method: "POST",
+        url: `${cleanBaseUrl}/chat/completions`,
+        headers: buildAuthHeaders(apiKey),
+        body: JSON.stringify({
+          model: modelName,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: `<user_text>\n${query}\n</user_text>` },
+          ],
+          temperature: 0.3,
+        }),
       }),
-    });
+      signal,
+    );
 
     if (response.status < 200 || response.status >= 300) {
       let errorMessage = `HTTP ${response.status}`;
@@ -349,7 +372,7 @@ Return your response in the following JSON format:
     const response = await fetch(`${cleanBaseUrl}/chat/completions`, {
       method: "POST",
       headers: buildAuthHeaders(apiKey),
-      signal: withTimeoutSignal(30000, signal),
+      signal,
       body: JSON.stringify({
         model: modelName,
         messages: [
@@ -383,7 +406,7 @@ Return your response in the following JSON format:
     headers: {
       "Content-Type": "application/json",
     },
-    signal: withTimeoutSignal(30000, signal),
+    signal,
     body: JSON.stringify({
       baseUrl: cleanBaseUrl,
       apiKey: apiKey?.trim() || "",

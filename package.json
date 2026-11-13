@@ -8,9 +8,9 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm run dev -w web",
+    "dev": "node --experimental-strip-types apps/web/server.ts",
     "build": "npm run build --workspaces",
-    "start": "cd apps/web && npm run start",
+    "start": "node --experimental-strip-types apps/web/server.ts",
     "lint": "npm run lint --workspaces"
   },
   "dependencies": {

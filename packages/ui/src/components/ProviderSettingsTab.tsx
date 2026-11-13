@@ -172,12 +172,18 @@ export function ProviderSettingsTab({
                   className="mt-0.5 h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded"
                 />
                 <div className="text-xs leading-relaxed">
-                  <span className="font-medium text-slate-800">
-                    Agentic RAG (Deep Analysis)
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium text-slate-800">
+                      Agentic RAG (Deep Analysis)
+                    </span>
+                    <span className="text-[11px] font-semibold font-mono text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
+                      Token x 3
+                    </span>
+                  </div>
                   <p className="text-slate-500 mt-0.5">
-                    Allows Gemini to request up to 5 extra repository files per
-                    turn across multi-turn synthesis (increases token usage).
+                    Allows Gemini to request up to 5 extra files per round (up
+                    to 3 API turns with full accumulated context, multiplying
+                    token consumption by ~3x or more).
                     {settings.useOllamaForFinal &&
                       " Disabled while Local Final Generation is enabled."}
                   </p>
@@ -202,6 +208,10 @@ export function ProviderSettingsTab({
                   </label>
                   <input
                     type="password"
+                    name="gemini-api-key"
+                    autoComplete="new-password"
+                    data-1p-ignore="true"
+                    data-lpignore="true"
                     value={settings.geminiApiKey}
                     onChange={(e) => settings.setGeminiApiKey(e.target.value)}
                     placeholder="AIzaSy..."
@@ -240,6 +250,10 @@ export function ProviderSettingsTab({
                   </label>
                   <input
                     type="password"
+                    name="gemini-byok-override"
+                    autoComplete="new-password"
+                    data-1p-ignore="true"
+                    data-lpignore="true"
                     value={settings.geminiApiKey}
                     onChange={(e) => settings.setGeminiApiKey(e.target.value)}
                     placeholder="Leave empty to use server key..."
@@ -311,6 +325,10 @@ export function ProviderSettingsTab({
             </label>
             <input
               type="password"
+              name="custom-provider-api-key"
+              autoComplete="new-password"
+              data-1p-ignore="true"
+              data-lpignore="true"
               value={settings.customApiKey}
               onChange={(e) => {
                 settings.setCustomApiKey(e.target.value);

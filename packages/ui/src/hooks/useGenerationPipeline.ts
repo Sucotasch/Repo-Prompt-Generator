@@ -50,6 +50,7 @@ export function useGenerationPipeline(
     useState<string>("gemini.md");
   const [copied, setCopied] = useState(false);
   const [isTruncated, setIsTruncated] = useState(false);
+  const [ragWarning, setRagWarning] = useState<string | null>(null);
 
   const [cachedRepoData, setCachedRepoData] = useState<RepoData | null>(null);
   const [cacheKey, setCacheKey] = useState<string>("");
@@ -148,6 +149,7 @@ export function useGenerationPipeline(
     setLastOptimizedQuery(null);
     setCopied(false);
     setIsTruncated(false);
+    setRagWarning(null);
 
     try {
       let repoData: RepoData;
@@ -479,6 +481,9 @@ export function useGenerationPipeline(
             },
             settings.localEngine,
             signal,
+            (warnMsg) => {
+              if (runIdRef.current === myRunId) setRagWarning(warnMsg);
+            },
           );
           ensureActive();
           repoData = { ...repoData, sourceFiles: ragFiles };
@@ -504,6 +509,9 @@ export function useGenerationPipeline(
               },
               settings.localEngine,
               signal,
+              (warnMsg) => {
+                if (runIdRef.current === myRunId) setRagWarning(warnMsg);
+              },
             );
             ensureActive();
             referenceRepoData = {
@@ -745,16 +753,18 @@ export function useGenerationPipeline(
       }
 
       if (settings.useRag) {
+        const formatSingleLine = (val: string) =>
+          val.replace(/\s+/g, " ").trim();
         if (finalUsedRagQuery) {
-          metadata += `> - **Original RAG Query:** "${finalUsedRagQuery}"\n`;
+          metadata += `> - **Original RAG Query:** "${formatSingleLine(finalUsedRagQuery)}"\n`;
           if (
             finalUsedOptimizedQuery &&
             finalUsedOptimizedQuery !== finalUsedRagQuery
           ) {
-            metadata += `> - **Optimized RAG Query:** "${finalUsedOptimizedQuery}"\n`;
+            metadata += `> - **Optimized RAG Query:** "${formatSingleLine(finalUsedOptimizedQuery)}"\n`;
           }
         } else {
-          metadata += `> - **Auto-generated RAG Query:** "${finalUsedOptimizedQuery || "Unknown"}"\n`;
+          metadata += `> - **Auto-generated RAG Query:** "${formatSingleLine(finalUsedOptimizedQuery || "Unknown")}"\n`;
         }
       }
       if (usedOllama) {
@@ -848,6 +858,8 @@ export function useGenerationPipeline(
     generatedFileName,
     copied,
     isTruncated,
+    ragWarning,
+    setRagWarning,
     tokenWarning,
     tokenWarningResolver,
     isRegenerateCached,

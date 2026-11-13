@@ -16,6 +16,8 @@ interface OutputPaneProps {
   error: string | null;
   onDismissError: () => void;
   isTruncated: boolean;
+  ragWarning: string | null;
+  onDismissRagWarning: () => void;
   maxFiles: number;
   prompt: string | null;
   generatedFileName: string;
@@ -38,6 +40,8 @@ export function OutputPane({
   error,
   onDismissError,
   isTruncated,
+  ragWarning,
+  onDismissRagWarning,
   maxFiles,
   prompt,
   generatedFileName,
@@ -87,6 +91,23 @@ export function OutputPane({
             <span className="tabular-nums font-medium">{maxFiles}</span>{" "}
             selected source files remain included in full.
           </div>
+        </div>
+      )}
+
+      {ragWarning && (
+        <div className="mx-5 mt-4 p-3 bg-amber-50 border border-amber-200 rounded-md flex items-start justify-between gap-3 shrink-0">
+          <div className="flex items-start gap-2 text-xs text-amber-800">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            <span className="break-words">{ragWarning}</span>
+          </div>
+          <button
+            type="button"
+            onClick={onDismissRagWarning}
+            aria-label="Dismiss RAG warning"
+            className="text-amber-600 hover:text-amber-900 shrink-0 cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
 

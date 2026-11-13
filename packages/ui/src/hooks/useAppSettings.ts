@@ -514,18 +514,44 @@ export function useAppSettings() {
 
   const handleDownloadBat = () => {
     const origin = window.location.origin;
-    const batContent = `@echo off
-color 0A
-echo ==========================================
-echo Starting Ollama with CORS enabled...
-echo You can now use Repo Prompt Generator!
-echo ==========================================
-set OLLAMA_ORIGINS="${origin}"
-echo Closing existing Ollama instances...
-taskkill /f /im ollama.exe >nul 2>&1
-echo Starting Ollama with CORS enabled for ${origin}...
-start "" ollama serve
-pause`;
+    const batLines = [
+      "@echo off",
+      "setlocal EnableExtensions",
+      "color 0A",
+      "echo ==========================================",
+      "echo Starting Ollama with CORS enabled...",
+      `echo Origin: ${origin}`,
+      "echo ==========================================",
+      "",
+      'set "OLLAMA_EXE="',
+      "for /f \"delims=\" %%I in ('where ollama.exe 2^>nul') do (",
+      '  if not defined OLLAMA_EXE set "OLLAMA_EXE=%%~fI"',
+      ")",
+      'if not defined OLLAMA_EXE if exist "%LOCALAPPDATA%\\Programs\\Ollama\\ollama.exe" set "OLLAMA_EXE=%LOCALAPPDATA%\\Programs\\Ollama\\ollama.exe"',
+      'if not defined OLLAMA_EXE if exist "%USERPROFILE%\\AppData\\Local\\Programs\\Ollama\\ollama.exe" set "OLLAMA_EXE=%USERPROFILE%\\AppData\\Local\\Programs\\Ollama\\ollama.exe"',
+      'if not defined OLLAMA_EXE if exist "%ProgramFiles%\\Ollama\\ollama.exe" set "OLLAMA_EXE=%ProgramFiles%\\Ollama\\ollama.exe"',
+      'if not defined OLLAMA_EXE if exist "%ProgramFiles(x86)%\\Ollama\\ollama.exe" set "OLLAMA_EXE=%ProgramFiles(x86)%\\Ollama\\ollama.exe"',
+      "",
+      "if not defined OLLAMA_EXE (",
+      "  echo [ERROR] ollama.exe was not found in PATH or standard folders:",
+      "  echo   - %LOCALAPPDATA%\\Programs\\Ollama\\ollama.exe",
+      "  echo   - %ProgramFiles%\\Ollama\\ollama.exe",
+      "  echo Install Ollama from https://ollama.com/download or add its folder to PATH.",
+      "  pause",
+      "  exit /b 1",
+      ")",
+      "",
+      'echo Found Ollama: "%OLLAMA_EXE%"',
+      `set "OLLAMA_ORIGINS=${origin}"`,
+      "echo Closing existing Ollama instances...",
+      'taskkill /f /im "ollama app.exe" >nul 2>&1',
+      "taskkill /f /im ollama.exe >nul 2>&1",
+      "timeout /t 1 /nobreak >nul",
+      "echo Starting Ollama with CORS enabled for %OLLAMA_ORIGINS%...",
+      'start "Ollama Server" "%OLLAMA_EXE%" serve',
+      "pause",
+    ];
+    const batContent = batLines.join("\r\n") + "\r\n";
     const blob = new Blob([batContent], { type: "application/bat" });
     const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement("a");

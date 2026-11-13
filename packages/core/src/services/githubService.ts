@@ -154,8 +154,9 @@ async function fetchFilesFromRepo(
         "User-Agent": "AI-Studio-Applet/1.0",
         "Accept": "application/vnd.github.v3+json",
       };
-      if (token) {
-        headers["Authorization"] = `token ${token}`;
+      const cleanToken = token?.trim();
+      if (cleanToken) {
+        headers["Authorization"] = `Bearer ${cleanToken}`;
       }
 
       for (const file of filePaths.slice(0, 5)) {
@@ -328,3 +329,89 @@ async function fetchLocalFiles(
 
   return results;
 }
+
+export interface GithubTokenVerificationResult {
+  valid: boolean;
+  limit?: number;
+  remaining?: number;
+  scopes?: string;
+  error?: string;
+}
+
+export async function verifyGithubToken(
+  token: string,
+  signal?: AbortSignal,
+): Promise<GithubTokenVerificationResult> {
+  const cleanToken = token.trim();
+  if (!cleanToken) {
+    return { valid: false, error: "GitHub token is empty." };
+  }
+
+  try {
+    if (isTauri()) {
+      const response = await tauriInvoke<{
+        status: number;
+        text: string;
+        headers?: Record<string, string>;
+      }>("ai_network_request", {
+        method: "GET",
+        url: "https://api.github.com/rate_limit",
+        headers: {
+          "Accept": "application/vnd.github.v3+json",
+          "User-Agent": "Tauri/Prompt-Generator",
+          "Authorization": `Bearer ${cleanToken}`,
+        },
+        body: null,
+      });
+
+      if (response.status === 401) {
+        return {
+          valid: false,
+          error: "Invalid or expired token (401 Unauthorized).",
+        };
+      }
+      if (response.status < 200 || response.status >= 300) {
+        return {
+          valid: false,
+          error: `GitHub API returned status ${response.status}.`,
+        };
+      }
+      const data = JSON.parse(response.text || "{}");
+      const core = data?.resources?.core || data?.rate || {};
+      const scopes = response.headers?.["x-oauth-scopes"] || "";
+      return {
+        valid: true,
+        limit: typeof core.limit === "number" ? core.limit : undefined,
+        remaining:
+          typeof core.remaining === "number" ? core.remaining : undefined,
+        scopes,
+      };
+    }
+
+    const res = await fetch("/api/repo/verify-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: withTimeoutSignal(12000, signal),
+      body: JSON.stringify({ token: cleanToken }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.valid) {
+      return {
+        valid: false,
+        error: payload?.error || `Verification failed (${res.status}).`,
+      };
+    }
+    return {
+      valid: true,
+      limit: payload.limit,
+      remaining: payload.remaining,
+      scopes: payload.scopes,
+    };
+  } catch (err: any) {
+    return {
+      valid: false,
+      error: err?.message || "Failed to verify GitHub token.",
+    };
+  }
+}
+
