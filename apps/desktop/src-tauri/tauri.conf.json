@@ -1,13 +1,13 @@
 {
-  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "$schema": "../../../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "repo-prompt-generator",
   "version": "0.1.0",
   "identifier": "com.sucotasch.repo-prompt-generator",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:3000",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": "npm run prepare-icons && npm run dev",
+    "beforeBuildCommand": "npm run prepare-icons && npm run build"
   },
   "app": {
     "windows": [

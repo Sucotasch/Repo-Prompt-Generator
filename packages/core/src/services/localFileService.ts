@@ -1,47 +1,8 @@
 import { tauriInvoke } from "../utils/tauriAdapter.ts";
-import { RepoData } from "./githubService";
+import { shouldIgnoreRepoPath, truncateAtLineBoundary } from "../utils/pathFilters.ts";
+import type { RepoData } from "./githubService";
 
-const HARD_IGNORE_DIRS = new Set([
-  "venv",
-  ".venv",
-  "node_modules",
-  ".git",
-  "__pycache__",
-  "dist",
-  "build",
-  "target",
-]);
-const SECRET_EXACT_NAMES = new Set([
-  "secrets.json",
-  "credentials.json",
-  "id_rsa",
-  "id_ed25519",
-]);
-const SECRET_EXTENSIONS = [".pem", ".key", ".cert", ".p12"];
-
-function shouldIgnoreLocalPath(filePath: string): boolean {
-  const lower = filePath.replace(/\\/g, "/").toLowerCase();
-  const segments = lower.split("/").filter(Boolean);
-  if (segments.length > 1) {
-    for (let i = 0; i < segments.length - 1; i++) {
-      if (HARD_IGNORE_DIRS.has(segments[i])) return true;
-    }
-  }
-  const fileName = segments[segments.length - 1] || "";
-  if (
-    fileName === ".env" ||
-    (fileName.startsWith(".env.") &&
-      !fileName.endsWith(".example") &&
-      !fileName.endsWith(".template") &&
-      !fileName.endsWith(".sample"))
-  ) {
-    return true;
-  }
-  if (SECRET_EXTENSIONS.some((ext) => fileName.endsWith(ext))) {
-    return true;
-  }
-  return SECRET_EXACT_NAMES.has(fileName);
-}
+export const shouldIgnoreLocalPath = shouldIgnoreRepoPath;
 
 const TEST_REGEX = /(\/tests?\/|__tests__|.*\.(test|spec)\.|^test_|.*_test\.go)/i;
 const AUX_REGEX = /(build|setup|config|webpack|vite|rollup|gulpfile|backup|manage\.py|scripts\/|tools\/|docs\/|example|demo|migrations\/)/i;
@@ -176,19 +137,27 @@ export async function processLocalFolder(
 
   const finalSourceFiles = await Promise.all(
     filesToFetch.map(async (f) => {
-      let content = await f.text();
-      if (content.length > 100000) {
-        content =
-          content.substring(0, 100000) +
-          "\n\n... [TRUNCATED: File exceeds 100KB limit. Showing only the top part.]";
+      const rawNormalized = (await f.text()).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      const totalLines = rawNormalized.split("\n").length;
+      const cut = truncateAtLineBoundary(rawNormalized, 100000);
+      let content = cut.text;
+      const truncated = cut.truncated;
+      const endLine = content.split("\n").length;
+      if (truncated) {
+        content += `\n\n... [TRUNCATED: File exceeds 100KB limit. Showing lines 1-${endLine} of ${totalLines}.]`;
       }
       return {
         path: f.webkitRelativePath || f.name,
         content,
+        startLine: 1,
+        endLine,
+        totalLines,
+        truncated,
       };
     }),
   );
 
+  const totalTreeFiles = treePaths.length;
   let finalTreePaths = treePaths;
   let isTruncated = false;
   if (finalTreePaths.length > 1000) {
@@ -208,8 +177,10 @@ export async function processLocalFolder(
       defaultBranch: "local",
       branch: "local",
       description: "Local folder upload",
+      fetchedAt: new Date().toISOString(),
     },
     tree: finalTreePaths,
+    totalTreeFiles,
     readme,
     dependencies,
     sourceFiles: finalSourceFiles,

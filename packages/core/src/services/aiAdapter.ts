@@ -89,6 +89,7 @@ export async function generatePrompt(
   modelVersion: string;
   requestedFiles?: string[];
   fetchedFilesCount?: number;
+  grepQueries?: string[];
 }> {
   const fileTruncationLimit = options?.fileTruncationLimit ?? 0;
 

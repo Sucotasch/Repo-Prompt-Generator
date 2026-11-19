@@ -10,6 +10,7 @@ export interface GeminiModelSpec {
   label: string;
   description: string;
   requiresPaidKey: boolean;
+  contextWindowTokens: number;
   defaultThinkingLevel: GeminiThinkingLevel;
   supportedThinkingLevels: readonly GeminiThinkingLevel[];
 }
@@ -22,6 +23,7 @@ export const GEMINI_MODELS: Record<GeminiModelId, GeminiModelSpec> = {
     label: "Gemini 4 Hydrogen",
     description: "Fast default model & XHIGH agentic workflows",
     requiresPaidKey: false,
+    contextWindowTokens: 1_048_576,
     defaultThinkingLevel: "HIGH",
     supportedThinkingLevels: ["LOW", "MEDIUM", "HIGH", "XHIGH"],
   },
@@ -30,6 +32,7 @@ export const GEMINI_MODELS: Record<GeminiModelId, GeminiModelSpec> = {
     label: "Gemini 4 Argon",
     description: "Complex coding, STEM, and multi-module synthesis",
     requiresPaidKey: true,
+    contextWindowTokens: 1_048_576,
     defaultThinkingLevel: "MEDIUM",
     supportedThinkingLevels: ["LOW", "MEDIUM", "HIGH"],
   },
@@ -38,6 +41,7 @@ export const GEMINI_MODELS: Record<GeminiModelId, GeminiModelSpec> = {
     label: "Gemini 4 Carbon",
     description: "Deep architectural, root-cause, and security reasoning",
     requiresPaidKey: true,
+    contextWindowTokens: 1_048_576,
     defaultThinkingLevel: "MEDIUM",
     supportedThinkingLevels: ["LOW", "MEDIUM", "HIGH"],
   },

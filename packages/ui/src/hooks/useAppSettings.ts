@@ -171,7 +171,7 @@ export function useAppSettings() {
   const [fileTruncationLimit, setFileTruncationLimit] = useState<number>(
     initialSettings.fileTruncationLimit !== undefined
       ? initialSettings.fileTruncationLimit
-      : 2000,
+      : 0,
   );
   const [ollamaTemperature, setOllamaTemperature] = useState<number>(
     initialSettings.ollamaTemperature !== undefined

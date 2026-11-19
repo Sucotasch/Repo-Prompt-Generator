@@ -39,7 +39,9 @@ CRITICAL RULES & GUARDRAILS:
 4. **Minimal Intervention**: If integration is recommended, do it with the least possible disruption to the existing [TARGET_REPO] architecture.`,
   deliverables: [],
   successMetrics: [],
-  evidenceRequirements: [],
+  evidenceRequirements: [
+    "Verify every cited API, type, and file path from [TARGET_REPO] and [REFERENCE_REPO] with [Verified] path:line citations; mark unverified assumptions [Inferred] or [Not inspected].",
+  ],
   defaultSearchQuery:
     "system architecture, main components, interfaces, exported functions, core business logic, data models",
 };

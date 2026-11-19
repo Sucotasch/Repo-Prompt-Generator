@@ -18,6 +18,14 @@ use std::os::windows::process::CommandExt;
 pub struct FileEntry {
     path: String,
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_lines: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<bool>,
 }
 
 pub struct AppState {
@@ -209,7 +217,7 @@ async fn call_gemini_advanced(
     let client = state.http_client.read().await.clone();
     let mut response = client.send_async(request).await.map_err(|e| e.to_string())?;
 
-    let response_body = response.text_async().await.map_err(|e| e.to_string())?;
+    let response_body = response.text().await.map_err(|e| e.to_string())?;
 
     if !response.status().is_success() {
         return Err(format!("Gemini API error ({}): {}", response.status(), response_body));
@@ -369,6 +377,7 @@ async fn scan_local_repository(
     candidates.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
 
     let mut tree_paths: Vec<String> = candidates.iter().map(|c| c.rel_path.clone()).collect();
+    let total_tree_files = tree_paths.len();
     let mut is_truncated = false;
     if tree_paths.len() > 1000 {
         tree_paths.truncate(1000);
@@ -437,10 +446,18 @@ async fn scan_local_repository(
     let mut set = JoinSet::new();
     for (rel_path, full_path) in selected {
         set.spawn_blocking(move || match fs::read_to_string(&full_path) {
-            Ok(content) => Some(FileEntry {
-                path: rel_path,
-                content: truncate_utf8_content(content, 100_000),
-            }),
+            Ok(content) => {
+                let (text, start_line, end_line, total_lines, truncated) =
+                    truncate_utf8_with_meta(content, 100_000);
+                Some(FileEntry {
+                    path: rel_path,
+                    content: text,
+                    start_line: Some(start_line),
+                    end_line: Some(end_line),
+                    total_lines: Some(total_lines),
+                    truncated: Some(truncated),
+                })
+            }
             Err(_) => None,
         });
     }
@@ -452,6 +469,8 @@ async fn scan_local_repository(
         }
     }
 
+    let fetched_at = current_timestamp_iso_like();
+
     Ok(GithubRepoData {
         info: RepoInfo {
             owner: "local".to_string(),
@@ -462,8 +481,12 @@ async fn scan_local_repository(
             stargazers_count: None,
             topics: None,
             language: None,
+            tree_sha: None,
+            commit_sha: None,
+            fetched_at: Some(fetched_at),
         },
         tree: tree_paths,
+        total_tree_files: Some(total_tree_files),
         readme,
         dependencies,
         source_files,
@@ -475,12 +498,14 @@ async fn scan_local_repository(
 async fn read_local_repo_files(
     root_path: String,
     file_paths: Vec<String>,
+    max_files: Option<usize>,
 ) -> Result<Vec<FileEntry>, String> {
     let root_canonical = fs::canonicalize(&root_path)
         .map_err(|e| format!("Invalid local repository root: {}", e))?;
+    let limit = max_files.unwrap_or(10).clamp(1, 20);
     let mut results = Vec::new();
 
-    for rel in file_paths.into_iter().take(5) {
+    for rel in file_paths.into_iter().take(limit) {
         let normalized = rel.replace('\\', "/").trim_start_matches('/').to_string();
         let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
         if segments.is_empty()
@@ -508,14 +533,265 @@ async fn read_local_repo_files(
             }
         }
         if let Ok(content) = fs::read_to_string(&resolved) {
+            let (text, start_line, end_line, total_lines, truncated) =
+                truncate_utf8_with_meta(content, 50_000);
             results.push(FileEntry {
                 path: rel,
-                content: truncate_utf8_content(content, 50_000),
+                content: text,
+                start_line: Some(start_line),
+                end_line: Some(end_line),
+                total_lines: Some(total_lines),
+                truncated: Some(truncated),
             });
         }
     }
 
     Ok(results)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn read_local_repo_range(
+    root_path: String,
+    file_path: String,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> Result<FileEntry, String> {
+    let root_canonical = fs::canonicalize(&root_path)
+        .map_err(|e| format!("Invalid local repository root: {}", e))?;
+
+    let normalized = file_path.replace('\\', "/").trim_start_matches('/').to_string();
+    let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.is_empty()
+        || segments.iter().any(|s| *s == "." || *s == "..")
+        || should_ignore_github_path(&normalized)
+    {
+        return Err(format!("Blocked invalid or sensitive file path: '{}'", file_path));
+    }
+
+    let mut candidate = root_canonical.clone();
+    for seg in &segments {
+        candidate.push(seg);
+    }
+
+    let resolved = fs::canonicalize(&candidate)
+        .map_err(|_| format!("File '{}' not found in local repository.", file_path))?;
+    if !resolved.starts_with(&root_canonical) || !resolved.is_file() {
+        return Err(format!("Access denied or not a file: '{}'", file_path));
+    }
+
+    if let Ok(meta) = fs::metadata(&resolved) {
+        if meta.len() > 5_000_000 {
+            return Err(format!(
+                "File '{}' exceeds 5MB range-read limit ({} bytes).",
+                file_path,
+                meta.len()
+            ));
+        }
+    }
+
+    let raw = fs::read_to_string(&resolved)
+        .map_err(|e| format!("Failed to read UTF-8 text from '{}': {}", file_path, e))?;
+    if raw.chars().take(8192).any(|c| c == '\0') {
+        return Err(format!("File '{}' appears to be binary.", file_path));
+    }
+
+    let normalized_text = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let all_lines: Vec<&str> = normalized_text.split('\n').collect();
+    let total_lines = all_lines.len();
+
+    let safe_start = start_line.unwrap_or(1).max(1);
+    if safe_start > total_lines {
+        return Err(format!(
+            "Requested startLine ({}) exceeds file length ({} lines).",
+            safe_start, total_lines
+        ));
+    }
+
+    let requested_end = end_line.unwrap_or_else(|| safe_start.saturating_add(249));
+    let max_end = safe_start.saturating_add(399);
+    let clamped_end = requested_end.max(safe_start).min(max_end).min(total_lines);
+
+    let max_chars: usize = 50_000;
+    let mut kept: Vec<String> = Vec::new();
+    let mut char_count: usize = 0;
+    let mut hit_char_cap = false;
+
+    for line in &all_lines[(safe_start - 1)..clamped_end] {
+        let line_chars = line.chars().count();
+        let add_len = line_chars + if kept.is_empty() { 0 } else { 1 };
+        if !kept.is_empty() && char_count + add_len > max_chars {
+            hit_char_cap = true;
+            break;
+        }
+        if kept.is_empty() && line_chars > max_chars {
+            let cut: String = line.chars().take(max_chars).collect();
+            kept.push(format!("{} ... [LINE TRUNCATED]", cut));
+            hit_char_cap = true;
+            break;
+        }
+        kept.push((*line).to_string());
+        char_count += add_len;
+    }
+
+    let actual_end = safe_start + kept.len().saturating_sub(1);
+    let truncated = safe_start > 1 || actual_end < total_lines || hit_char_cap;
+
+    Ok(FileEntry {
+        path: file_path,
+        content: kept.join("\n"),
+        start_line: Some(safe_start),
+        end_line: Some(actual_end),
+        total_lines: Some(total_lines),
+        truncated: Some(truncated),
+    })
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrepMatchEntry {
+    path: String,
+    line: usize,
+    preview: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrepLocalResult {
+    matches: Vec<GrepMatchEntry>,
+    files_scanned: usize,
+    truncated: bool,
+    scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    literal_fallback: Option<bool>,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn grep_local_repository(
+    root_path: String,
+    pattern: String,
+    path_prefix: Option<String>,
+    case_sensitive: Option<bool>,
+    max_matches: Option<usize>,
+) -> Result<GrepLocalResult, String> {
+    let clean_pattern = pattern.trim().to_string();
+    if clean_pattern.is_empty() {
+        return Err("Search pattern cannot be empty.".to_string());
+    }
+    let root = fs::canonicalize(&root_path)
+        .map_err(|e| format!("Invalid local repository root: {}", e))?;
+    if !root.is_dir() {
+        return Err("Selected path is not a valid directory.".to_string());
+    }
+
+    let case_sens = case_sensitive.unwrap_or(false);
+    let max_m = max_matches.unwrap_or(40).clamp(1, 100);
+    let prefix_norm = path_prefix
+        .map(|p| p.replace('\\', "/").trim_start_matches('/').to_lowercase())
+        .filter(|p| !p.is_empty());
+
+    // Pure stdlib matching (supports literal substring and simple `a|b` alternation without extra crates)
+    let raw_terms: Vec<String> = clean_pattern
+        .chars()
+        .take(200)
+        .collect::<String>()
+        .split('|')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let terms: Vec<String> = if raw_terms.is_empty() {
+        vec![if case_sens { clean_pattern } else { clean_pattern.to_lowercase() }]
+    } else if case_sens {
+        raw_terms
+    } else {
+        raw_terms.into_iter().map(|s| s.to_lowercase()).collect()
+    };
+
+    let walker = walkdir::WalkDir::new(&root).into_iter().filter_entry(|e| {
+        if e.depth() == 0 {
+            return true;
+        }
+        let name = e.file_name().to_string_lossy().to_lowercase();
+        let is_hidden_dir = name == ".git" || name == ".venv" || name == ".idea" || name == ".vscode";
+        let is_heavy_dir = name == "node_modules"
+            || name == "target"
+            || name == "venv"
+            || name == "dist"
+            || name == "build"
+            || name == "__pycache__";
+        !is_hidden_dir && !is_heavy_dir
+    });
+
+    let mut matches: Vec<GrepMatchEntry> = Vec::new();
+    let mut files_scanned: usize = 0;
+    let mut truncated = false;
+
+    for entry in walker.filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = match entry.path().strip_prefix(&root) {
+            Ok(p) => p.to_string_lossy().replace('\\', "/"),
+            Err(_) => continue,
+        };
+        if rel.is_empty() || should_ignore_github_path(&rel) {
+            continue;
+        }
+        if let Some(ref pref) = prefix_norm {
+            if !rel.to_lowercase().starts_with(pref) {
+                continue;
+            }
+        }
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if size > 2_000_000 {
+            continue;
+        }
+        let raw = match fs::read_to_string(entry.path()) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if raw.chars().take(8192).any(|c| c == '\0') {
+            continue;
+        }
+        files_scanned += 1;
+
+        let normalized_text = raw.replace("\r\n", "\n").replace('\r', "\n");
+        for (idx, line_text) in normalized_text.split('\n').enumerate() {
+            let matched = if case_sens {
+                terms.iter().any(|t| line_text.contains(t.as_str()))
+            } else {
+                let lower_line = line_text.to_lowercase();
+                terms.iter().any(|t| lower_line.contains(t.as_str()))
+            };
+            if matched {
+                let preview = if line_text.chars().count() > 240 {
+                    let cut: String = line_text.chars().take(240).collect();
+                    format!("{}...", cut)
+                } else {
+                    line_text.to_string()
+                };
+                matches.push(GrepMatchEntry {
+                    path: rel.clone(),
+                    line: idx + 1,
+                    preview,
+                });
+                if matches.len() >= max_m {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
+        if truncated {
+            break;
+        }
+    }
+
+    Ok(GrepLocalResult {
+        matches,
+        files_scanned,
+        truncated,
+        scope: "local_fs".to_string(),
+        literal_fallback: Some(true),
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -529,6 +805,12 @@ pub struct RepoInfo {
     stargazers_count: Option<u32>,
     topics: Option<Vec<String>>,
     language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tree_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fetched_at: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -536,6 +818,8 @@ pub struct RepoInfo {
 pub struct GithubRepoData {
     info: RepoInfo,
     tree: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_tree_files: Option<usize>,
     readme: String,
     dependencies: String,
     source_files: Vec<FileEntry>,
@@ -578,12 +862,41 @@ fn should_ignore_github_path(path: &str) -> bool {
     ["secrets.json", "credentials.json", "id_rsa", "id_ed25519"].contains(&file_name)
 }
 
-fn truncate_utf8_content(mut content: String, max_chars: usize) -> String {
-    if let Some((idx, _)) = content.char_indices().nth(max_chars) {
-        content.truncate(idx);
-        content.push_str("\n\n... [TRUNCATED: File exceeds 100KB limit]");
+fn current_timestamp_iso_like() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("unix:{}", secs)
+}
+
+fn truncate_utf8_with_meta(content: String, max_chars: usize) -> (String, usize, usize, usize, bool) {
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let total_lines = normalized.split('\n').count();
+    if let Some((idx, _)) = normalized.char_indices().nth(max_chars) {
+        let prefix = &normalized[..idx];
+        let (cut, single_line_cut) = match prefix.rfind('\n') {
+            Some(nl_idx) if nl_idx > 0 => (&prefix[..nl_idx], false),
+            _ => (prefix, true),
+        };
+        let end_line = cut.split('\n').count();
+        let body = if single_line_cut {
+            format!("{} ... [LINE TRUNCATED]", cut)
+        } else {
+            cut.to_string()
+        };
+        let out = format!(
+            "{}\n\n... [TRUNCATED: File exceeds limit. Showing lines 1-{} of {}.]",
+            body, end_line, total_lines
+        );
+        (out, 1, end_line, total_lines, true)
+    } else {
+        (content, 1, total_lines, total_lines, false)
     }
-    content
+}
+
+fn truncate_utf8_content(content: String, max_chars: usize) -> String {
+    truncate_utf8_with_meta(content, max_chars).0
 }
 
 #[tauri::command]
@@ -662,6 +975,7 @@ async fn fetch_github_repo(
     }
     let tree_text = tree_res.text().await.map_err(|e| e.to_string())?;
     let tree_json: serde_json::Value = serde_json::from_str(&tree_text).map_err(|e| e.to_string())?;
+    let tree_sha = tree_json["sha"].as_str().map(|s| s.to_string());
     let mut tree_paths: Vec<String> = tree_json["tree"]
         .as_array()
         .map(|a| {
@@ -810,8 +1124,16 @@ async fn fetch_github_repo(
                             if let Some(content) = json["content"].as_str() {
                                 let cleaned = content.replace('\n', "").replace('\r', "");
                                 if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, cleaned) {
-                                    let text_content = truncate_utf8_content(String::from_utf8_lossy(&decoded).to_string(), 100_000);
-                                    return Some(FileEntry { path, content: text_content });
+                                    let (text_content, start_line, end_line, total_lines, truncated) =
+                                        truncate_utf8_with_meta(String::from_utf8_lossy(&decoded).to_string(), 100_000);
+                                    return Some(FileEntry {
+                                        path,
+                                        content: text_content,
+                                        start_line: Some(start_line),
+                                        end_line: Some(end_line),
+                                        total_lines: Some(total_lines),
+                                        truncated: Some(truncated),
+                                    });
                                 }
                             }
                         }
@@ -827,6 +1149,7 @@ async fn fetch_github_repo(
         if let Ok(Some(entry)) = res { source_files.push(entry); }
     }
 
+    let total_tree_files = tree_paths.len();
     let mut is_truncated = false;
     if tree_paths.len() > 1000 { tree_paths.truncate(1000); is_truncated = true; }
 
@@ -840,8 +1163,16 @@ async fn fetch_github_repo(
             stargazers_count,
             topics,
             language,
+            tree_sha,
+            commit_sha: None,
+            fetched_at: Some(current_timestamp_iso_like()),
         },
-        tree: tree_paths, readme, dependencies, source_files, is_truncated,
+        tree: tree_paths,
+        total_tree_files: Some(total_tree_files),
+        readme,
+        dependencies,
+        source_files,
+        is_truncated,
     })
 }
 
@@ -1216,6 +1547,8 @@ pub fn run() {
             call_gemini_advanced,
             scan_local_repository,
             read_local_repo_files,
+            read_local_repo_range,
+            grep_local_repository,
             fetch_github_repo,
             is_ollama_running,
             start_ollama,

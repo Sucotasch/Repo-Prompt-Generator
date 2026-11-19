@@ -570,7 +570,7 @@ export function useGenerationPipeline(
             setStatus(`Summarizing ${file.path} with ${engineName}...`);
             const summary = await summarize(file.content);
             ensureActive();
-            summarizedSourceFiles.push({ path: file.path, content: summary });
+            summarizedSourceFiles.push({ path: file.path, content: summary, isSummary: true });
           }
         }
 
@@ -599,6 +599,7 @@ export function useGenerationPipeline(
               refSummarizedSourceFiles.push({
                 path: file.path,
                 content: summary,
+                isSummary: true,
               });
             }
           }
@@ -621,6 +622,7 @@ export function useGenerationPipeline(
       let finalModel = "";
       let requestedFiles: string[] = [];
       let fetchedFilesCount: number | undefined = undefined;
+      let grepQueries: string[] = [];
       const taskInstruction = settings.getSystemPrompt(
         settings.templateMode,
         settings.customInstruction,
@@ -732,6 +734,9 @@ export function useGenerationPipeline(
           requestedFiles = result.requestedFiles;
           fetchedFilesCount = result.fetchedFilesCount;
         }
+        if (result.grepQueries) {
+          grepQueries = result.grepQueries;
+        }
       }
 
       let metadata = `> **Prompt Generation Metadata**\n`;
@@ -779,6 +784,13 @@ export function useGenerationPipeline(
         }
         requestedFiles.forEach((file) => {
           metadata += `>   - \`${file}\`\n`;
+        });
+      }
+
+      if (grepQueries.length > 0) {
+        metadata += `> - **Agentic RAG Searches:** (${grepQueries.length})\n`;
+        grepQueries.forEach((query) => {
+          metadata += `>   - \`${query}\`\n`;
         });
       }
 

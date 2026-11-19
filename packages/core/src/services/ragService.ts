@@ -1,7 +1,9 @@
 import { EmbeddingCacheService } from "./embeddingCacheService";
+import { RepoSourceFile } from "./githubService";
 import { BM25, reciprocalRankFusion } from "../utils/hybridSearch";
 import { isTauri, tauriInvoke } from "../utils/tauriAdapter.ts";
-import { SemanticChunker } from "../utils/semanticChunker";
+import { stripTrailingTruncationNotice } from "../utils/pathFilters.ts";
+import { ChunkResult, SemanticChunker } from "../utils/semanticChunker";
 
 export interface RagChunk {
   path: string;
@@ -174,7 +176,7 @@ function cosineSimilarity(a: number[], b: number[]): number {
  * Splits text into chunks for RAG.
  * Maps legacy "linesPerChunk" to approximate tokens to preserve backward compatibility.
  */
-function chunkText(text: string, filePath: string, linesPerChunk: number = 30): { text: string; zone: string }[] {
+function chunkText(text: string, filePath: string, linesPerChunk: number = 30): ChunkResult[] {
   // Approximate conversion: 1 line ≈ 15 tokens.
   const maxTokens = linesPerChunk * 15;
   // 10% overlap to preserve context across boundaries
@@ -188,7 +190,7 @@ function chunkText(text: string, filePath: string, linesPerChunk: number = 30): 
  * Uses Hybrid Search (BM25 + Vector) and Embedding Caching.
  */
 export async function performRAG(
-  sourceFiles: { path: string; content: string }[],
+  sourceFiles: RepoSourceFile[],
   query: string,
   intent: string,
   ollamaUrl: string,
@@ -201,17 +203,10 @@ export async function performRAG(
   engine: "ollama" | "lmstudio" | "llamacpp" = "ollama",
   signal?: AbortSignal,
   onWarning?: (msg: string) => void,
-): Promise<{ path: string; content: string }[]> {
+): Promise<RepoSourceFile[]> {
   if (signal?.aborted) {
     throw new DOMException("Generation cancelled", "AbortError");
   }
-
-  const RAG_SYSTEM_INSTRUCTION = `
-Analyze the provided code snippets. When determining relevance:
-1. Focus on "Concrete Identifiers" (Variable names, Exported Classes, Route Definitions).
-2. Avoid "Abstract Sentiment" (The logic 'feels' like it's for security).
-3. Prioritize files containing the specific "Retrieval Keywords" provided in the query.
-`;
 
   onProgress?.("Generating query embedding (loading local model if needed)...");
   let queryEmbedding: number[] | null = null;
@@ -236,16 +231,32 @@ Analyze the provided code snippets. When determining relevance:
     onWarning?.(warnMsg);
   }
 
-  const allChunks: { path: string; content: string; zone: string; embedding?: number[] }[] =
-    [];
+  const allChunks: {
+    path: string;
+    content: string;
+    zone: string;
+    startLine: number;
+    endLine: number;
+    totalLines: number;
+    truncated?: boolean;
+    embedding?: number[];
+  }[] = [];
 
   for (const file of sourceFiles) {
-    const chunks = chunkText(file.content, file.path, chunkSize);
+    const cleanText = stripTrailingTruncationNotice(file.content).cleanText;
+    const baseStartLine = file.startLine ?? 1;
+    const rawLineCount = cleanText.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n").length;
+    const totalLines = file.totalLines ?? (baseStartLine + rawLineCount - 1);
+    const chunks = chunkText(cleanText, file.path, chunkSize);
     for (let i = 0; i < chunks.length; i++) {
       allChunks.push({
         path: `${file.path} (Part ${i + 1})`,
         content: chunks[i].text,
         zone: chunks[i].zone,
+        startLine: baseStartLine + chunks[i].startLine - 1,
+        endLine: baseStartLine + chunks[i].endLine - 1,
+        totalLines,
+        truncated: file.truncated,
       });
     }
   }
@@ -420,19 +431,27 @@ Analyze the provided code snippets. When determining relevance:
   }
 
   // Format the output
-  const formattedResults: { path: string; content: string }[] = [];
+  const formattedResults: RepoSourceFile[] = [];
   
   for (const [zone, results] of Object.entries(groupedResults)) {
-    // Add a zone header as a pseudo-file to structure the prompt
+    // Add a zone header as a pseudo-file to structure the prompt (marked as summary so line numbers aren't applied)
     formattedResults.push({
       path: `--- ZONE: ${zone.toUpperCase()} ---`,
-      content: `The following files belong to the ${zone} architectural zone.`
+      content: `The following files belong to the ${zone} architectural zone.`,
+      isSummary: true,
+      zone,
     });
     
     for (const r of results) {
       formattedResults.push({
         path: r.item.path,
-        content: `// RAG Hybrid Rank Score: ${(r.score * 100).toFixed(4)} (Strategy: ${searchStrategy}, Intent: ${intent})\n${r.item.content}`,
+        content: r.item.content,
+        startLine: r.item.startLine,
+        endLine: r.item.endLine,
+        totalLines: r.item.totalLines,
+        truncated: r.item.truncated || r.item.startLine > 1 || r.item.endLine < r.item.totalLines,
+        ragScore: Number((r.score * 100).toFixed(2)),
+        zone,
       });
     }
   }

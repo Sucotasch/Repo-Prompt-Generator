@@ -11,7 +11,10 @@
     "dev": "node --experimental-strip-types apps/web/server.ts",
     "build": "npm run build --workspaces",
     "start": "node --experimental-strip-types apps/web/server.ts",
-    "lint": "npm run lint --workspaces"
+    "lint": "npm run lint --workspaces",
+    "prepare:desktop-icons": "node scripts/prepare-desktop-icons.mjs",
+    "dev:desktop": "node scripts/build-desktop.mjs --dev",
+    "build:desktop": "node scripts/build-desktop.mjs"
   },
   "dependencies": {
     "@google/genai": "^3.3.0"

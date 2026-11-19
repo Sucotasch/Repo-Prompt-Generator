@@ -29,7 +29,9 @@ CRITICAL RULE: A design document without real file paths and existing code snipp
     "Call Flow Diagrams (Mermaid)",
   ],
   successMetrics: ["Path accuracy", "Diagram validity"],
-  evidenceRequirements: [],
+  evidenceRequirements: [
+    "Anchor every component, edge, and sequence step to [Verified] path:line references from visible files; label architectural extrapolations [Inferred] and omitted components [Not inspected].",
+  ],
   defaultSearchQuery:
     "interfaces, services, dependency injection, middleware, database schema, API definitions",
 };

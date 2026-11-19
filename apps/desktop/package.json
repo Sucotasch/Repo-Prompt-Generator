@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "prepare-icons": "node ../../scripts/prepare-desktop-icons.mjs",
     "tauri": "tauri",
     "lint": "echo 'No lint step required'"
   },

@@ -15,7 +15,10 @@ Highlight the use of functions that execute system commands (e.g., eval, exec, s
 Provide a detailed report in Markdown, ending with a Risk Assessment (Low/Medium/High) and a list of all suspicious fragments.`,
   deliverables: [],
   successMetrics: [],
-  evidenceRequirements: [],
+  evidenceRequirements: [
+    "Tag every finding and suspicious fragment as [Verified] (cite exact path:line from visible code), [Inferred], or [Not inspected].",
+    "Explicitly list any security-relevant files from the tree that were truncated or not included in context.",
+  ],
   defaultSearchQuery:
     "security vulnerabilities, authentication, authorization, cryptography, network requests, file access, user input validation",
 };

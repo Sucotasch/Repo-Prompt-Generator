@@ -19,7 +19,10 @@ Your audit must include:
 CRITICAL CONSTRAINT: All recommendations must focus on preserving current functionality with *minimal code intervention*. Do not suggest complete rewrites unless absolutely necessary. Format the output as a structured Markdown report.`,
   deliverables: [],
   successMetrics: [],
-  evidenceRequirements: [],
+  evidenceRequirements: [
+    "Tag every finding as [Verified] (cite exact path:line from numbered <repository_file_content>), [Inferred] (deduced from partial code/signatures/tree), or [Not inspected] (truncated or unseen file).",
+    "Never assert behavior inside truncated or omitted files without declaring what was not inspected.",
+  ],
   defaultSearchQuery:
     "core logic, complex algorithms, potential bugs, performance bottlenecks, architecture",
 };

@@ -17,7 +17,9 @@ Include:
 4. Examples of using the main functions.`,
   deliverables: [],
   successMetrics: [],
-  evidenceRequirements: [],
+  evidenceRequirements: [
+    "Document only capabilities, flags, and APIs confirmed in visible code ([Verified]); mark any unverified modules or truncated file sections as [Not inspected] rather than guessing.",
+  ],
   defaultSearchQuery:
     "main entry points, exported functions, public API, core architecture, high-level modules",
 };
